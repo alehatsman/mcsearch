@@ -30,6 +30,7 @@ mcsearch query <path> "..."    # query an indexed project from the terminal
 mcsearch status                # show indexed projects and endpoint health
 mcsearch nuke <path>           # delete the on-disk index for a project
 mcsearch mcp                   # run as an MCP server over stdio
+mcsearch watch <path>          # keep the index fresh as files change (fsnotify)
 ```
 
 ## Environment

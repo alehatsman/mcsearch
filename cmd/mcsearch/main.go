@@ -26,6 +26,7 @@ import (
 	"github.com/alehatsman/mcsearch/internal/mcp"
 	"github.com/alehatsman/mcsearch/internal/proj"
 	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/mcsearch/internal/watch"
 )
 
 func main() {
@@ -50,6 +51,8 @@ func main() {
 		err = cmdNuke(ctx, args)
 	case "mcp":
 		err = cmdMCP(ctx, args)
+	case "watch":
+		err = cmdWatch(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -71,6 +74,7 @@ func usage() {
   mcsearch status [<path>]          show endpoint health and project stats
   mcsearch nuke   <path>            delete the on-disk index for a project
   mcsearch mcp                      run as an MCP server over stdio
+  mcsearch watch  <path>            keep the index fresh as files change
 
 env:
   MCSEARCH_EMBED_URL      default http://127.0.0.1:8082
@@ -312,6 +316,45 @@ func cmdNuke(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("✓ removed %s\n", p.CacheDir)
 	return nil
+}
+
+// ─── watch ─────────────────────────────────────────────────────────────────
+
+func cmdWatch(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	verbose := fs.Bool("v", false, "verbose")
+	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("watch needs exactly one path argument")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return err
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		return err
+	}
+	st, err := store.Open(ctx, p.DBPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		return err
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose})
+	w := watch.New(ix, ig, p.Root, watch.Options{Debounce: *debounce, Verbose: *verbose})
+	fmt.Fprintf(os.Stderr, "mcsearch watching %s (debounce=%s)\n", p.Root, *debounce)
+	return w.Run(ctx)
 }
 
 // ─── mcp ───────────────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ module github.com/alehatsman/mcsearch
 go 1.26
 
 require (
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/modelcontextprotocol/go-sdk v1.4.0
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
 	modernc.org/sqlite v1.39.0
