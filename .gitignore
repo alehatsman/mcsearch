@@ -1,0 +1,21 @@
+/mcsearch
+/dist/
+*.exe
+*.so
+*.dylib
+*.dll
+
+# test artifacts
+*.out
+coverage.txt
+/scratch/
+/tmp/
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
