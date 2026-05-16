@@ -46,6 +46,12 @@ type Chunk struct {
 	StartLine int    // 1-based, inclusive
 	EndLine   int    // 1-based, inclusive
 	Content   string
+
+	// startByte/endByte mark the byte range this chunk covers in the
+	// original source. Used internally to compute orphan windows (the
+	// gaps between structural chunks); not persisted to the store.
+	startByte int
+	endByte   int
 }
 
 // langConfig pairs a tree-sitter language with the node kinds we want
@@ -137,16 +143,31 @@ func cppKinds() map[string]bool {
 
 // Chunks splits the given source into chunks. relPath is used only to
 // pick the language by extension and is stamped into each Chunk.
+//
+// For tree-sitter-supported languages we emit one chunk per recognized
+// structural declaration AND additional "orphan" window chunks covering
+// any byte range not claimed by a structural chunk — top-level
+// constants, vars, imports, file headers, trailing comments. Without
+// this hybrid pass, a file like `package foo; const X = 1; func F(){}`
+// would only index F and silently drop X.
 func Chunks(ctx context.Context, relPath string, src []byte) ([]Chunk, error) {
 	ext := strings.ToLower(filepath.Ext(relPath))
 	if cfg, ok := languages[ext]; ok {
 		out, err := treeChunks(ctx, relPath, src, cfg)
 		if err == nil && len(out) > 0 {
+			out = append(out, orphanWindows(relPath, src, out)...)
 			return out, nil
 		}
 		// tree-sitter empty or errored — fall through to line windows.
 	}
 	return windowChunks(relPath, src), nil
+}
+
+// covered tracks the byte ranges already claimed by a structural chunk.
+// Kept private to treeChunks; stored on the chunk for downstream
+// orphan-window calculation but not exposed.
+type covered struct {
+	start, end int
 }
 
 func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig) ([]Chunk, error) {
@@ -183,7 +204,9 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 			out = append(out, Chunk{
 				Path: relPath, Kind: kind,
 				StartLine: startLine, EndLine: endLine,
-				Content: body,
+				Content:   body,
+				startByte: startByte,
+				endByte:   endByte,
 			})
 			continue
 		}
@@ -192,10 +215,87 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 		for _, w := range windowOver(bodyLines, startLine) {
 			w.Path = relPath
 			w.Kind = kind + ":window"
+			w.startByte = startByte
+			w.endByte = endByte
 			out = append(out, w)
 		}
 	}
 	return out, nil
+}
+
+// orphanWindows emits window chunks over the parts of src that aren't
+// covered by any structural chunk. It's the safety net that catches
+// top-level non-function content (Go const/var, Rust statics, top-level
+// Python statements outside def/class, etc.).
+func orphanWindows(relPath string, src []byte, structural []Chunk) []Chunk {
+	if len(structural) == 0 {
+		return nil
+	}
+	// Sort the covered intervals by start byte.
+	type iv struct{ s, e int }
+	intervals := make([]iv, 0, len(structural))
+	for _, c := range structural {
+		if c.startByte == 0 && c.endByte == 0 {
+			continue
+		}
+		intervals = append(intervals, iv{c.startByte, c.endByte})
+	}
+	if len(intervals) == 0 {
+		return nil
+	}
+	// Sort by start; merge overlapping ranges.
+	for i := 0; i < len(intervals); i++ {
+		for j := i + 1; j < len(intervals); j++ {
+			if intervals[j].s < intervals[i].s {
+				intervals[i], intervals[j] = intervals[j], intervals[i]
+			}
+		}
+	}
+	merged := intervals[:1]
+	for _, x := range intervals[1:] {
+		last := &merged[len(merged)-1]
+		if x.s <= last.e {
+			if x.e > last.e {
+				last.e = x.e
+			}
+			continue
+		}
+		merged = append(merged, x)
+	}
+
+	var out []Chunk
+	cursor := 0
+	for _, m := range merged {
+		if m.s > cursor {
+			out = append(out, orphanRange(relPath, src, cursor, m.s)...)
+		}
+		cursor = m.e
+	}
+	if cursor < len(src) {
+		out = append(out, orphanRange(relPath, src, cursor, len(src))...)
+	}
+	return out
+}
+
+// orphanRange window-chunks src[start:end], stamping chunks with the
+// caller's path and kind="orphan". Empty/whitespace-only ranges yield
+// no chunks. The line numbers are absolute (1-based) within src.
+func orphanRange(relPath string, src []byte, start, end int) []Chunk {
+	if start >= end {
+		return nil
+	}
+	slice := string(src[start:end])
+	if strings.TrimSpace(slice) == "" {
+		return nil
+	}
+	firstLine := lineOf(src, start)
+	lines := strings.Split(slice, "\n")
+	wins := windowOver(lines, firstLine)
+	for i := range wins {
+		wins[i].Path = relPath
+		wins[i].Kind = "orphan"
+	}
+	return wins
 }
 
 // backfillComments walks backward from start to absorb a contiguous block
@@ -281,8 +381,15 @@ func windowOver(lines []string, firstLineNumber int) []Chunk {
 }
 
 func halveAndChunk(lines []string, firstLineNumber int) []Chunk {
-	if len(lines) <= 1 {
+	if len(lines) == 0 {
 		return nil
+	}
+	if len(lines) == 1 {
+		// A single oversized line (typical: minified JS bundle, generated
+		// parser, single-line JSON config) cannot be split further on a
+		// newline boundary. Fall back to byte-window slicing so we don't
+		// silently lose the content from the index.
+		return byteWindows(lines[0], firstLineNumber)
 	}
 	mid := len(lines) / 2
 	first := lines[:mid]
@@ -305,6 +412,34 @@ func halveAndChunk(lines []string, firstLineNumber int) []Chunk {
 		})
 	} else {
 		out = append(out, halveAndChunk(second, firstLineNumber+len(first))...)
+	}
+	return out
+}
+
+// byteWindows splits a single long line into MaxBytes-sized chunks. All
+// chunks share the same start_line/end_line since they came from the
+// same source line. Empty inputs yield no chunks. Cut points are
+// snapped forward to UTF-8 boundaries so a multi-byte rune is never
+// split.
+func byteWindows(line string, lineNumber int) []Chunk {
+	if strings.TrimSpace(line) == "" {
+		return nil
+	}
+	var out []Chunk
+	for i := 0; i < len(line); {
+		j := i + MaxBytes
+		if j > len(line) {
+			j = len(line)
+		}
+		for j < len(line) && (line[j]&0xC0) == 0x80 {
+			j++
+		}
+		out = append(out, Chunk{
+			StartLine: lineNumber,
+			EndLine:   lineNumber,
+			Content:   line[i:j],
+		})
+		i = j
 	}
 	return out
 }

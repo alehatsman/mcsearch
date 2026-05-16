@@ -31,8 +31,18 @@ type Store struct {
 }
 
 // Open or create the SQLite file at path and run migrations.
+//
+// `busy_timeout(5000)` lets concurrent writers (e.g. `mcsearch index`
+// fired while `mcsearch watch` is also re-indexing) wait up to 5 s for
+// the writer lock instead of immediately returning SQLITE_BUSY. Without
+// it, racing index runs both crash with a leaked DDL error.
 func Open(ctx context.Context, path string) (*Store, error) {
-	db, err := sql.Open("sqlite", "file:"+path+"?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite",
+		"file:"+path+
+			"?_pragma=journal_mode(WAL)"+
+			"&_pragma=synchronous(NORMAL)"+
+			"&_pragma=busy_timeout(5000)"+
+			"&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

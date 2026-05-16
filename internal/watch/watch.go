@@ -35,10 +35,12 @@ type Watcher struct {
 	ig      *ignore.Matcher
 	root    string
 	opts    Options
+	ctx     context.Context // set by Run, used by flush
 
-	mu    sync.Mutex
-	dirty bool
-	timer *time.Timer
+	mu       sync.Mutex
+	dirty    bool   // events have arrived since the last successful flush
+	running  bool   // a flush goroutine is currently running
+	timer    *time.Timer
 }
 
 func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watcher {
@@ -51,6 +53,7 @@ func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watc
 // Run starts the watch loop and blocks until ctx is cancelled or an
 // unrecoverable error occurs.
 func (w *Watcher) Run(ctx context.Context) error {
+	w.ctx = ctx
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -130,20 +133,45 @@ func (w *Watcher) markDirty() {
 
 func (w *Watcher) flush() {
 	w.mu.Lock()
+	if w.running {
+		// Another goroutine is already re-indexing. Leave dirty=true so
+		// that the in-flight flush re-runs after it finishes. Without
+		// this, two flushes would race on the SQLite writer lock.
+		w.mu.Unlock()
+		return
+	}
 	if !w.dirty {
 		w.mu.Unlock()
 		return
 	}
 	w.dirty = false
+	w.running = true
 	w.mu.Unlock()
 
-	start := time.Now()
-	if err := w.indexer.Run(context.Background()); err != nil {
-		log.Printf("watch: re-index failed: %v", err)
-		return
-	}
-	if w.opts.Verbose {
-		log.Printf("watch: re-indexed in %s", time.Since(start).Round(time.Millisecond))
+	for {
+		start := time.Now()
+		err := w.indexer.Run(w.ctx)
+		if err != nil {
+			if errors.Is(err, context.Canceled) {
+				// Shutdown initiated. Stop quietly.
+			} else {
+				log.Printf("watch: re-index failed: %v", err)
+			}
+		} else if w.opts.Verbose {
+			log.Printf("watch: re-indexed in %s", time.Since(start).Round(time.Millisecond))
+		}
+
+		// If events landed during the run, re-flush in the same goroutine
+		// rather than spawning another one. This serializes work and
+		// guarantees no concurrent indexers.
+		w.mu.Lock()
+		if !w.dirty || w.ctx.Err() != nil {
+			w.running = false
+			w.mu.Unlock()
+			return
+		}
+		w.dirty = false
+		w.mu.Unlock()
 	}
 }
 
