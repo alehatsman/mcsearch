@@ -170,27 +170,56 @@ millisecond.
 
 ## Multi-worktree workflow
 
-Each `mcsearch` index is keyed by `sha256(realpath(project_root))`, so a
-fresh `git worktree add ../proj-feature` (or a sibling clone) looks like
-a brand-new project even though most of the content is identical. Use
-`mcsearch clone` to seed the new worktree's index from an already-indexed
-sibling — chunks are addressed by `(relative path, content sha1)`, so
-anything unchanged between the two trees comes along for free:
+Each `mcsearch` index is keyed by `sha256(realpath(project_root))`, so
+`git worktree add ../proj-feature` looks like a brand-new project even
+though the trees are nearly identical. `mcsearch clone` seeds the new
+worktree's index from a sibling — chunks are keyed by
+`(relative path, content sha1)`, so anything unchanged between the two
+trees rides along for free. Captured live against this repo:
 
-```bash
-# Original tree, already indexed.
-mcsearch index ~/proj
+```console
+$ # main checkout already indexed: 221 chunks.
+$ git worktree add /tmp/mcsearch-feature -B feature/foo
+Preparing worktree (new branch 'feature/foo')
+HEAD is now at bca65ea docs: README demo section with real captured output
 
-# New worktree on a feature branch.
-git worktree add ~/proj-feature feature/foo
-mcsearch clone ~/proj ~/proj-feature      # copy the SQLite index
-mcsearch index ~/proj-feature             # reconcile — only files that
-                                          # diverged get re-embedded
+$ mcsearch status /tmp/mcsearch-feature
+project: /tmp/mcsearch-feature
+  no index — run `mcsearch index /tmp/mcsearch-feature`
+
+$ mcsearch clone . /tmp/mcsearch-feature
+✓ cloned /home/aleh/projects/mcsearch → /tmp/mcsearch-feature
+  next: `mcsearch index /tmp/mcsearch-feature` will reconcile any files
+        that differ between the two trees (incremental — only changed
+        chunks are re-embedded).
+
+$ mcsearch status /tmp/mcsearch-feature
+project: /tmp/mcsearch-feature
+  chunks: 221  files: 21  dim: 2560  last_indexed: 2026-05-16T18:47:58+02:00
 ```
+
+The clone is a `cp` of one SQLite file — ~5 ms in practice. Diverge the
+worktree, then run `mcsearch index` to reconcile:
+
+```console
+$ echo 'const FeatureXFlag = true' >> /tmp/mcsearch-feature/internal/index/index.go
+$ mcsearch index -v /tmp/mcsearch-feature
+INFO msg="pruned stale chunks (files removed since last index)" count=5
+INFO msg=indexed chunks_seen=226 files_fast_path=0 embedded=10 pruned=5 skipped=0
+✓ indexed /tmp/mcsearch-feature
+  chunks: 226  files: 21  dim: 2560
+```
+
+`embedded=10` is the new chunks for the one file that changed (a few
+window chunks shift when the file grows). The other 20 files were
+content-sha matched against the cloned index and reused without an
+embedding call — that's the whole point. On a real branch with a few
+edits this turns a multi-minute first index into seconds.
 
 The two indexes remain independent after the clone; subsequent
 `mcsearch index` / `mcsearch watch` on each path only touches that
-project's cache directory.
+project's cache directory. Pass `--force` to `clone` to overwrite an
+existing destination index, or `mcsearch nuke <dst>` first.
 
 ## Embedding contract
 
