@@ -12,6 +12,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -53,6 +54,8 @@ func main() {
 		err = cmdMCP(ctx, args)
 	case "watch":
 		err = cmdWatch(ctx, args)
+	case "clone":
+		err = cmdClone(ctx, args)
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -75,6 +78,10 @@ func usage() {
   mcsearch nuke   <path>            delete the on-disk index for a project
   mcsearch mcp                      run as an MCP server over stdio
   mcsearch watch  <path>            keep the index fresh as files change
+  mcsearch clone  <src> <dst>       seed dst's index from src's (e.g. for a
+                                    new git worktree); follow with
+                                    `+"`mcsearch index <dst>`"+` to reconcile
+                                    any chunks that differ between the two.
 
 env:
   MCSEARCH_EMBED_URL      default http://127.0.0.1:8082
@@ -183,6 +190,12 @@ func cmdQuery(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if _, err := os.Stat(p.DBPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no index for %s — run `mcsearch index %s` first", p.Root, p.Root)
+		}
+		return err
+	}
 	st, err := store.Open(ctx, p.DBPath)
 	if err != nil {
 		return err
@@ -238,6 +251,13 @@ func cmdStatus(ctx context.Context, args []string) error {
 		// Per-project status
 		p, err := proj.Resolve(args[0], base)
 		if err != nil {
+			return err
+		}
+		if _, err := os.Stat(p.DBPath); err != nil {
+			if os.IsNotExist(err) {
+				fmt.Printf("project: %s\n  no index — run `mcsearch index %s`\n", p.Root, p.Root)
+				return nil
+			}
 			return err
 		}
 		st, err := store.Open(ctx, p.DBPath)
@@ -355,6 +375,84 @@ func cmdWatch(ctx context.Context, args []string) error {
 	w := watch.New(ix, ig, p.Root, watch.Options{Debounce: *debounce, Verbose: *verbose})
 	fmt.Fprintf(os.Stderr, "mcsearch watching %s (debounce=%s)\n", p.Root, *debounce)
 	return w.Run(ctx)
+}
+
+// ─── clone ─────────────────────────────────────────────────────────────────
+
+// cmdClone seeds dst's per-project cache from src's. Useful when the same
+// repository is checked out in multiple locations (e.g. git worktrees,
+// branch-per-folder workflows). Chunks are keyed by (relative path,
+// content sha1), so the copied index is correct for any file that exists
+// at the same path with the same content in dst; differing files get
+// reconciled on the next `mcsearch index <dst>` (incremental — only
+// changed chunks are re-embedded).
+func cmdClone(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
+	force := fs.Bool("force", false, "overwrite dst's index if it already exists")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("clone needs <src-path> <dst-path>")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	src, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return fmt.Errorf("resolve src: %w", err)
+	}
+	dst, err := proj.Resolve(rest[1], base)
+	if err != nil {
+		return fmt.Errorf("resolve dst: %w", err)
+	}
+	if src.ID == dst.ID {
+		return fmt.Errorf("src and dst resolve to the same project root (%s); nothing to clone", src.Root)
+	}
+	if _, err := os.Stat(src.DBPath); err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("src has no index at %s — run `mcsearch index %s` first", src.DBPath, src.Root)
+		}
+		return err
+	}
+	if _, err := os.Stat(dst.DBPath); err == nil {
+		if !*force {
+			return fmt.Errorf("dst already has an index at %s — pass --force to overwrite or `mcsearch nuke %s` first", dst.DBPath, dst.Root)
+		}
+		if err := os.RemoveAll(dst.CacheDir); err != nil {
+			return fmt.Errorf("remove existing dst cache: %w", err)
+		}
+	}
+	if err := dst.EnsureCacheDir(); err != nil {
+		return err
+	}
+	// Copy index.db. SQLite WAL files are not copied — they're either
+	// already checkpointed (idle index) or will be rebuilt on next open.
+	if err := copyFile(src.DBPath, dst.DBPath); err != nil {
+		return fmt.Errorf("copy index: %w", err)
+	}
+	fmt.Printf("✓ cloned %s → %s\n", src.Root, dst.Root)
+	fmt.Printf("  next: `mcsearch index %s` will reconcile any files that differ between the two trees (incremental — only changed chunks are re-embedded).\n", dst.Root)
+	return nil
+}
+
+func copyFile(srcPath, dstPath string) error {
+	in, err := os.Open(srcPath)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dstPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ─── mcp ───────────────────────────────────────────────────────────────────

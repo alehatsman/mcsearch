@@ -1,0 +1,14 @@
+/mcsearch
+/dist/
+.git/
+.github/
+*.md
+!README.md
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+.gitignore
+.dockerignore
+Dockerfile

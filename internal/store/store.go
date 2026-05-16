@@ -4,6 +4,12 @@
 // float32 BLOBs. Search is brute-force cosine similarity in Go — fast
 // enough for <100 k chunks per project. Swap the search path for an HNSW
 // index later without changing the rest of the codebase.
+//
+// Timestamps (last_seen_at, last_indexed_at) are stored as Unix
+// nanoseconds rather than milliseconds, so two index runs that complete
+// within the same millisecond produce distinct cutoffs — important
+// because PruneUnseen relies on strict-less-than comparison to detect
+// stale rows.
 package store
 
 import (
@@ -104,7 +110,7 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 		var ts int64
 		fmt.Sscanf(v, "%d", &ts)
 		if ts > 0 {
-			st.LastIndex = time.UnixMilli(ts)
+			st.LastIndex = time.Unix(0, ts)
 		}
 	}
 	return st, nil
@@ -116,7 +122,7 @@ func (s *Store) SetLastIndexedAt(ctx context.Context, t time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO meta(key,value) VALUES('last_indexed_at', ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		fmt.Sprintf("%d", t.UnixMilli()))
+		fmt.Sprintf("%d", t.UnixNano()))
 	return err
 }
 
@@ -165,7 +171,7 @@ func (s *Store) Upsert(ctx context.Context, path, kind string, startLine, endLin
 		   content=excluded.content,
 		   vec=excluded.vec,
 		   last_seen_at=excluded.last_seen_at`,
-		path, kind, startLine, endLine, contentSHA, content, blob, now.UnixMilli())
+		path, kind, startLine, endLine, contentSHA, content, blob, now.UnixNano())
 	return err
 }
 
@@ -174,7 +180,7 @@ func (s *Store) Upsert(ctx context.Context, path, kind string, startLine, endLin
 func (s *Store) TouchSeen(ctx context.Context, path, contentSHA string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE chunks SET last_seen_at=? WHERE path=? AND content_sha1=?`,
-		now.UnixMilli(), path, contentSHA)
+		now.UnixNano(), path, contentSHA)
 	return err
 }
 
@@ -182,7 +188,7 @@ func (s *Store) TouchSeen(ctx context.Context, path, contentSHA string, now time
 // of a re-index to remove stale rows for files that disappeared.
 func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM chunks WHERE last_seen_at < ?`, cutoff.UnixMilli())
+		`DELETE FROM chunks WHERE last_seen_at < ?`, cutoff.UnixNano())
 	if err != nil {
 		return 0, err
 	}

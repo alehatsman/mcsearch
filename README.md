@@ -27,10 +27,13 @@ also wired up.
 ```bash
 mcsearch index <path>          # index a project (or re-index incrementally)
 mcsearch query <path> "..."    # query an indexed project from the terminal
-mcsearch status                # show indexed projects and endpoint health
+mcsearch status [<path>]       # show indexed projects and endpoint health
 mcsearch nuke <path>           # delete the on-disk index for a project
 mcsearch mcp                   # run as an MCP server over stdio
 mcsearch watch <path>          # keep the index fresh as files change (fsnotify)
+mcsearch clone <src> <dst>     # seed dst's index from src's (e.g. for a new
+                               # git worktree); follow with `mcsearch index
+                               # <dst>` to reconcile any chunks that differ
 ```
 
 ## Environment
@@ -49,8 +52,9 @@ One SQLite file per project at
 `$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`. Schema:
 
 ```
-projects(id, root, last_indexed_at)
-chunks(id, path, kind, start_line, end_line, content_sha1, content, vec BLOB, last_seen_at)
+meta(key, value)                                                            -- dim, last_indexed_at
+chunks(id, path, kind, start_line, end_line, content_sha1, content,
+       vec BLOB, last_seen_at)                                              -- UNIQUE(path, content_sha1)
 ```
 
 Vectors are stored as packed `float32` BLOBs. Query is brute-force cosine
@@ -58,6 +62,34 @@ similarity over all chunks — fine at <100 k chunks per project, ~30–80 ms
 on a modern laptop. If a project outgrows this, swap the store backend for
 an HNSW index (e.g. via `hnswlib-go` or LanceDB) without changing the rest
 of the architecture.
+
+`last_seen_at` is stored in Unix nanoseconds so the strict-less-than prune
+filter correctly distinguishes two index runs that complete in the same
+millisecond.
+
+## Multi-worktree workflow
+
+Each `mcsearch` index is keyed by `sha256(realpath(project_root))`, so a
+fresh `git worktree add ../proj-feature` (or a sibling clone) looks like
+a brand-new project even though most of the content is identical. Use
+`mcsearch clone` to seed the new worktree's index from an already-indexed
+sibling — chunks are addressed by `(relative path, content sha1)`, so
+anything unchanged between the two trees comes along for free:
+
+```bash
+# Original tree, already indexed.
+mcsearch index ~/proj
+
+# New worktree on a feature branch.
+git worktree add ~/proj-feature feature/foo
+mcsearch clone ~/proj ~/proj-feature      # copy the SQLite index
+mcsearch index ~/proj-feature             # reconcile — only files that
+                                          # diverged get re-embedded
+```
+
+The two indexes remain independent after the clone; subsequent
+`mcsearch index` / `mcsearch watch` on each path only touches that
+project's cache directory.
 
 ## Embedding contract
 
@@ -88,6 +120,32 @@ fall back to grep without crashing.
 `vendor/`, `.venv/`, `__pycache__/`, `target/`, `dist/`, `build/`. Files
 matching common secret patterns in their first 4 KB are skipped at index
 time with a warning.
+
+## Docker
+
+A self-contained image is provided. Tree-sitter requires CGO, so the
+build stage uses Alpine's musl toolchain to produce a fully static binary
+that runs on `distroless/static` (final image ~36 MB, no shell).
+
+```bash
+docker build -t mcsearch .
+
+# One-shot index into a named volume.
+docker run --rm \
+    -v "$PWD":/work:ro -v mcsearch-cache:/cache \
+    -e MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
+    mcsearch index /work
+
+# Run as an MCP server over stdio (the default CMD).
+docker run --rm -i \
+    -v "$PWD":/work:ro -v mcsearch-cache:/cache \
+    -e MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
+    mcsearch
+```
+
+If you'd rather bind-mount a host directory for `/cache`, pass
+`--user "$(id -u):$(id -g)"` — the image runs as the distroless `nonroot`
+uid (65532) and otherwise can't write to a host-owned mount point.
 
 ## License
 

@@ -179,3 +179,45 @@ func Beta() string { return "beta" }
 		t.Errorf("expected chunk count to drop after removing alpha.go; got %d (was %d)", stats3.Chunks, before)
 	}
 }
+
+// TestPruneAtSameMillisecond exercises the regression where two successive
+// Run() calls completing inside the same millisecond used to share a
+// last_seen_at value, defeating the strict-less-than PruneUnseen filter.
+// With nanosecond timestamps each call must produce a distinct cutoff.
+func TestPruneAtSameMillisecond(t *testing.T) {
+	srv := fakeEmbedServer(t)
+	defer srv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "a.go"),
+		"package main\nfunc A() {}\n")
+	writeFile(t, filepath.Join(projDir, "b.go"),
+		"package main\nfunc B() {}\n")
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(srv.URL, "fake", 8, 5*time.Second)
+	ix := New(p, st, em, ig, Options{})
+
+	if err := ix.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(projDir, "a.go")); err != nil {
+		t.Fatal(err)
+	}
+	// Re-run in the same millisecond as the first. With nanosecond
+	// precision the second cutoff strictly succeeds the first, so the
+	// stale chunks for a.go must be pruned.
+	if err := ix.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats, _ := st.Stats(ctx)
+	if stats.Files != 1 {
+		t.Errorf("expected 1 file after pruning a.go; got %d", stats.Files)
+	}
+}
