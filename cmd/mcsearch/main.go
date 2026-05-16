@@ -3,13 +3,17 @@
 // Subcommands:
 //   index <path>            Build or refresh the per-project index.
 //   query <path> <query...> Search an existing index from the terminal.
-//   status                  Show endpoint health and indexed projects.
+//   status [<path>]         Show endpoint health and indexed projects.
 //   nuke <path>             Delete the on-disk index for a project.
+//   watch <path>            Keep the index fresh as files change.
+//   clone <src> <dst>       Seed dst's index from src's (worktrees).
 //   mcp                     Run as an MCP server over stdio.
+//   version                 Print the build version.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -56,6 +60,9 @@ func main() {
 		err = cmdWatch(ctx, args)
 	case "clone":
 		err = cmdClone(ctx, args)
+	case "version", "-V", "--version":
+		fmt.Println(mcp.Version)
+		return
 	case "-h", "--help", "help":
 		usage()
 		return
@@ -65,6 +72,18 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
+		// `-h` returns flag.ErrHelp via flag.ContinueOnError. The FlagSet
+		// already printed its usage block; suppress the redundant
+		// "flag: help requested" line and exit cleanly.
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
+		// SIGINT/SIGTERM cancel ctx; report a friendlier exit (130 is
+		// the conventional shell code for SIGINT).
+		if errors.Is(err, context.Canceled) {
+			fmt.Fprintln(os.Stderr, "interrupted")
+			os.Exit(130)
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -181,6 +200,9 @@ func cmdQuery(ctx context.Context, args []string) error {
 	}
 	path := rest[0]
 	q := strings.Join(rest[1:], " ")
+	if strings.TrimSpace(q) == "" {
+		return fmt.Errorf("query is empty — pass a natural-language description or code fragment")
+	}
 
 	base, err := indexDir()
 	if err != nil {
@@ -232,6 +254,11 @@ func truncate(s string, n int) string {
 // ─── status ────────────────────────────────────────────────────────────────
 
 func cmdStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
 	em := newEmbedClient()
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
@@ -241,15 +268,16 @@ func cmdStatus(ctx context.Context, args []string) error {
 		fmt.Printf("embed endpoint: %s   ok\n", em.BaseURL)
 	}
 	fmt.Printf("model: %s\n", em.Model)
+	fmt.Printf("mcsearch version: %s\n", mcp.Version)
 
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
 	fmt.Printf("index dir: %s\n", base)
-	if len(args) == 1 {
+	if len(rest) == 1 {
 		// Per-project status
-		p, err := proj.Resolve(args[0], base)
+		p, err := proj.Resolve(rest[0], base)
 		if err != nil {
 			return err
 		}
@@ -291,14 +319,19 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if _, err := os.Stat(dbPath); err != nil {
 			continue
 		}
+		short := e.Name()
+		if len(short) > 12 {
+			short = short[:12]
+		}
 		st, err := store.Open(ctx, dbPath)
 		if err != nil {
+			fmt.Printf("  %s  CORRUPT (%v)\n", short, err)
 			continue
 		}
 		stats, _ := st.Stats(ctx)
 		st.Close()
 		fmt.Printf("  %s  chunks=%d files=%d dim=%d  last=%s\n",
-			e.Name()[:12], stats.Chunks, stats.Files, stats.Dim, formatTime(stats.LastIndex))
+			short, stats.Chunks, stats.Files, stats.Dim, formatTime(stats.LastIndex))
 	}
 	return nil
 }
@@ -313,20 +346,25 @@ func formatTime(t time.Time) string {
 // ─── nuke ──────────────────────────────────────────────────────────────────
 
 func cmdNuke(ctx context.Context, args []string) error {
-	if len(args) != 1 {
+	fs := flag.NewFlagSet("nuke", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
 		return fmt.Errorf("nuke needs exactly one path argument")
 	}
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(args[0], base)
+	p, err := proj.Resolve(rest[0], base)
 	if err != nil {
 		return err
 	}
 	if _, err := os.Stat(p.CacheDir); err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("nothing to remove: %s does not exist\n", p.CacheDir)
+			fmt.Printf("nothing to remove: no index for %s\n", p.Root)
 			return nil
 		}
 		return err
@@ -334,7 +372,7 @@ func cmdNuke(ctx context.Context, args []string) error {
 	if err := os.RemoveAll(p.CacheDir); err != nil {
 		return err
 	}
-	fmt.Printf("✓ removed %s\n", p.CacheDir)
+	fmt.Printf("✓ removed index for %s\n", p.Root)
 	return nil
 }
 

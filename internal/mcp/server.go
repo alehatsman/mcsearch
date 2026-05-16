@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/embed"
@@ -50,6 +51,9 @@ type SearchOutput struct {
 
 func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in SearchInput) (*sdk.CallToolResult, SearchOutput, error) {
 	out := SearchOutput{}
+	if strings.TrimSpace(in.Query) == "" {
+		return nil, SearchOutput{Status: "error", Hint: "query is empty — pass a natural-language description or code fragment"}, nil
+	}
 	root := in.ProjectRoot
 	if root == "" {
 		wd, err := os.Getwd()
@@ -148,6 +152,7 @@ type StatusOutput struct {
 	Endpoint  string          `json:"endpoint"`
 	Reachable bool            `json:"reachable"`
 	Model     string          `json:"model"`
+	Version   string          `json:"version"`
 	IndexDir  string          `json:"index_dir"`
 	Projects  []ProjectStatus `json:"projects,omitempty"`
 	Error     string          `json:"error,omitempty"`
@@ -157,6 +162,7 @@ func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusI
 	out := StatusOutput{
 		Endpoint: s.EmbedClient.BaseURL,
 		Model:    s.EmbedClient.Model,
+		Version:  Version,
 		IndexDir: s.IndexDir,
 	}
 	hctx, cancel := context.WithTimeout(ctx, 3*time.Second)

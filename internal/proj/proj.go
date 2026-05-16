@@ -19,19 +19,23 @@ type Project struct {
 }
 
 // Resolve canonicalizes path and returns the project identity. The path
-// must exist and be a directory.
+// must exist and be a directory. Errors are phrased for direct display
+// to the user (no Go-internals like "eval symlinks: lstat …").
 func Resolve(path, baseCacheDir string) (*Project, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return nil, fmt.Errorf("abs: %w", err)
+		return nil, fmt.Errorf("invalid path %q: %w", path, err)
 	}
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		return nil, fmt.Errorf("eval symlinks: %w", err)
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("path does not exist: %s", abs)
+		}
+		return nil, fmt.Errorf("resolve %s: %w", abs, err)
 	}
 	st, err := os.Stat(real)
 	if err != nil {
-		return nil, fmt.Errorf("stat: %w", err)
+		return nil, fmt.Errorf("stat %s: %w", real, err)
 	}
 	if !st.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", real)

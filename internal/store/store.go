@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -194,6 +195,22 @@ func (s *Store) TouchSeen(ctx context.Context, path, contentSHA string, now time
 	return err
 }
 
+// TouchPath bumps last_seen_at for every chunk of a single file in one
+// statement. Used by the mtime fast-path: when a file hasn't changed
+// since the previous successful index, we don't need to read it or
+// re-chunk it — we just have to mark its chunks live so PruneUnseen
+// doesn't drop them. Returns the number of rows touched (0 means the
+// file has no chunks yet — caller must fall back to the slow path).
+func (s *Store) TouchPath(ctx context.Context, path string, now time.Time) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE chunks SET last_seen_at=? WHERE path=?`,
+		now.UnixNano(), path)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // PruneUnseen deletes chunks last seen before `cutoff`. Call at the end
 // of a re-index to remove stale rows for files that disappeared.
 func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error) {
@@ -221,8 +238,13 @@ type Hit struct {
 	Score     float32 // cosine similarity, 1.0 == identical direction
 }
 
-// Search returns the top-k chunks by cosine similarity to query. Brute
-// force across the whole table; cheap at <100 k rows.
+// Search returns the top-k chunks by cosine similarity to query.
+//
+// Two-pass: first scan loads only (id, vec) to compute scores, picks
+// the top-k IDs, and the second scan fetches path/kind/line/content
+// for those IDs only. The naive single-pass version loads every
+// chunk's content text (often KB per row) just to discard most of it —
+// at 100 k chunks × 1 KB that's ~100 MB of throwaway I/O per query.
 func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, error) {
 	if k <= 0 {
 		k = 8
@@ -234,43 +256,99 @@ func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, erro
 	if qNorm == 0 {
 		return nil, fmt.Errorf("query vector is zero")
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, kind, start_line, end_line, content, vec FROM chunks`)
+
+	type scored struct {
+		id    int64
+		score float32
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-
-	hits := make([]Hit, 0, 1024)
+	scores := make([]scored, 0, 1024)
+	// Reuse one decode buffer across rows so we don't allocate a new
+	// []float32 per chunk in the hot loop.
+	var vbuf []float32
 	for rows.Next() {
-		var h Hit
+		var id int64
 		var blob []byte
-		if err := rows.Scan(&h.Path, &h.Kind, &h.StartLine, &h.EndLine, &h.Content, &blob); err != nil {
+		if err := rows.Scan(&id, &blob); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		v, err := decodeVec(blob)
-		if err != nil {
-			return nil, err
+		if len(blob)%4 != 0 {
+			rows.Close()
+			return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
+		}
+		need := len(blob) / 4
+		if cap(vbuf) < need {
+			vbuf = make([]float32, need)
+		} else {
+			vbuf = vbuf[:need]
+		}
+		for i := range vbuf {
+			vbuf[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
 		}
 		dot := float32(0)
+		var vNormSq float32
 		for i, q := range query {
-			dot += q * v[i]
+			vi := vbuf[i]
+			dot += q * vi
+			vNormSq += vi * vi
 		}
-		vNorm := norm(v)
-		if vNorm == 0 {
+		if vNormSq == 0 {
 			continue
 		}
-		h.Score = dot / (qNorm * vNorm)
-		hits = append(hits, h)
+		score := dot / (qNorm * float32(math.Sqrt(float64(vNormSq))))
+		scores = append(scores, scored{id, score})
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
-	if len(hits) > k {
-		hits = hits[:k]
+	if len(scores) == 0 {
+		return nil, nil
 	}
-	return hits, nil
+	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
+	if len(scores) > k {
+		scores = scores[:k]
+	}
+
+	// Second pass: fetch content for the top-k IDs only.
+	ids := make([]any, len(scores))
+	for i, s := range scores {
+		ids[i] = s.id
+	}
+	placeholders := strings.Repeat("?,", len(ids))
+	placeholders = placeholders[:len(placeholders)-1]
+	q := `SELECT id, path, kind, start_line, end_line, content FROM chunks WHERE id IN (` + placeholders + `)`
+	rows2, err := s.db.QueryContext(ctx, q, ids...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows2.Close()
+	byID := make(map[int64]Hit, len(scores))
+	for rows2.Next() {
+		var id int64
+		var h Hit
+		if err := rows2.Scan(&id, &h.Path, &h.Kind, &h.StartLine, &h.EndLine, &h.Content); err != nil {
+			return nil, err
+		}
+		byID[id] = h
+	}
+	if err := rows2.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Hit, 0, len(scores))
+	for _, s := range scores {
+		h, ok := byID[s.id]
+		if !ok {
+			continue
+		}
+		h.Score = s.score
+		out = append(out, h)
+	}
+	return out, nil
 }
 
 func norm(v []float32) float32 {

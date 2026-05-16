@@ -44,13 +44,26 @@ func New(p *proj.Project, st *store.Store, em *embed.Client, ig *ignore.Matcher,
 // Run walks the project, chunks new/changed files, embeds, and upserts.
 // Files unchanged since the last index get their last_seen_at bumped but
 // are not re-embedded. Stale rows (files removed) are pruned at the end.
+//
+// Mtime fast-path: if a file's mtime is <= the previous run's
+// last_indexed_at, we know the content is identical to what we
+// processed last time. We TouchPath() all of its chunks in one UPDATE
+// and skip the read+parse+SHA work entirely — turning the no-change
+// re-index from O(files × parse) into O(files × stat + 1 UPDATE).
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	var (
-		toEmbed []pending
-		seen    int
-		skipped int
+		toEmbed     []pending
+		seen        int
+		skipped     int
+		mtimeSkips  int
 	)
+
+	prevStats, statsErr := ix.Store.Stats(ctx)
+	var lastIndexed time.Time
+	if statsErr == nil {
+		lastIndexed = prevStats.LastIndex
+	}
 
 	err := filepath.WalkDir(ix.Proj.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -58,6 +71,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				log.Printf("walk: %s: %v", path, err)
 			}
 			return nil
+		}
+		// Honour context cancellation between files — useful for Ctrl-C
+		// in CLI mode and for shutdown in watch mode.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
 		}
 		rel, _ := filepath.Rel(ix.Proj.Root, path)
 		if rel == "." {
@@ -85,6 +103,17 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				log.Printf("skip %s (too large: %d bytes)", rel, info.Size())
 			}
 			return nil
+		}
+		// Mtime fast-path: file hasn't changed since the last successful
+		// index → just bump last_seen_at on its existing chunks.
+		if !lastIndexed.IsZero() && !info.ModTime().After(lastIndexed) {
+			rows, terr := ix.Store.TouchPath(ctx, rel, startTime)
+			if terr == nil && rows > 0 {
+				seen += int(rows)
+				mtimeSkips++
+				return nil
+			}
+			// rows==0: never indexed before, fall through to slow path.
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -136,19 +165,34 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		if ix.Options.Verbose {
 			log.Printf("embedding %d new/changed chunks", len(toEmbed))
 		}
-		texts := make([]string, len(toEmbed))
-		for i, p := range toEmbed {
-			texts[i] = p.chunk.EmbedText()
+		// Embed and upsert one batch at a time. If a later batch fails
+		// (timeout, embedding service crash), earlier batches survive
+		// in the store and the next index run skips them via
+		// content-sha matching — no wasted GPU time on retry.
+		batchSize := ix.Embed.Batch
+		if batchSize <= 0 {
+			batchSize = 32
 		}
-		vecs, err := ix.Embed.Embed(ctx, texts)
-		if err != nil {
-			return fmt.Errorf("embed: %w", err)
-		}
-		for i, p := range toEmbed {
-			if err := ix.Store.Upsert(ctx,
-				p.rel, p.chunk.Kind, p.chunk.StartLine, p.chunk.EndLine,
-				p.sha, p.chunk.Content, vecs[i], startTime); err != nil {
-				return err
+		for start := 0; start < len(toEmbed); start += batchSize {
+			end := start + batchSize
+			if end > len(toEmbed) {
+				end = len(toEmbed)
+			}
+			batch := toEmbed[start:end]
+			texts := make([]string, len(batch))
+			for i, p := range batch {
+				texts[i] = p.chunk.EmbedText()
+			}
+			vecs, err := ix.Embed.Embed(ctx, texts)
+			if err != nil {
+				return fmt.Errorf("embed: %w", err)
+			}
+			for i, p := range batch {
+				if err := ix.Store.Upsert(ctx,
+					p.rel, p.chunk.Kind, p.chunk.StartLine, p.chunk.EndLine,
+					p.sha, p.chunk.Content, vecs[i], startTime); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -164,8 +208,8 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		return err
 	}
 	if ix.Options.Verbose {
-		log.Printf("indexed: %d chunks seen, %d new/changed embedded, %d pruned, %d files skipped",
-			seen, len(toEmbed), pruned, skipped)
+		log.Printf("indexed: %d chunks seen (%d files fast-path), %d new/changed embedded, %d pruned, %d files skipped",
+			seen, mtimeSkips, len(toEmbed), pruned, skipped)
 	}
 	return nil
 }
