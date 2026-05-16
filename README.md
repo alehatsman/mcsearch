@@ -1,13 +1,13 @@
 # mcsearch
 
 Local semantic-search helper for Claude Code. Indexes a project on-disk,
-embeds chunks against a self-hosted embedding endpoint (e.g. vLLM or TEI on
-an RTX 5090), and exposes a `semantic_search` tool over MCP so Claude can
-ask for ranked code chunks instead of fanning out grep calls.
+embeds chunks against a self-hosted OpenAI-compatible `/v1/embeddings`
+endpoint (vLLM, TEI, or ollama — local GPU or SSH-tunneled to a remote
+host), and exposes a `semantic_search` tool over MCP so Claude can ask
+for ranked code chunks instead of fanning out grep calls.
 
-Source code never leaves the calling machine — only chunk text crosses the
-wire to the embedding endpoint (typically over an SSH tunnel to your GPU
-host).
+Source code never leaves the calling machine — only chunk text crosses
+the wire to the embedding endpoint, which you control.
 
 ## Install
 
@@ -34,7 +34,108 @@ mcsearch watch <path>          # keep the index fresh as files change (fsnotify)
 mcsearch clone <src> <dst>     # seed dst's index from src's (e.g. for a new
                                # git worktree); follow with `mcsearch index
                                # <dst>` to reconcile any chunks that differ
+mcsearch version               # print the build version
 ```
+
+## Demo
+
+Indexing this very repository against `qwen3-embedding:4b` running on a
+local RTX 5090 via ollama (`ollama pull qwen3-embedding:4b`, then point
+`MCSEARCH_EMBED_URL=http://127.0.0.1:11434`):
+
+```console
+$ mcsearch status
+embed endpoint: http://127.0.0.1:11434   ok
+model: qwen3-embedding:4b
+mcsearch version: dev
+index dir: /home/aleh/.cache/mcsearch
+
+$ mcsearch index ./
+✓ indexed /home/aleh/projects/mcsearch
+  chunks: 221  files: 21  dim: 2560
+```
+
+221 chunks across 21 Go files, ~6.6 s on a 5090 (a no-change re-run
+finishes in ~80 ms thanks to the mtime fast-path).
+
+Now ask in natural language; each query returns the chunk whose meaning
+matches, regardless of whether the words line up:
+
+```console
+$ mcsearch query -k 1 ./ "where do we debounce filesystem events"
+─── #1 internal/watch/watch.go:128-137  (method_declaration)  score=0.4793
+// markDirty resets the debounce timer; on expiry it runs an index pass.
+func (w *Watcher) markDirty() {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    w.dirty = true
+    if w.timer != nil {
+        w.timer.Stop()
+    }
+    w.timer = time.AfterFunc(w.opts.Debounce, w.flush)
+}
+```
+
+```console
+$ mcsearch query -k 1 ./ "code that catches files with literal AWS access keys"
+─── #1 internal/ignore/ignore.go:233-252  (orphan)  score=0.6430
+// secretPatterns are checked against the first 4 KB of any candidate file.
+// A match causes the file to be skipped with a logged warning.
+var secretPatterns = []*regexp.Regexp{
+    regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                       // AWS access key
+    regexp.MustCompile(`ASIA[0-9A-Z]{16}`),                       // AWS STS temporary access key
+    regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),     // PEM private key
+    regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),                    // GitHub PAT (classic)
+    // …
+}
+```
+
+```console
+$ mcsearch query -k 1 ./ "function that computes cosine similarity"
+─── #1 internal/store/store.go:328-417  (method_declaration)  score=0.4146
+// Search returns the top-k chunks by cosine similarity to query.
+//
+// Hot path scores against the in-RAM vector cache (a single flat
+// []float32 slab plus precomputed |v| norms) and then issues exactly
+// one SELECT to fetch path/kind/line/content for the top-k IDs.
+// …
+func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, error) {
+```
+
+```console
+$ mcsearch query -k 1 ./ "single-flight guard so a second flush waits for the first"
+─── #1 internal/watch/watch_test.go:122-176  (function_declaration)  score=0.4890
+// TestWatchSingleFlight verifies that bursts of events while a re-index
+// is in flight do not spawn a second concurrent indexer (which would
+// race on the SQLite writer lock and surface "database is locked"
+// errors to the operator). All events end up reflected in the index
+// regardless of how rapidly they arrived.
+func TestWatchSingleFlight(t *testing.T) {
+```
+
+Same query through MCP returns the structured form Claude actually
+consumes:
+
+```json
+{
+  "status": "ok",
+  "project": "/home/aleh/projects/mcsearch",
+  "hits": [
+    {
+      "path": "internal/watch/watch.go",
+      "kind": "method_declaration",
+      "start_line": 128,
+      "end_line": 137,
+      "score": 0.4793,
+      "content": "// markDirty resets the debounce timer; ..."
+    }
+  ]
+}
+```
+
+The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable` /
+`error`, with a human-readable `hint` so Claude can fall back to `grep` /
+`Glob` when the index isn't ready instead of pretending success.
 
 ## Environment
 
