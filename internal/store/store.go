@@ -591,15 +591,30 @@ func (s *Store) scoreSemantic(ctx context.Context, queryVec []float32) ([]scored
 // top-`limit` chunk IDs ordered by BM25 rank (best first), with the
 // score field set to -bm25() (so larger = better, consistent with the
 // cosine path's convention).
+//
+// Kind weighting: bm25() returns negative numbers (more negative =
+// better). Multiplying by 0.7 for `window` chunks (free-form line
+// slices, dominated by Markdown/README content) pushes them toward
+// zero — i.e. worse rank — so a README that happens to list every
+// identifier the codebase exposes can't crowd out the actual
+// definition site. Structural chunks (function_declaration etc.) and
+// `orphan` chunks (top-level const/var/import we'd lose otherwise)
+// keep their full BM25 weight.
 func (s *Store) scoreBM25(ctx context.Context, queryText string, limit int) ([]scored, error) {
 	matchExpr := buildFTSQuery(queryText)
 	if matchExpr == "" {
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT rowid, bm25(chunks_fts) FROM chunks_fts
+		`SELECT chunks_fts.rowid,
+		        bm25(chunks_fts) * CASE chunks.kind
+		            WHEN 'window' THEN 0.7
+		            ELSE 1.0
+		          END AS weighted_rank
+		   FROM chunks_fts
+		   JOIN chunks ON chunks.id = chunks_fts.rowid
 		   WHERE chunks_fts MATCH ?
-		   ORDER BY rank
+		   ORDER BY weighted_rank
 		   LIMIT ?`,
 		matchExpr, limit)
 	if err != nil {
