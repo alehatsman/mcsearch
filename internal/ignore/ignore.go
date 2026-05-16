@@ -162,6 +162,50 @@ func IndexableExt(path string) bool {
 	return IndexableExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
+// IsTestPath returns true for file paths that conventionally hold
+// test code or fixtures. The indexer uses this to suppress the
+// secret-pattern skip: test files routinely embed fake credentials
+// (`AKIA0123456789ABCDEF`, dummy PEM blocks) as inputs to their own
+// detection logic, and refusing to index them was hiding real test
+// code from search. The pattern check still runs against
+// non-test files where a literal secret almost always is one.
+func IsTestPath(relPath string) bool {
+	p := filepath.ToSlash(relPath)
+	base := filepath.Base(p)
+	for _, dir := range []string{
+		"tests/", "test/", "__tests__/", "spec/", "specs/", "testdata/", "fixtures/",
+	} {
+		if strings.Contains("/"+p+"/", "/"+dir) {
+			return true
+		}
+	}
+	// Go: foo_test.go
+	if strings.HasSuffix(base, "_test.go") {
+		return true
+	}
+	// Python: test_foo.py, foo_test.py
+	if strings.HasSuffix(base, ".py") &&
+		(strings.HasPrefix(base, "test_") || strings.HasSuffix(base, "_test.py")) {
+		return true
+	}
+	// JS/TS/JSX/TSX: foo.test.* / foo.spec.*
+	for _, ext := range []string{".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"} {
+		if strings.HasSuffix(base, ".test"+ext) || strings.HasSuffix(base, ".spec"+ext) {
+			return true
+		}
+	}
+	// Rust: tests/*.rs is covered by the dir loop; integration tests
+	// inside src often end with _test.rs.
+	if strings.HasSuffix(base, "_test.rs") {
+		return true
+	}
+	// Ruby: foo_spec.rb
+	if strings.HasSuffix(base, "_spec.rb") || strings.HasSuffix(base, "_test.rb") {
+		return true
+	}
+	return false
+}
+
 // IndexableBasenames are well-known filenames that have no extension
 // (or a misleading one) but whose content is still useful to index.
 var IndexableBasenames = map[string]bool{

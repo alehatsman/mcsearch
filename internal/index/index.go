@@ -145,7 +145,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			skipped++
 			return nil
 		}
-		if ignore.LooksLikeSecret(data) {
+		// Skip files whose content matches a known secret pattern —
+		// but allow-list test fixtures, which routinely embed fake
+		// credentials as inputs to their own detection logic.
+		if !ignore.IsTestPath(rel) && ignore.LooksLikeSecret(data) {
 			ix.Options.Logger.Warn("skip (matches secret pattern)", "path", rel)
 			skipped++
 			return nil

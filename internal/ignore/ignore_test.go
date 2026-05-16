@@ -176,6 +176,39 @@ func TestLooksLikeSecret(t *testing.T) {
 	}
 }
 
+func TestIsTestPath(t *testing.T) {
+	cases := map[string]bool{
+		// Go
+		"internal/ignore/ignore_test.go": true,
+		"main.go":                        false,
+		// Python
+		"tests/test_auth.py":     true,
+		"src/test_helpers.py":    true,
+		"src/auth_test.py":       true,
+		"src/auth.py":            false,
+		// JS/TS
+		"src/foo.test.js":        true,
+		"src/foo.spec.ts":        true,
+		"src/foo.ts":             false,
+		"__tests__/util.ts":      true,
+		// Rust
+		"tests/integration.rs":   true,
+		"src/util_test.rs":       true,
+		"src/util.rs":            false,
+		// Ruby
+		"spec/models/user_spec.rb": true,
+		"app/models/user.rb":       false,
+		// Generic fixture dirs
+		"testdata/sample.json":     true,
+		"fixtures/keys.txt":        true,
+	}
+	for path, want := range cases {
+		if got := IsTestPath(path); got != want {
+			t.Errorf("IsTestPath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
 func TestLooksBinary(t *testing.T) {
 	if LooksBinary([]byte("hello world")) {
 		t.Error("plain text flagged as binary")
