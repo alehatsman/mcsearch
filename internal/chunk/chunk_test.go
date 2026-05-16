@@ -2,7 +2,6 @@ package chunk
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -167,9 +166,8 @@ class Greeter:
 	}
 }
 
-// Smoke test exercising fmt.Sprintf so the import lands cleanly.
 func TestLineCountsAreOneBased(t *testing.T) {
-	src := []byte(fmt.Sprintf("package x\n\nfunc A() {}\n"))
+	src := []byte("package x\n\nfunc A() {}\n")
 	chunks, _ := Chunks(context.Background(), "a.go", src)
 	for _, c := range chunks {
 		if c.StartLine < 1 {

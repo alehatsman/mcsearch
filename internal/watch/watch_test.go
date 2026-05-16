@@ -48,7 +48,7 @@ func fakeEmbedServer(t *testing.T) *httptest.Server {
 func hashVec(s string, dim int) []float32 {
 	out := make([]float32, dim)
 	h := sha256.Sum256([]byte(s))
-	for i := 0; i < dim; i++ {
+	for i := range dim {
 		u := binary.LittleEndian.Uint32(h[(i*4)%len(h):])
 		out[i] = float32(int32(u)) / float32(math.MaxInt32)
 	}
@@ -86,7 +86,7 @@ func TestWatchReindexesOnSave(t *testing.T) {
 	go func() { done <- w.Run(ctx) }()
 
 	// Wait for the initial index pass to complete.
-	for i := 0; i < 50; i++ {
+	for range 50 {
 		stats, _ := st.Stats(ctx)
 		if stats.Chunks > 0 {
 			break
@@ -151,9 +151,9 @@ func TestWatchSingleFlight(t *testing.T) {
 
 	// Fire 50 file-create bursts as fast as we can.
 	const N = 50
-	for i := 0; i < N; i++ {
+	for i := range N {
 		_ = os.WriteFile(filepath.Join(projDir, fmt.Sprintf("f%d.go", i)),
-			[]byte(fmt.Sprintf("package main\nfunc F%d() {}\n", i)), 0o644)
+			fmt.Appendf(nil, "package main\nfunc F%d() {}\n", i), 0o644)
 	}
 
 	// All N files should end up indexed (plus the seed). If a second

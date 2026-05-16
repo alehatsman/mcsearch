@@ -56,7 +56,7 @@ func fakeEmbedServer(t *testing.T) *httptest.Server {
 func hashVec(s string, dim int) []float32 {
 	out := make([]float32, dim)
 	h := sha256.Sum256([]byte(s))
-	for i := 0; i < dim; i++ {
+	for i := range dim {
 		u := binary.LittleEndian.Uint32(h[(i*4)%len(h):])
 		out[i] = float32(int32(u)) / float32(math.MaxInt32)
 	}

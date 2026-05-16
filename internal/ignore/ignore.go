@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	gitignore "github.com/sabhiram/go-gitignore"
 )
 
 // DefaultPatterns are always applied, on top of whatever .gitignore or
@@ -99,203 +101,59 @@ var IndexableExtensions = map[string]bool{
 }
 
 // Matcher decides whether a path (relative to project root) should be
-// indexed.
+// indexed. The gitignore grammar (patterns, anchoring, negation, `**`
+// semantics) is delegated to github.com/sabhiram/go-gitignore so we
+// don't reinvent — and subtly miss — the corner cases of a
+// 20-year-old spec. We only contribute the DefaultPatterns,
+// .mcsearch-ignore composition, and the wider always-skip rules.
 type Matcher struct {
-	patterns []pattern
+	g *gitignore.GitIgnore
 }
 
-type pattern struct {
-	raw      string
-	negate   bool // leading `!`
-	anchored bool // leading `/`
-	dirOnly  bool // trailing `/`
-	body     string
-	re       *regexp.Regexp // precompiled when body contains `**`
-}
-
-// New loads default + .gitignore + .mcsearch-ignore from root.
+// New loads DefaultPatterns + project-root .gitignore + .mcsearch-ignore
+// (in that order — later wins per gitignore semantics).
 func New(root string) (*Matcher, error) {
-	m := &Matcher{}
-	m.addPatterns(DefaultPatterns)
+	var lines []string
+	lines = append(lines, DefaultPatterns...)
 	for _, name := range []string{".gitignore", ".mcsearch-ignore"} {
-		f, err := os.Open(filepath.Join(root, name))
+		extra, err := readLines(filepath.Join(root, name))
 		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
 			return nil, err
 		}
-		s := bufio.NewScanner(f)
-		var lines []string
-		for s.Scan() {
-			lines = append(lines, s.Text())
-		}
-		f.Close()
-		if err := s.Err(); err != nil {
-			return nil, err
-		}
-		m.addPatterns(lines)
+		lines = append(lines, extra...)
 	}
-	return m, nil
+	return &Matcher{g: gitignore.CompileIgnoreLines(lines...)}, nil
 }
 
-func (m *Matcher) addPatterns(lines []string) {
-	for _, raw := range lines {
-		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+// readLines returns the lines of path, or nil if the file doesn't exist.
+func readLines(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
 		}
-		p := pattern{raw: line}
-		if strings.HasPrefix(line, "!") {
-			p.negate = true
-			line = line[1:]
-		}
-		if strings.HasPrefix(line, "/") {
-			p.anchored = true
-			line = line[1:]
-		}
-		if strings.HasSuffix(line, "/") {
-			p.dirOnly = true
-			line = strings.TrimSuffix(line, "/")
-		}
-		p.body = line
-		// Precompile `**`-style patterns once; the match path runs
-		// per-walked-entry, often many thousands of times.
-		if strings.Contains(line, "**") {
-			p.re = compileDoubleStar(line)
-		}
-		m.patterns = append(m.patterns, p)
+		return nil, err
 	}
+	defer f.Close()
+	var out []string
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		out = append(out, s.Text())
+	}
+	return out, s.Err()
 }
 
 // Match returns true if the relative path is ignored. relPath uses
-// forward slashes (filepath.ToSlash). isDir hints the pattern matcher
-// about trailing-slash patterns.
+// forward slashes (filepath.ToSlash). gitignore's dir-only patterns
+// (`name/`) only match when the input path is itself a directory, so
+// we append a trailing slash for directories — that's how the spec
+// distinguishes them.
 func (m *Matcher) Match(relPath string, isDir bool) bool {
-	relPath = filepath.ToSlash(relPath)
-	matched := false
-	for _, p := range m.patterns {
-		if !p.matches(relPath, isDir) {
-			continue
-		}
-		if p.negate {
-			matched = false
-		} else {
-			matched = true
-		}
+	p := filepath.ToSlash(relPath)
+	if isDir && !strings.HasSuffix(p, "/") {
+		p += "/"
 	}
-	return matched
-}
-
-func (p pattern) matches(relPath string, isDir bool) bool {
-	if p.anchored {
-		return globMatch(p.body, relPath, p.re) || (p.dirOnly && strings.HasPrefix(relPath, p.body+"/"))
-	}
-	// Patterns containing `/` are path-relative (e.g. `docs/private/`,
-	// `scratch/keep.md`). Match the full relative path.
-	if strings.Contains(p.body, "/") {
-		// For `**` patterns we delegate to the precompiled regex.
-		if p.re != nil && p.re.MatchString(relPath) {
-			return true
-		}
-		// Plain "a/b" — match against the full relPath via filepath.Match.
-		if ok, _ := filepath.Match(p.body, relPath); ok {
-			return true
-		}
-		// `**`-prefix semantics: match any tail of relPath.
-		if p.re != nil {
-			parts := strings.Split(relPath, "/")
-			for i := range parts {
-				if p.re.MatchString(strings.Join(parts[i:], "/")) {
-					return true
-				}
-			}
-		}
-		// `dir/sub/` (dirOnly) — match as a prefix as well.
-		if p.dirOnly && strings.HasPrefix(relPath, p.body+"/") {
-			return true
-		}
-		return false
-	}
-	// Bare-name pattern (no `/`): match the basename or any path segment.
-	if globMatch(p.body, filepath.Base(relPath), p.re) {
-		return true
-	}
-	segs := strings.Split(relPath, "/")
-	for _, seg := range segs {
-		if globMatch(p.body, seg, p.re) {
-			return true
-		}
-	}
-	// `dir/` as a prefix.
-	if p.dirOnly && strings.Contains("/"+relPath+"/", "/"+p.body+"/") {
-		return true
-	}
-	return false
-}
-
-// globMatch is filepath.Match with `**` support. For `**` patterns the
-// caller is expected to have stashed a precompiled regex on the
-// pattern; we receive it as `re` (nil for plain globs).
-func globMatch(pat, name string, re *regexp.Regexp) bool {
-	if re != nil {
-		return re.MatchString(name)
-	}
-	ok, _ := filepath.Match(pat, name)
-	return ok
-}
-
-// compileDoubleStar converts a gitignore-style `**` pattern into a
-// regexp. Regex metacharacters that are NOT meaningful in a glob (`+`,
-// `(`, `)`, `[`, `]`, `{`, `}`, `^`, `$`, `\`, `|`) are escaped so
-// pathological patterns from a hand-edited .gitignore can't trip
-// regexp.Compile or produce surprising matches.
-//
-// gitignore-specific tweaks:
-//   - `**/X` matches X at the root *and* in any subdirectory, so we
-//     emit `(?:.*/)?` for that prefix instead of `.*/` (which would
-//     require at least one slash).
-//   - `X/**` matches X and any descendant.
-//   - `**` alone matches anything.
-func compileDoubleStar(pat string) *regexp.Regexp {
-	var b strings.Builder
-	b.WriteByte('^')
-	// Leading `**/`: zero-or-more directory components.
-	if strings.HasPrefix(pat, "**/") {
-		b.WriteString(`(?:.*/)?`)
-		pat = pat[3:]
-	}
-	i := 0
-	for i < len(pat) {
-		switch {
-		case i+2 < len(pat) && pat[i] == '/' && pat[i+1] == '*' && pat[i+2] == '*':
-			// `/**` mid-pattern: optional `/anything`.
-			b.WriteString(`(?:/.*)?`)
-			i += 3
-		case i+1 < len(pat) && pat[i] == '*' && pat[i+1] == '*':
-			b.WriteString(".*")
-			i += 2
-		case pat[i] == '*':
-			b.WriteString("[^/]*")
-			i++
-		case pat[i] == '?':
-			b.WriteString("[^/]")
-			i++
-		default:
-			c := pat[i]
-			if strings.ContainsRune(`.+(){}[]^$\|`, rune(c)) {
-				b.WriteByte('\\')
-			}
-			b.WriteByte(c)
-			i++
-		}
-	}
-	b.WriteByte('$')
-	re, err := regexp.Compile(b.String())
-	if err != nil {
-		return regexp.MustCompile(`\A\B`)
-	}
-	return re
+	return m.g.MatchesPath(p)
 }
 
 // IndexableExt returns true if the file extension is one mcsearch will

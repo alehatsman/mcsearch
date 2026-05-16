@@ -12,6 +12,7 @@ package chunk
 import (
 	"context"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
@@ -174,7 +175,7 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 	defer tree.Close()
 	root := tree.RootNode()
 	var out []Chunk
-	for i := 0; i < int(root.NamedChildCount()); i++ {
+	for i := range int(root.NamedChildCount()) {
 		n := root.NamedChild(i)
 		if n == nil {
 			continue
@@ -189,10 +190,7 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 		startByte = backfillComments(src, startByte)
 		body := string(src[startByte:endByte])
 		startLine := lineOf(src, startByte)
-		endLine := lineOf(src, endByte-1)
-		if endLine < startLine {
-			endLine = startLine
-		}
+		endLine := max(lineOf(src, endByte-1), startLine)
 		if len(body) <= MaxBytes {
 			out = append(out, Chunk{
 				Path: relPath, Kind: kind,
@@ -237,13 +235,7 @@ func orphanWindows(relPath string, src []byte, structural []Chunk) []Chunk {
 		return nil
 	}
 	// Sort by start; merge overlapping ranges.
-	for i := 0; i < len(intervals); i++ {
-		for j := i + 1; j < len(intervals); j++ {
-			if intervals[j].s < intervals[i].s {
-				intervals[i], intervals[j] = intervals[j], intervals[i]
-			}
-		}
-	}
+	sort.Slice(intervals, func(i, j int) bool { return intervals[i].s < intervals[j].s })
 	merged := intervals[:1]
 	for _, x := range intervals[1:] {
 		last := &merged[len(merged)-1]
@@ -361,10 +353,7 @@ func windowOver(lines []string, firstLineNumber int) []Chunk {
 		step = WindowLines
 	}
 	for i := 0; i < len(lines); i += step {
-		j := i + WindowLines
-		if j > len(lines) {
-			j = len(lines)
-		}
+		j := min(i+WindowLines, len(lines))
 		content := strings.Join(lines[i:j], "\n")
 		if len(content) > MaxBytes {
 			// Halve and re-split this slice.
@@ -430,10 +419,7 @@ func byteWindows(line string, lineNumber int) []Chunk {
 	}
 	var out []Chunk
 	for i := 0; i < len(line); {
-		j := i + MaxBytes
-		if j > len(line) {
-			j = len(line)
-		}
+		j := min(i+MaxBytes, len(line))
 		for j < len(line) && (line[j]&0xC0) == 0x80 {
 			j++
 		}
