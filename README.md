@@ -146,6 +146,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_INDEX_DIR`      | `~/.cache/mcsearch`                | Where per-project index files live.           |
 | `MCSEARCH_EMBED_TIMEOUT`  | `60s`                              | HTTP timeout for each embedding request.      |
 | `MCSEARCH_EMBED_BATCH`    | `32`                               | Max chunks per `/v1/embeddings` call.         |
+| `MCSEARCH_DISABLE_VEC_CACHE` | unset                           | Set to `1` to skip the in-RAM vector cache and use the per-row SQL hot path (slower; bounded RAM for very large indexes). |
 
 ## Storage
 
@@ -158,15 +159,41 @@ chunks(id, path, kind, start_line, end_line, content_sha1, content,
        vec BLOB, last_seen_at)                                              -- UNIQUE(path, content_sha1)
 ```
 
-Vectors are stored as packed `float32` BLOBs. Query is brute-force cosine
-similarity over all chunks — fine at <100 k chunks per project, ~30–80 ms
-on a modern laptop. If a project outgrows this, swap the store backend for
-an HNSW index (e.g. via `hnswlib-go` or LanceDB) without changing the rest
-of the architecture.
+Vectors are stored as packed `float32` BLOBs. Query is brute-force
+cosine similarity. On first `Search`, every chunk's vector is decoded
+once into a flat in-RAM `[]float32` slab plus precomputed `|v|` norms;
+subsequent queries score against the slab with zero hot-path
+allocations and one small `SELECT` to fetch content for the top-k IDs.
+Mutating operations (`UpsertMany`, `DeletePath`, `DeletePathPrefix`,
+`PruneUnseen`) invalidate the slab so the next `Search` rebuilds.
 
-`last_seen_at` is stored in Unix nanoseconds so the strict-less-than prune
-filter correctly distinguishes two index runs that complete in the same
-millisecond.
+Measured on a Ryzen 9 9950X, brute-force cosine post-cache:
+
+| Chunks | Dim | Search latency (top-k=8) |
+| ------:| ---:| ------------------------:|
+|   1 k  |  16 | 0.1 ms                   |
+|   5 k  | 1024 | 2.7 ms                  |
+|  20 k  | 1024 | 12 ms                   |
+| 100 k* | 1024 | ~60 ms                  |
+| 100 k* | 2560 (Qwen3-Embedding-4B) | ~150 ms |
+| 200 k* | 2560 | ~300 ms                  |
+
+(* extrapolated linearly from the measured rows — see
+`internal/store/bench_test.go`.)
+
+At realistic project sizes (<50 k chunks) search is never the
+bottleneck — the per-query embed round-trip to vLLM/TEI/ollama
+dominates total user-perceived latency. The actual ceiling is **RAM**:
+the cache slab is `chunks × dim × 4 B`, so 100 k chunks at 2560 dim is
+~1 GB. For memory-constrained deployments, set
+`MCSEARCH_DISABLE_VEC_CACHE=1` to keep the pre-cache per-row SQL path
+(slower but bounded RAM). A real ANN index (HNSW via `coder/hnsw`,
+`sqlite-vec`, LanceDB) is the right swap once you push past ~500 k
+chunks or want sub-50 ms p99 — the rest of the store stays unchanged.
+
+`last_seen_at` is stored in Unix nanoseconds so the strict-less-than
+prune filter correctly distinguishes two index runs that complete in
+the same millisecond.
 
 ## Multi-worktree workflow
 

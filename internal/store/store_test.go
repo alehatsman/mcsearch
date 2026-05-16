@@ -201,6 +201,50 @@ func pathOrNone(hits []Hit) string {
 	return hits[0].Path
 }
 
+// TestSearchDisabledCache exercises the fallback hot path used when
+// the caller (or the user via MCSEARCH_DISABLE_VEC_CACHE=1) explicitly
+// asks Store not to hold decoded vectors in RAM. Top-k results must
+// match the cached path's ordering exactly.
+func TestSearchDisabledCache(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	st, err := OpenWith(ctx, dbPath, Options{DisableVecCache: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", Kind: "fn", ContentSHA: "h1", Content: "func A(){}", Vec: []float32{1, 0, 0, 0}},
+		{Path: "b.go", Kind: "fn", ContentSHA: "h2", Content: "func B(){}", Vec: []float32{0, 1, 0, 0}},
+		{Path: "c.go", Kind: "fn", ContentSHA: "h3", Content: "func C(){}", Vec: []float32{1, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 3 {
+		t.Fatalf("got %d hits, want 3", len(hits))
+	}
+	if hits[0].Path != "a.go" {
+		t.Errorf("top hit = %q, want a.go", hits[0].Path)
+	}
+	if hits[1].Path != "c.go" {
+		t.Errorf("second hit = %q, want c.go", hits[1].Path)
+	}
+	// Mutate; cached path also re-invalidates here but we don't care —
+	// just verify the no-cache path stays consistent after an update.
+	if err := st.DeletePath(ctx, "a.go"); err != nil {
+		t.Fatal(err)
+	}
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 3)
+	if len(hits) != 2 || hits[0].Path == "a.go" {
+		t.Errorf("after DeletePath, got %d hits top=%q; want 2 hits without a.go", len(hits), pathOrNone(hits))
+	}
+}
+
 func TestPersistsDimAcrossOpen(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "test.db")

@@ -20,7 +20,8 @@ import (
 // Server holds everything the MCP handlers need.
 type Server struct {
 	EmbedClient *embed.Client
-	IndexDir    string // base dir holding per-project index folders
+	IndexDir    string        // base dir holding per-project index folders
+	StoreOpts   store.Options // applied to every Store opened by the server
 }
 
 // ─── tool: semantic_search ────────────────────────────────────────────────
@@ -101,7 +102,7 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 		return nil, out, nil
 	}
 
-	st, err := store.Open(ctx, p.DBPath)
+	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
 	if err != nil {
 		out.Status = "error"
 		out.Hint = fmt.Sprintf("open index: %v", err)
@@ -184,7 +185,7 @@ func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusI
 			if _, err := os.Stat(dbPath); err != nil {
 				continue
 			}
-			st, err := store.Open(ctx, dbPath)
+			st, err := store.OpenWith(ctx, dbPath, s.StoreOpts)
 			if err != nil {
 				continue
 			}

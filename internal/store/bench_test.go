@@ -47,6 +47,24 @@ func BenchmarkSearch_20k_1024(b *testing.B) {
 	}
 	benchSearch(b, 20000, 1024)
 }
+func BenchmarkSearch_50k_1024(b *testing.B) {
+	if testing.Short() {
+		b.Skip()
+	}
+	benchSearch(b, 50000, 1024)
+}
+func BenchmarkSearch_100k_1024(b *testing.B) {
+	if testing.Short() {
+		b.Skip()
+	}
+	benchSearch(b, 100000, 1024)
+}
+func BenchmarkSearch_50k_2560(b *testing.B) {
+	if testing.Short() {
+		b.Skip()
+	}
+	benchSearch(b, 50000, 2560) // Qwen3-Embedding-4B-shaped vectors
+}
 
 func benchSearch(b *testing.B, n, dim int) {
 	st := benchStore(b, n, dim)

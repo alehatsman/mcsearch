@@ -104,11 +104,12 @@ func usage() {
                                     any chunks that differ between the two.
 
 env:
-  MCSEARCH_EMBED_URL      default http://127.0.0.1:8082
-  MCSEARCH_EMBED_MODEL    default Qwen/Qwen3-Embedding-4B
-  MCSEARCH_EMBED_BATCH    default 32
-  MCSEARCH_EMBED_TIMEOUT  default 60s (Go duration)
-  MCSEARCH_INDEX_DIR      default ~/.cache/mcsearch`)
+  MCSEARCH_EMBED_URL          default http://127.0.0.1:8082
+  MCSEARCH_EMBED_MODEL        default Qwen/Qwen3-Embedding-4B
+  MCSEARCH_EMBED_BATCH        default 32
+  MCSEARCH_EMBED_TIMEOUT      default 60s (Go duration)
+  MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
+  MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache`)
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────
@@ -129,6 +130,18 @@ func indexDir() (string, error) {
 		return "", err
 	}
 	return filepath.Join(home, ".cache", "mcsearch"), nil
+}
+
+// storeOpts reads runtime tweaks from the environment so every code
+// path that opens a Store sees the same configuration.
+func storeOpts() store.Options {
+	return store.Options{
+		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
+	}
+}
+
+func openStore(ctx context.Context, dbPath string) (*store.Store, error) {
+	return store.OpenWith(ctx, dbPath, storeOpts())
 }
 
 // cliLogger returns a stderr text logger. Used for the CLI commands
@@ -179,7 +192,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
-	st, err := store.Open(ctx, p.DBPath)
+	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
 	}
@@ -233,7 +246,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	st, err := store.Open(ctx, p.DBPath)
+	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
 	}
@@ -309,7 +322,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 			}
 			return err
 		}
-		st, err := store.Open(ctx, p.DBPath)
+		st, err := openStore(ctx, p.DBPath)
 		if err != nil {
 			return err
 		}
@@ -344,7 +357,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if len(short) > 12 {
 			short = short[:12]
 		}
-		st, err := store.Open(ctx, dbPath)
+		st, err := openStore(ctx, dbPath)
 		if err != nil {
 			fmt.Printf("  %s  CORRUPT (%v)\n", short, err)
 			continue
@@ -421,7 +434,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
-	st, err := store.Open(ctx, p.DBPath)
+	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
 	}
@@ -532,6 +545,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	srv := &mcp.Server{
 		EmbedClient: newEmbedClient(),
 		IndexDir:    base,
+		StoreOpts:   storeOpts(),
 	}
 	return srv.RunStdio(ctx)
 }

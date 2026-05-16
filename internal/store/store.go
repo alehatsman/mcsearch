@@ -27,9 +27,21 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// Options influence the runtime behaviour of an opened Store.
+// All fields are optional; the zero value matches the default
+// (vector cache enabled).
+type Options struct {
+	// DisableVecCache turns off the in-RAM decoded-vector slab.
+	// Search falls back to per-row SQL scans (slower; bounded RAM).
+	// Useful for very large indexes where dim×chunks×4 bytes of
+	// cache exceeds available memory.
+	DisableVecCache bool
+}
+
 type Store struct {
-	db  *sql.DB
-	dim int // vector dimension; discovered on first upsert
+	db   *sql.DB
+	dim  int     // vector dimension; discovered on first upsert
+	opts Options // immutable after Open
 
 	// Search-side vector cache. Lazily populated on first Search and
 	// invalidated by any mutating call (UpsertMany, DeletePath,
@@ -41,8 +53,8 @@ type Store struct {
 	//
 	// Memory: for a 100k-chunk index at 1024 dim, this is ~400 MB.
 	// Acceptable for our target "one project per server" deployment;
-	// callers worried about footprint can either nuke and reopen or
-	// run against the bare SQL path by leaving the cache disabled.
+	// callers worried about footprint can set Options.DisableVecCache
+	// to fall back to the per-row SQL hot path.
 	cacheMu     sync.RWMutex
 	cacheLoaded bool
 	cacheIDs    []int64
@@ -50,13 +62,20 @@ type Store struct {
 	cacheNorms  []float32 // precomputed |v| per row, zero-norm rows skipped at load time
 }
 
-// Open or create the SQLite file at path and run migrations.
+// Open opens or creates the SQLite file at path with default
+// Options. Convenience wrapper around OpenWith.
+func Open(ctx context.Context, path string) (*Store, error) {
+	return OpenWith(ctx, path, Options{})
+}
+
+// OpenWith is like Open but lets the caller adjust runtime behaviour
+// (e.g. disable the in-RAM vector cache).
 //
 // `busy_timeout(5000)` lets concurrent writers (e.g. `mcsearch index`
 // fired while `mcsearch watch` is also re-indexing) wait up to 5 s for
 // the writer lock instead of immediately returning SQLITE_BUSY. Without
 // it, racing index runs both crash with a leaked DDL error.
-func Open(ctx context.Context, path string) (*Store, error) {
+func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 	db, err := sql.Open("sqlite",
 		"file:"+path+
 			"?_pragma=journal_mode(WAL)"+
@@ -66,7 +85,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	s := &Store{db: db}
+	s := &Store{db: db, opts: opts}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -346,33 +365,86 @@ func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, erro
 	if qNorm == 0 {
 		return nil, fmt.Errorf("query vector is zero")
 	}
-	if err := s.ensureCache(ctx); err != nil {
-		return nil, err
-	}
-	s.cacheMu.RLock()
-	ids := s.cacheIDs
-	vecs := s.cacheVecs
-	norms := s.cacheNorms
-	dim := s.dim
-	s.cacheMu.RUnlock()
-	if len(ids) == 0 || dim == 0 {
-		return nil, nil
-	}
 
 	type scored struct {
 		id    int64
 		score float32
 	}
-	scores := make([]scored, len(ids))
-	for i, id := range ids {
-		off := i * dim
-		dot := float32(0)
-		// The tight loop is what we paid the cache for; the compiler
-		// can SIMD-vectorize a simple float32 dot-product like this.
-		for j, qv := range query {
-			dot += qv * vecs[off+j]
+	var scores []scored
+	if s.opts.DisableVecCache {
+		// Fallback path: per-row SQL scan, decode into a reused buffer.
+		// Slower (extra SQL row work, extra decode each query) but
+		// allocates a bounded amount of RAM regardless of index size.
+		rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
+		if err != nil {
+			return nil, err
 		}
-		scores[i] = scored{id, dot / (qNorm * norms[i])}
+		scores = make([]scored, 0, 1024)
+		var vbuf []float32
+		for rows.Next() {
+			var id int64
+			var blob []byte
+			if err := rows.Scan(&id, &blob); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if len(blob)%4 != 0 {
+				rows.Close()
+				return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
+			}
+			need := len(blob) / 4
+			if cap(vbuf) < need {
+				vbuf = make([]float32, need)
+			} else {
+				vbuf = vbuf[:need]
+			}
+			for i := range vbuf {
+				vbuf[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+			}
+			dot := float32(0)
+			var vNormSq float32
+			for i, qv := range query {
+				vi := vbuf[i]
+				dot += qv * vi
+				vNormSq += vi * vi
+			}
+			if vNormSq == 0 {
+				continue
+			}
+			scores = append(scores, scored{id, dot / (qNorm * float32(math.Sqrt(float64(vNormSq))))})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	} else {
+		// Cached hot path: score against the in-RAM slab.
+		if err := s.ensureCache(ctx); err != nil {
+			return nil, err
+		}
+		s.cacheMu.RLock()
+		ids := s.cacheIDs
+		vecs := s.cacheVecs
+		norms := s.cacheNorms
+		dim := s.dim
+		s.cacheMu.RUnlock()
+		if len(ids) == 0 || dim == 0 {
+			return nil, nil
+		}
+		scores = make([]scored, len(ids))
+		for i, id := range ids {
+			off := i * dim
+			dot := float32(0)
+			// The tight loop is what we paid the cache for; the compiler
+			// can SIMD-vectorize a simple float32 dot-product like this.
+			for j, qv := range query {
+				dot += qv * vecs[off+j]
+			}
+			scores[i] = scored{id, dot / (qNorm * norms[i])}
+		}
+	}
+	if len(scores) == 0 {
+		return nil, nil
 	}
 	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
 	if len(scores) > k {
