@@ -6,8 +6,9 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,8 +22,9 @@ import (
 
 // Options controls one index run.
 type Options struct {
-	MaxFileSize int64 // skip files larger than this (bytes); 0 = 1 MB default
-	Verbose     bool
+	MaxFileSize int64        // skip files larger than this (bytes); 0 = 1 MB default
+	Verbose     bool         // emit per-event log lines (skip/embedding/etc.)
+	Logger      *slog.Logger // destination for log output; nil = io.Discard
 }
 
 // Indexer is the entry point.
@@ -37,6 +39,9 @@ type Indexer struct {
 func New(p *proj.Project, st *store.Store, em *embed.Client, ig *ignore.Matcher, opt Options) *Indexer {
 	if opt.MaxFileSize <= 0 {
 		opt.MaxFileSize = 1 << 20 // 1 MB
+	}
+	if opt.Logger == nil {
+		opt.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	return &Indexer{Proj: p, Store: st, Embed: em, Ignore: ig, Options: opt}
 }
@@ -68,7 +73,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	err := filepath.WalkDir(ix.Proj.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if ix.Options.Verbose {
-				log.Printf("walk: %s: %v", path, err)
+				ix.Options.Logger.Info("walk error", "path", path, "err", err)
 			}
 			return nil
 		}
@@ -117,7 +122,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		if info.Size() > ix.Options.MaxFileSize {
 			skipped++
 			if ix.Options.Verbose {
-				log.Printf("skip %s (too large: %d bytes)", rel, info.Size())
+				ix.Options.Logger.Info("skip (too large)", "path", rel, "size", info.Size())
 			}
 			return nil
 		}
@@ -141,7 +146,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			return nil
 		}
 		if ignore.LooksLikeSecret(data) {
-			log.Printf("skip %s (matches secret pattern)", rel)
+			ix.Options.Logger.Warn("skip (matches secret pattern)", "path", rel)
 			skipped++
 			return nil
 		}
@@ -149,7 +154,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		chunks, err := chunk.Chunks(ctx, rel, data)
 		if err != nil {
 			if ix.Options.Verbose {
-				log.Printf("chunk %s: %v", rel, err)
+				ix.Options.Logger.Info("chunk error", "path", rel, "err", err)
 			}
 			return nil
 		}
@@ -180,7 +185,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 
 	if len(toEmbed) > 0 {
 		if ix.Options.Verbose {
-			log.Printf("embedding %d new/changed chunks", len(toEmbed))
+			ix.Options.Logger.Info("embedding chunks", "count", len(toEmbed))
 		}
 		// Embed and upsert one batch at a time. If a later batch fails
 		// (timeout, embedding service crash), earlier batches survive
@@ -227,14 +232,18 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		return err
 	}
 	if ix.Options.Verbose && pruned > 0 {
-		log.Printf("pruned %d stale chunks (files removed since last index)", pruned)
+		ix.Options.Logger.Info("pruned stale chunks (files removed since last index)", "count", pruned)
 	}
 	if err := ix.Store.SetLastIndexedAt(ctx, startTime); err != nil {
 		return err
 	}
 	if ix.Options.Verbose {
-		log.Printf("indexed: %d chunks seen (%d files fast-path), %d new/changed embedded, %d pruned, %d files skipped",
-			seen, mtimeSkips, len(toEmbed), pruned, skipped)
+		ix.Options.Logger.Info("indexed",
+			"chunks_seen", seen,
+			"files_fast_path", mtimeSkips,
+			"embedded", len(toEmbed),
+			"pruned", pruned,
+			"skipped", skipped)
 	}
 	return nil
 }

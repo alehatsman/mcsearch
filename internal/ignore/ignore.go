@@ -188,26 +188,46 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 }
 
 func (p pattern) matches(relPath string, isDir bool) bool {
-	if p.dirOnly && !isDir {
-		// `name/` only matches when the path itself names a directory.
-		// We approximate by also matching descendants.
-		// Fall through to the body matcher; it'll handle prefixes.
-	}
 	if p.anchored {
 		return globMatch(p.body, relPath, p.re) || (p.dirOnly && strings.HasPrefix(relPath, p.body+"/"))
 	}
-	// Unanchored: match the basename, or any path segment.
+	// Patterns containing `/` are path-relative (e.g. `docs/private/`,
+	// `scratch/keep.md`). Match the full relative path.
+	if strings.Contains(p.body, "/") {
+		// For `**` patterns we delegate to the precompiled regex.
+		if p.re != nil && p.re.MatchString(relPath) {
+			return true
+		}
+		// Plain "a/b" — match against the full relPath via filepath.Match.
+		if ok, _ := filepath.Match(p.body, relPath); ok {
+			return true
+		}
+		// `**`-prefix semantics: match any tail of relPath.
+		if p.re != nil {
+			parts := strings.Split(relPath, "/")
+			for i := range parts {
+				if p.re.MatchString(strings.Join(parts[i:], "/")) {
+					return true
+				}
+			}
+		}
+		// `dir/sub/` (dirOnly) — match as a prefix as well.
+		if p.dirOnly && strings.HasPrefix(relPath, p.body+"/") {
+			return true
+		}
+		return false
+	}
+	// Bare-name pattern (no `/`): match the basename or any path segment.
 	if globMatch(p.body, filepath.Base(relPath), p.re) {
 		return true
 	}
-	// Match any directory segment.
 	segs := strings.Split(relPath, "/")
-	for i := 0; i < len(segs); i++ {
-		if globMatch(p.body, segs[i], p.re) {
+	for _, seg := range segs {
+		if globMatch(p.body, seg, p.re) {
 			return true
 		}
 	}
-	// Match `dir/` as a prefix.
+	// `dir/` as a prefix.
 	if p.dirOnly && strings.Contains("/"+relPath+"/", "/"+p.body+"/") {
 		return true
 	}
@@ -230,12 +250,28 @@ func globMatch(pat, name string, re *regexp.Regexp) bool {
 // `(`, `)`, `[`, `]`, `{`, `}`, `^`, `$`, `\`, `|`) are escaped so
 // pathological patterns from a hand-edited .gitignore can't trip
 // regexp.Compile or produce surprising matches.
+//
+// gitignore-specific tweaks:
+//   - `**/X` matches X at the root *and* in any subdirectory, so we
+//     emit `(?:.*/)?` for that prefix instead of `.*/` (which would
+//     require at least one slash).
+//   - `X/**` matches X and any descendant.
+//   - `**` alone matches anything.
 func compileDoubleStar(pat string) *regexp.Regexp {
 	var b strings.Builder
 	b.WriteByte('^')
+	// Leading `**/`: zero-or-more directory components.
+	if strings.HasPrefix(pat, "**/") {
+		b.WriteString(`(?:.*/)?`)
+		pat = pat[3:]
+	}
 	i := 0
 	for i < len(pat) {
 		switch {
+		case i+2 < len(pat) && pat[i] == '/' && pat[i+1] == '*' && pat[i+2] == '*':
+			// `/**` mid-pattern: optional `/anything`.
+			b.WriteString(`(?:/.*)?`)
+			i += 3
 		case i+1 < len(pat) && pat[i] == '*' && pat[i+1] == '*':
 			b.WriteString(".*")
 			i += 2
@@ -247,8 +283,6 @@ func compileDoubleStar(pat string) *regexp.Regexp {
 			i++
 		default:
 			c := pat[i]
-			// Escape every regex special so unusual gitignore patterns
-			// don't smuggle in regex syntax (e.g. `[abc]/**`).
 			if strings.ContainsRune(`.+(){}[]^$\|`, rune(c)) {
 				b.WriteByte('\\')
 			}
@@ -259,8 +293,6 @@ func compileDoubleStar(pat string) *regexp.Regexp {
 	b.WriteByte('$')
 	re, err := regexp.Compile(b.String())
 	if err != nil {
-		// Compile shouldn't fail given the escapes above; if it does,
-		// fall back to a never-match regex so the pattern is harmless.
 		return regexp.MustCompile(`\A\B`)
 	}
 	return re

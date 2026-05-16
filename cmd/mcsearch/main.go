@@ -17,6 +17,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -130,6 +131,13 @@ func indexDir() (string, error) {
 	return filepath.Join(home, ".cache", "mcsearch"), nil
 }
 
+// cliLogger returns a stderr text logger. Used for the CLI commands
+// (index/watch) so verbose output goes to stderr without polluting
+// stdout (which the MCP server uses for JSON-RPC).
+func cliLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+}
+
 func newEmbedClient() *embed.Client {
 	url := envOr("MCSEARCH_EMBED_URL", "http://127.0.0.1:8082")
 	model := envOr("MCSEARCH_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B")
@@ -180,7 +188,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose})
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: cliLogger()})
 	if err := ix.Run(ctx); err != nil {
 		return err
 	}
@@ -422,8 +430,9 @@ func cmdWatch(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose})
-	w := watch.New(ix, ig, p.Root, watch.Options{Debounce: *debounce, Verbose: *verbose})
+	logger := cliLogger()
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger})
+	w := watch.New(ix, ig, p.Root, watch.Options{Debounce: *debounce, Verbose: *verbose, Logger: logger})
 	fmt.Fprintf(os.Stderr, "mcsearch watching %s (debounce=%s)\n", p.Root, *debounce)
 	return w.Run(ctx)
 }

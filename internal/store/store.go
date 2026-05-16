@@ -218,39 +218,6 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	return tx.Commit()
 }
 
-// Upsert inserts a chunk (or refreshes its last_seen_at if (path, sha) is
-// already present). Vector dimension must be consistent across the index;
-// the first call seeds it.
-//
-// Prefer UpsertMany when committing more than a handful of rows — each
-// Upsert call is its own transaction (== fsync), which is slow at
-// scale.
-func (s *Store) Upsert(ctx context.Context, path, kind string, startLine, endLine int, contentSHA, content string, vec []float32, now time.Time) error {
-	if s.dim == 0 {
-		s.dim = len(vec)
-		if _, err := s.db.ExecContext(ctx,
-			`INSERT INTO meta(key,value) VALUES('dim', ?)
-			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			fmt.Sprintf("%d", s.dim)); err != nil {
-			return err
-		}
-	} else if s.dim != len(vec) {
-		return fmt.Errorf("vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)", s.dim, len(vec))
-	}
-	blob := encodeVec(vec)
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO chunks(path, kind, start_line, end_line, content_sha1, content, vec, last_seen_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(path, content_sha1) DO UPDATE SET
-		   kind=excluded.kind,
-		   start_line=excluded.start_line,
-		   end_line=excluded.end_line,
-		   content=excluded.content,
-		   vec=excluded.vec,
-		   last_seen_at=excluded.last_seen_at`,
-		path, kind, startLine, endLine, contentSHA, content, blob, now.UnixNano())
-	return err
-}
 
 // TouchSeen bumps last_seen_at for an already-present (path, sha) pair.
 // Used when we re-walk a project and encounter unchanged content.
@@ -454,13 +421,3 @@ func encodeVec(v []float32) []byte {
 	return buf
 }
 
-func decodeVec(blob []byte) ([]float32, error) {
-	if len(blob)%4 != 0 {
-		return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
-	}
-	out := make([]float32, len(blob)/4)
-	for i := range out {
-		out[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-	}
-	return out, nil
-}

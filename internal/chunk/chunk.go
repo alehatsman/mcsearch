@@ -163,13 +163,6 @@ func Chunks(ctx context.Context, relPath string, src []byte) ([]Chunk, error) {
 	return windowChunks(relPath, src), nil
 }
 
-// covered tracks the byte ranges already claimed by a structural chunk.
-// Kept private to treeChunks; stored on the chunk for downstream
-// orphan-window calculation but not exposed.
-type covered struct {
-	start, end int
-}
-
 func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig) ([]Chunk, error) {
 	parser := sitter.NewParser()
 	defer parser.Close()
@@ -298,33 +291,39 @@ func orphanRange(relPath string, src []byte, start, end int) []Chunk {
 	return wins
 }
 
-// backfillComments walks backward from start to absorb a contiguous block
-// of leading // or # line comments (and the blank line just above the
-// declaration, if any). Limited to 50 lines to avoid pulling in unrelated
-// file headers.
+// backfillComments walks backward from start to absorb a contiguous
+// block of leading line comments (`//`, `#`, `--`) or block-comment
+// remnants (`/*`, `*`) immediately above the declaration. Limited to
+// 50 lines to avoid pulling in unrelated file headers.
+//
+// `start` must be at the beginning of a line — that is, `src[start-1]`
+// is either '\n' or out of range. The function returns a new offset
+// that's still at the start of a line.
 func backfillComments(src []byte, start int) int {
 	pos := start
 	lines := 0
 	for pos > 0 && lines < 50 {
-		// move to start of previous line
-		prev := pos - 1
-		if prev > 0 && src[prev-1] == '\n' {
-			// pos is already at line start; step back one line
-			// find start of previous line
-			lineStart := prev - 1
-			for lineStart > 0 && src[lineStart-1] != '\n' {
-				lineStart--
-			}
-			trimmed := strings.TrimLeft(string(src[lineStart:prev-1]), " \t")
-			if strings.HasPrefix(trimmed, "//") ||
-				strings.HasPrefix(trimmed, "#") ||
-				strings.HasPrefix(trimmed, "/*") ||
-				strings.HasPrefix(trimmed, "*") ||
-				strings.HasPrefix(trimmed, "--") {
-				pos = lineStart
-				lines++
-				continue
-			}
+		// pos points to the start of a line. The previous line ends at
+		// pos-1 (a newline, when pos>0) and starts at lineStart where
+		// src[lineStart-1] is '\n' or lineStart==0.
+		if src[pos-1] != '\n' {
+			break
+		}
+		lineStart := pos - 1 // index of the trailing newline
+		// Walk lineStart back to the first byte of the previous line.
+		for lineStart > 0 && src[lineStart-1] != '\n' {
+			lineStart--
+		}
+		// src[lineStart:pos-1] is the previous line's content (no newline).
+		trimmed := strings.TrimLeft(string(src[lineStart:pos-1]), " \t")
+		if strings.HasPrefix(trimmed, "//") ||
+			strings.HasPrefix(trimmed, "#") ||
+			strings.HasPrefix(trimmed, "/*") ||
+			strings.HasPrefix(trimmed, "*") ||
+			strings.HasPrefix(trimmed, "--") {
+			pos = lineStart
+			lines++
+			continue
 		}
 		break
 	}

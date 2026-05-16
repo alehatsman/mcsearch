@@ -12,8 +12,9 @@ package watch
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +29,7 @@ import (
 type Options struct {
 	Debounce time.Duration // quiet window before re-indexing; default 500ms
 	Verbose  bool
+	Logger   *slog.Logger // destination for log output; nil = io.Discard
 }
 
 type Watcher struct {
@@ -47,6 +49,9 @@ func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watc
 	if opt.Debounce <= 0 {
 		opt.Debounce = 500 * time.Millisecond
 	}
+	if opt.Logger == nil {
+		opt.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
 	return &Watcher{indexer: idx, ig: ig, root: root, opts: opt}
 }
 
@@ -64,7 +69,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 		return err
 	}
 	if w.opts.Verbose {
-		log.Printf("watch: ready on %s (debounce=%s)", w.root, w.opts.Debounce)
+		w.opts.Logger.Info("watch ready", "root", w.root, "debounce", w.opts.Debounce)
 	}
 
 	// Initial re-index (covers anything that changed while the daemon was
@@ -84,7 +89,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return errors.New("fsnotify errors channel closed")
 			}
-			log.Printf("watch: fsnotify error: %v", err)
+			w.opts.Logger.Warn("fsnotify error", "err", err)
 		}
 	}
 }
@@ -104,7 +109,7 @@ func (w *Watcher) handle(fw *fsnotify.Watcher, ev fsnotify.Event) {
 	// non-recursive; we maintain coverage by walking each new subtree.
 	if ev.Has(fsnotify.Create) && isDir {
 		if err := w.addWatches(fw, ev.Name); err != nil && w.opts.Verbose {
-			log.Printf("watch: addWatches(%s): %v", ev.Name, err)
+			w.opts.Logger.Warn("addWatches failed", "path", ev.Name, "err", err)
 		}
 	}
 	// File-level events that affect indexed content.
@@ -115,7 +120,7 @@ func (w *Watcher) handle(fw *fsnotify.Watcher, ev fsnotify.Event) {
 		return
 	}
 	if w.opts.Verbose {
-		log.Printf("watch: %s %s", ev.Op, rel)
+		w.opts.Logger.Info("fs event", "op", ev.Op.String(), "path", rel)
 	}
 	w.markDirty()
 }
@@ -155,10 +160,10 @@ func (w *Watcher) flush() {
 			if errors.Is(err, context.Canceled) {
 				// Shutdown initiated. Stop quietly.
 			} else {
-				log.Printf("watch: re-index failed: %v", err)
+				w.opts.Logger.Error("re-index failed", "err", err)
 			}
 		} else if w.opts.Verbose {
-			log.Printf("watch: re-indexed in %s", time.Since(start).Round(time.Millisecond))
+			w.opts.Logger.Info("re-indexed", "elapsed", time.Since(start).Round(time.Millisecond))
 		}
 
 		// If events landed during the run, re-flush in the same goroutine
@@ -193,7 +198,7 @@ func (w *Watcher) addWatches(fw *fsnotify.Watcher, dir string) error {
 		}
 		if err := fw.Add(path); err != nil {
 			if w.opts.Verbose {
-				log.Printf("watch: fw.Add(%s): %v", path, err)
+				w.opts.Logger.Warn("fw.Add failed", "path", path, "err", err)
 			}
 		}
 		return nil
