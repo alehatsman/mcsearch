@@ -133,9 +133,16 @@ func indexDir() (string, error) {
 func newEmbedClient() *embed.Client {
 	url := envOr("MCSEARCH_EMBED_URL", "http://127.0.0.1:8082")
 	model := envOr("MCSEARCH_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B")
-	batch, _ := strconv.Atoi(envOr("MCSEARCH_EMBED_BATCH", "32"))
-	timeout, err := time.ParseDuration(envOr("MCSEARCH_EMBED_TIMEOUT", "60s"))
+	rawBatch := envOr("MCSEARCH_EMBED_BATCH", "32")
+	batch, err := strconv.Atoi(rawBatch)
+	if err != nil || batch <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_BATCH=%q is not a positive integer; using 32\n", rawBatch)
+		batch = 32
+	}
+	rawTimeout := envOr("MCSEARCH_EMBED_TIMEOUT", "60s")
+	timeout, err := time.ParseDuration(rawTimeout)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_TIMEOUT=%q is not a Go duration; using 60s\n", rawTimeout)
 		timeout = 60 * time.Second
 	}
 	return embed.New(url, model, batch, timeout)
@@ -248,7 +255,13 @@ func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n] + "\n…(truncated)"
+	// Snap to a UTF-8 boundary so we don't cut a multi-byte rune in
+	// half and emit invalid UTF-8 to the terminal.
+	cut := n
+	for cut > 0 && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + "\n…(truncated)"
 }
 
 // ─── status ────────────────────────────────────────────────────────────────
@@ -496,6 +509,13 @@ func copyFile(srcPath, dstPath string) error {
 // ─── mcp ───────────────────────────────────────────────────────────────────
 
 func cmdMCP(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("mcp takes no arguments (got %v)", fs.Args())
+	}
 	base, err := indexDir()
 	if err != nil {
 		return err

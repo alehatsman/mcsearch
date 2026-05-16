@@ -111,7 +111,7 @@ func (w *Watcher) handle(fw *fsnotify.Watcher, ev fsnotify.Event) {
 	if !ev.Has(fsnotify.Create) && !ev.Has(fsnotify.Write) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
 		return
 	}
-	if !isDir && !ignore.IndexableExt(ev.Name) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
+	if !isDir && !ignore.IndexableExt(ev.Name) && !ignore.IndexableBasename(ev.Name) && !ev.Has(fsnotify.Remove) && !ev.Has(fsnotify.Rename) {
 		return
 	}
 	if w.opts.Verbose {

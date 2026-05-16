@@ -180,6 +180,52 @@ func Beta() string { return "beta" }
 	}
 }
 
+// TestNewlyIgnoredEviction makes sure that adding a path to
+// .mcsearch-ignore (or .gitignore) between runs evicts the chunks that
+// were previously indexed under that path. Without explicit eviction
+// the walker would simply skip the subtree on the next run and the
+// stale chunks would live forever in the index.
+func TestNewlyIgnoredEviction(t *testing.T) {
+	srv := fakeEmbedServer(t)
+	defer srv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\nfunc Main() {}\n")
+	writeFile(t, filepath.Join(projDir, "drafts/wip.go"),
+		"package drafts\nfunc WIP() {}\n")
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(srv.URL, "fake", 8, 5*time.Second)
+	ix := New(p, st, em, ig, Options{})
+
+	if err := ix.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats0, _ := st.Stats(ctx)
+	if stats0.Files < 2 {
+		t.Fatalf("expected both files indexed, got %d", stats0.Files)
+	}
+
+	// Add an ignore rule and reload the matcher.
+	writeFile(t, filepath.Join(projDir, ".mcsearch-ignore"), "drafts/\n")
+	ig2, _ := ignore.New(p.Root)
+	ix2 := New(p, st, em, ig2, Options{})
+	if err := ix2.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	stats1, _ := st.Stats(ctx)
+	if stats1.Files != 1 {
+		t.Errorf("expected drafts/ to be evicted, got %d files in index", stats1.Files)
+	}
+}
+
 // TestPruneAtSameMillisecond exercises the regression where two successive
 // Run() calls completing inside the same millisecond used to share a
 // last_seen_at value, defeating the strict-less-than PruneUnseen filter.

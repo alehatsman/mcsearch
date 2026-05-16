@@ -110,6 +110,7 @@ type pattern struct {
 	anchored bool // leading `/`
 	dirOnly  bool // trailing `/`
 	body     string
+	re       *regexp.Regexp // precompiled when body contains `**`
 }
 
 // New loads default + .gitignore + .mcsearch-ignore from root.
@@ -158,6 +159,11 @@ func (m *Matcher) addPatterns(lines []string) {
 			line = strings.TrimSuffix(line, "/")
 		}
 		p.body = line
+		// Precompile `**`-style patterns once; the match path runs
+		// per-walked-entry, often many thousands of times.
+		if strings.Contains(line, "**") {
+			p.re = compileDoubleStar(line)
+		}
 		m.patterns = append(m.patterns, p)
 	}
 }
@@ -188,16 +194,16 @@ func (p pattern) matches(relPath string, isDir bool) bool {
 		// Fall through to the body matcher; it'll handle prefixes.
 	}
 	if p.anchored {
-		return globMatch(p.body, relPath) || (p.dirOnly && strings.HasPrefix(relPath, p.body+"/"))
+		return globMatch(p.body, relPath, p.re) || (p.dirOnly && strings.HasPrefix(relPath, p.body+"/"))
 	}
 	// Unanchored: match the basename, or any path segment.
-	if globMatch(p.body, filepath.Base(relPath)) {
+	if globMatch(p.body, filepath.Base(relPath), p.re) {
 		return true
 	}
 	// Match any directory segment.
 	segs := strings.Split(relPath, "/")
 	for i := 0; i < len(segs); i++ {
-		if globMatch(p.body, segs[i]) {
+		if globMatch(p.body, segs[i], p.re) {
 			return true
 		}
 	}
@@ -208,42 +214,56 @@ func (p pattern) matches(relPath string, isDir bool) bool {
 	return false
 }
 
-// globMatch is filepath.Match with `**` support.
-func globMatch(pat, name string) bool {
-	if strings.Contains(pat, "**") {
-		// Convert `**` to a regex `.*` and `*` to `[^/]*`. Cheap; we only
-		// hit this for the few patterns that use `**`.
-		var b strings.Builder
-		b.WriteByte('^')
-		i := 0
-		for i < len(pat) {
-			switch {
-			case i+1 < len(pat) && pat[i] == '*' && pat[i+1] == '*':
-				b.WriteString(".*")
-				i += 2
-			case pat[i] == '*':
-				b.WriteString("[^/]*")
-				i++
-			case pat[i] == '?':
-				b.WriteString("[^/]")
-				i++
-			case pat[i] == '.':
-				b.WriteString(`\.`)
-				i++
-			default:
-				b.WriteByte(pat[i])
-				i++
-			}
-		}
-		b.WriteByte('$')
-		re, err := regexp.Compile(b.String())
-		if err != nil {
-			return false
-		}
+// globMatch is filepath.Match with `**` support. For `**` patterns the
+// caller is expected to have stashed a precompiled regex on the
+// pattern; we receive it as `re` (nil for plain globs).
+func globMatch(pat, name string, re *regexp.Regexp) bool {
+	if re != nil {
 		return re.MatchString(name)
 	}
 	ok, _ := filepath.Match(pat, name)
 	return ok
+}
+
+// compileDoubleStar converts a gitignore-style `**` pattern into a
+// regexp. Regex metacharacters that are NOT meaningful in a glob (`+`,
+// `(`, `)`, `[`, `]`, `{`, `}`, `^`, `$`, `\`, `|`) are escaped so
+// pathological patterns from a hand-edited .gitignore can't trip
+// regexp.Compile or produce surprising matches.
+func compileDoubleStar(pat string) *regexp.Regexp {
+	var b strings.Builder
+	b.WriteByte('^')
+	i := 0
+	for i < len(pat) {
+		switch {
+		case i+1 < len(pat) && pat[i] == '*' && pat[i+1] == '*':
+			b.WriteString(".*")
+			i += 2
+		case pat[i] == '*':
+			b.WriteString("[^/]*")
+			i++
+		case pat[i] == '?':
+			b.WriteString("[^/]")
+			i++
+		default:
+			c := pat[i]
+			// Escape every regex special so unusual gitignore patterns
+			// don't smuggle in regex syntax (e.g. `[abc]/**`).
+			if strings.ContainsRune(`.+(){}[]^$\|`, rune(c)) {
+				b.WriteByte('\\')
+			}
+			b.WriteByte(c)
+			i++
+		}
+	}
+	b.WriteByte('$')
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		// Compile shouldn't fail given the escapes above; if it does,
+		// fall back to a never-match regex so the pattern is harmless.
+		return regexp.MustCompile(`\A\B`)
+	}
+	return re
 }
 
 // IndexableExt returns true if the file extension is one mcsearch will
@@ -252,15 +272,47 @@ func IndexableExt(path string) bool {
 	return IndexableExtensions[strings.ToLower(filepath.Ext(path))]
 }
 
+// IndexableBasenames are well-known filenames that have no extension
+// (or a misleading one) but whose content is still useful to index.
+var IndexableBasenames = map[string]bool{
+	"Makefile":       true,
+	"makefile":       true,
+	"GNUmakefile":    true,
+	"Dockerfile":     true,
+	"dockerfile":     true,
+	"Containerfile":  true,
+	"Justfile":       true,
+	"justfile":       true,
+	"CMakeLists.txt": true,
+	"BUILD":          true,
+	"BUILD.bazel":    true,
+	"WORKSPACE":      true,
+	"Rakefile":       true,
+	"Gemfile":        true,
+	"Procfile":       true,
+}
+
+// IndexableBasename returns true for known basenames that lack an
+// indexable extension but contain code-like content worth chunking.
+func IndexableBasename(path string) bool {
+	return IndexableBasenames[filepath.Base(path)]
+}
+
 // secretPatterns are checked against the first 4 KB of any candidate file.
 // A match causes the file to be skipped with a logged warning.
 var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                   // AWS access key
-	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`), // PEM private key
-	regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),                // GitHub PAT (classic)
-	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{82}`),        // GitHub fine-grained PAT
-	regexp.MustCompile(`xox[abps]-[A-Za-z0-9-]{10,}`),        // Slack token
-	regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9]{20,}`),      // OpenAI/Anthropic-style API key
+	regexp.MustCompile(`AKIA[0-9A-Z]{16}`),                       // AWS access key
+	regexp.MustCompile(`ASIA[0-9A-Z]{16}`),                       // AWS STS temporary access key
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`),     // PEM private key
+	regexp.MustCompile(`ghp_[A-Za-z0-9]{36}`),                    // GitHub PAT (classic)
+	regexp.MustCompile(`github_pat_[A-Za-z0-9_]{82}`),            // GitHub fine-grained PAT
+	regexp.MustCompile(`xox[abps]-[A-Za-z0-9-]{10,}`),            // Slack token
+	regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9_-]{20,}`),        // OpenAI/Anthropic-style API key
+	regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`),                  // Google API key
+	regexp.MustCompile(`sk_live_[0-9a-zA-Z]{24,}`),               // Stripe live secret key
+	regexp.MustCompile(`rk_live_[0-9a-zA-Z]{24,}`),               // Stripe restricted key
+	regexp.MustCompile(`glpat-[A-Za-z0-9_-]{20,}`),               // GitLab personal access token
+	regexp.MustCompile(`SG\.[A-Za-z0-9_-]{22,}\.[A-Za-z0-9_-]+`), // SendGrid
 }
 
 // LooksLikeSecret returns true if the first 4 KB of data matches a

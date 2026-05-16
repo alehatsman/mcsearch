@@ -316,7 +316,11 @@ func backfillComments(src []byte, start int) int {
 				lineStart--
 			}
 			trimmed := strings.TrimLeft(string(src[lineStart:prev-1]), " \t")
-			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "/*") || strings.HasPrefix(trimmed, "*") {
+			if strings.HasPrefix(trimmed, "//") ||
+				strings.HasPrefix(trimmed, "#") ||
+				strings.HasPrefix(trimmed, "/*") ||
+				strings.HasPrefix(trimmed, "*") ||
+				strings.HasPrefix(trimmed, "--") {
 				pos = lineStart
 				lines++
 				continue

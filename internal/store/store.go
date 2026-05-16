@@ -156,9 +156,75 @@ func (s *Store) ExistingSHAs(ctx context.Context, path string) (map[string]bool,
 	return out, rows.Err()
 }
 
+// PendingChunk is one row destined for an UpsertMany batch.
+type PendingChunk struct {
+	Path        string
+	Kind        string
+	StartLine   int
+	EndLine     int
+	ContentSHA  string
+	Content     string
+	Vec         []float32
+}
+
+// UpsertMany inserts a batch of chunks in a single transaction. One
+// commit per batch instead of one commit per chunk drops the no-op
+// fsync count by ~32× on a typical run and is well worth the slight
+// API duplication.
+func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Time) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	if s.dim == 0 {
+		s.dim = len(rows[0].Vec)
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO meta(key,value) VALUES('dim', ?)
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+			fmt.Sprintf("%d", s.dim)); err != nil {
+			return err
+		}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO chunks(path, kind, start_line, end_line, content_sha1, content, vec, last_seen_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(path, content_sha1) DO UPDATE SET
+		   kind=excluded.kind,
+		   start_line=excluded.start_line,
+		   end_line=excluded.end_line,
+		   content=excluded.content,
+		   vec=excluded.vec,
+		   last_seen_at=excluded.last_seen_at`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range rows {
+		if len(r.Vec) != s.dim {
+			_ = tx.Rollback()
+			return fmt.Errorf("vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)", s.dim, len(r.Vec))
+		}
+		if _, err := stmt.ExecContext(ctx,
+			r.Path, r.Kind, r.StartLine, r.EndLine, r.ContentSHA, r.Content,
+			encodeVec(r.Vec), now.UnixNano()); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 // Upsert inserts a chunk (or refreshes its last_seen_at if (path, sha) is
 // already present). Vector dimension must be consistent across the index;
 // the first call seeds it.
+//
+// Prefer UpsertMany when committing more than a handful of rows — each
+// Upsert call is its own transaction (== fsync), which is slow at
+// scale.
 func (s *Store) Upsert(ctx context.Context, path, kind string, startLine, endLine int, contentSHA, content string, vec []float32, now time.Time) error {
 	if s.dim == 0 {
 		s.dim = len(vec)
@@ -226,6 +292,27 @@ func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error
 func (s *Store) DeletePath(ctx context.Context, path string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE path=?`, path)
 	return err
+}
+
+// DeletePathPrefix drops all chunks whose path starts with prefix.
+// Used by the indexer to evict chunks under a directory that has
+// become ignored between runs (e.g. a fresh `node_modules/` entry).
+func (s *Store) DeletePathPrefix(ctx context.Context, prefix string) error {
+	if prefix == "" {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM chunks WHERE path LIKE ? ESCAPE '\'`,
+		escapeLike(prefix)+`%`)
+	return err
+}
+
+// escapeLike escapes the LIKE-pattern metacharacters in s.
+func escapeLike(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `%`, `\%`)
+	s = strings.ReplaceAll(s, `_`, `\_`)
+	return s
 }
 
 // Hit is one search result.

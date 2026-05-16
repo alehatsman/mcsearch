@@ -83,14 +83,31 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		}
 		if ix.Ignore.Match(rel, d.IsDir()) {
 			if d.IsDir() {
+				// If the user just added e.g. `node_modules/` to
+				// `.gitignore` between runs, the chunks under that
+				// directory must be evicted on this pass — otherwise
+				// they'd live forever in the index because the
+				// directory is no longer walked. Drop them by path
+				// prefix; the walk continues skipping the subtree.
+				_ = ix.Store.DeletePathPrefix(ctx, rel+"/")
 				return filepath.SkipDir
 			}
+			// Newly-ignored single file: drop its chunks.
+			_ = ix.Store.DeletePath(ctx, rel)
 			return nil
 		}
 		if d.IsDir() {
 			return nil
 		}
-		if !ignore.IndexableExt(path) {
+		// Skip symlinks. They risk (a) double-indexing the same content
+		// under both the link path and the target path, and (b)
+		// silently pulling content from outside the project root for
+		// links into the file system. Operators who want symlinked
+		// trees indexed should follow them at the shell level.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !ignore.IndexableExt(path) && !ignore.IndexableBasename(path) {
 			return nil
 		}
 		info, err := d.Info()
@@ -187,12 +204,20 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("embed: %w", err)
 			}
+			rows := make([]store.PendingChunk, len(batch))
 			for i, p := range batch {
-				if err := ix.Store.Upsert(ctx,
-					p.rel, p.chunk.Kind, p.chunk.StartLine, p.chunk.EndLine,
-					p.sha, p.chunk.Content, vecs[i], startTime); err != nil {
-					return err
+				rows[i] = store.PendingChunk{
+					Path:       p.rel,
+					Kind:       p.chunk.Kind,
+					StartLine:  p.chunk.StartLine,
+					EndLine:    p.chunk.EndLine,
+					ContentSHA: p.sha,
+					Content:    p.chunk.Content,
+					Vec:        vecs[i],
 				}
+			}
+			if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
+				return err
 			}
 		}
 	}
