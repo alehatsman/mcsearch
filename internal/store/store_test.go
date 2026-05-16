@@ -148,6 +148,59 @@ func TestSearchZeroQueryRejected(t *testing.T) {
 	}
 }
 
+// TestSearchCacheInvalidation guards against the failure mode where
+// the in-RAM vector cache outlives a mutating operation and surfaces
+// chunks that were deleted/replaced. Each mutator must invalidate.
+func TestSearchCacheInvalidation(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", ContentSHA: "h1", Content: "func A(){}", Vec: []float32{1, 0, 0, 0}},
+		{Path: "b.go", ContentSHA: "h2", Content: "func B(){}", Vec: []float32{0, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Warm the cache.
+	hits, _ := st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	if len(hits) != 2 {
+		t.Fatalf("baseline: got %d hits, want 2", len(hits))
+	}
+	// Delete a.go and re-query — cache must reflect the removal.
+	if err := st.DeletePath(ctx, "a.go"); err != nil {
+		t.Fatal(err)
+	}
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	if len(hits) != 1 || hits[0].Path != "b.go" {
+		t.Errorf("after DeletePath, got %d hits, top=%q; want 1 hit b.go", len(hits), pathOrNone(hits))
+	}
+	// Re-upsert and verify the new content lands in subsequent searches.
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "c.go", ContentSHA: "h3", Content: "func C(){}", Vec: []float32{1, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	if len(hits) != 2 {
+		t.Errorf("after UpsertMany, got %d hits, want 2", len(hits))
+	}
+	// PruneUnseen also invalidates (deletes everything because cutoff
+	// is in the future).
+	if _, err := st.PruneUnseen(ctx, time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	if len(hits) != 0 {
+		t.Errorf("after PruneUnseen all, got %d hits, want 0", len(hits))
+	}
+}
+
+func pathOrNone(hits []Hit) string {
+	if len(hits) == 0 {
+		return "<none>"
+	}
+	return hits[0].Path
+}
+
 func TestPersistsDimAcrossOpen(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "test.db")
