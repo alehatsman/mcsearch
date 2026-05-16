@@ -109,7 +109,8 @@ env:
   MCSEARCH_EMBED_BATCH        default 32
   MCSEARCH_EMBED_TIMEOUT      default 60s (Go duration)
   MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
-  MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache`)
+  MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
+  MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg`)
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────
@@ -137,6 +138,7 @@ func indexDir() (string, error) {
 func storeOpts() store.Options {
 	return store.Options{
 		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
+		DisableBM25:     os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
 	}
 }
 
@@ -256,7 +258,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	hits, err := st.Search(ctx, vecs[0], *k)
+	hits, err := st.Search(ctx, vecs[0], q, *k)
 	if err != nil {
 		return err
 	}

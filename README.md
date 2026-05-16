@@ -147,6 +147,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_EMBED_TIMEOUT`  | `60s`                              | HTTP timeout for each embedding request.      |
 | `MCSEARCH_EMBED_BATCH`    | `32`                               | Max chunks per `/v1/embeddings` call.         |
 | `MCSEARCH_DISABLE_VEC_CACHE` | unset                           | Set to `1` to skip the in-RAM vector cache and use the per-row SQL hot path (slower; bounded RAM for very large indexes). |
+| `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
 
 ## Storage
 
@@ -159,13 +160,46 @@ chunks(id, path, kind, start_line, end_line, content_sha1, content,
        vec BLOB, last_seen_at)                                              -- UNIQUE(path, content_sha1)
 ```
 
-Vectors are stored as packed `float32` BLOBs. Query is brute-force
-cosine similarity. On first `Search`, every chunk's vector is decoded
-once into a flat in-RAM `[]float32` slab plus precomputed `|v|` norms;
-subsequent queries score against the slab with zero hot-path
-allocations and one small `SELECT` to fetch content for the top-k IDs.
-Mutating operations (`UpsertMany`, `DeletePath`, `DeletePathPrefix`,
-`PruneUnseen`) invalidate the slab so the next `Search` rebuilds.
+Vectors are stored as packed `float32` BLOBs. A second virtual table,
+`chunks_fts`, indexes the same `content` for FTS5/BM25 lookups —
+external-content style, kept in sync with `chunks` via AFTER triggers
+so it costs nothing extra at upsert time.
+
+### Hybrid search (semantic + BM25 via RRF)
+
+Every `Search` runs two rankers and fuses them via Reciprocal Rank
+Fusion (Cormack et al., 2009):
+
+- the cosine path scores every chunk against the embedded query vector,
+- the BM25 path runs the literal tokens of the query text against
+  `chunks_fts` via SQLite's `bm25()`,
+- each chunk's final score is `Σ 1/(60 + rank_in_list)` summed across
+  whichever lists it appeared in.
+
+Why fuse? Semantic alone catches paraphrase ("how do we debounce
+filesystem events"), but misses rare literal tokens like
+`compileDoubleStar` or `MCSEARCH_DISABLE_VEC_CACHE` that the embedding
+model can't anchor on. BM25 alone is the inverse failure mode. RRF is
+scale-free, so we don't need to retune weights per corpus.
+
+When the caller hands `Search` an empty query text (or
+`MCSEARCH_DISABLE_BM25=1` is set), the BM25 leg is skipped and the
+result is the pre-hybrid semantic ranking — same behaviour the
+internal tests already exercise.
+
+Hits surface the underlying numbers: `score` is always the cosine for
+human comparability, `bm25_score` (larger = better) is filled when the
+chunk surfaced through the lexical leg, and `rrf_score` is the fused
+rank used for ordering.
+
+### Vector cache
+
+On first `Search`, every chunk's vector is decoded once into a flat
+in-RAM `[]float32` slab plus precomputed `|v|` norms; subsequent
+queries score against the slab with zero hot-path allocations and one
+small `SELECT` to fetch content for the top-k IDs. Mutating operations
+(`UpsertMany`, `DeletePath`, `DeletePathPrefix`, `PruneUnseen`)
+invalidate the slab so the next `Search` rebuilds.
 
 Measured on a Ryzen 9 9950X, brute-force cosine post-cache:
 

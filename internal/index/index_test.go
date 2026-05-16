@@ -146,7 +146,7 @@ func Beta() string { return "beta" }
 	if err != nil {
 		t.Fatal(err)
 	}
-	hits, err := st.Search(ctx, qvecs[0], 5)
+	hits, err := st.Search(ctx, qvecs[0], "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}

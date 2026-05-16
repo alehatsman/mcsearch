@@ -37,8 +37,16 @@ type SearchHit struct {
 	Kind      string  `json:"kind"`
 	StartLine int     `json:"start_line"`
 	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
-	Content   string  `json:"content"`
+	// Score is the cosine similarity in [-1, 1]. Always populated.
+	Score float32 `json:"score"`
+	// BM25Score is the lexical (FTS5) score when the hit surfaced
+	// through the BM25 leg of hybrid search. Larger = better. Zero
+	// for semantic-only hits.
+	BM25Score float32 `json:"bm25_score,omitempty"`
+	// RRFScore is the fused rank used for ordering when hybrid search
+	// is active. Zero when search ran semantic-only.
+	RRFScore float32 `json:"rrf_score,omitempty"`
+	Content  string  `json:"content"`
 }
 
 type SearchOutput struct {
@@ -117,7 +125,7 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 			time.Since(stats.LastIndex).Round(time.Hour), p.Root)
 	}
 
-	hits, err := st.Search(ctx, vecs[0], k)
+	hits, err := st.Search(ctx, vecs[0], in.Query, k)
 	if err != nil {
 		out.Status = "error"
 		out.Hint = fmt.Sprintf("search: %v", err)
@@ -131,6 +139,8 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 			StartLine: h.StartLine,
 			EndLine:   h.EndLine,
 			Score:     h.Score,
+			BM25Score: h.BM25Score,
+			RRFScore:  h.RRFScore,
 			Content:   h.Content,
 		})
 	}

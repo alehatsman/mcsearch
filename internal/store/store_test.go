@@ -40,7 +40,7 @@ func TestUpsertAndSearch(t *testing.T) {
 
 	// Query along (1,0,0,0) — `a.go` should rank first (cosine 1.0),
 	// then `c.go` (cosine 1/√2 ≈ 0.707), then `b.go`.
-	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, 3)
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestDeletePathPrefix(t *testing.T) {
 
 func TestSearchEmptyIndex(t *testing.T) {
 	st, ctx := newStore(t)
-	hits, err := st.Search(ctx, []float32{1, 0}, 5)
+	hits, err := st.Search(ctx, []float32{1, 0}, "", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestSearchEmptyIndex(t *testing.T) {
 
 func TestSearchZeroQueryRejected(t *testing.T) {
 	st, ctx := newStore(t)
-	_, err := st.Search(ctx, []float32{0, 0, 0}, 5)
+	_, err := st.Search(ctx, []float32{0, 0, 0}, "", 5)
 	if err == nil {
 		t.Error("expected error for zero-norm query")
 	}
@@ -161,7 +161,7 @@ func TestSearchCacheInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Warm the cache.
-	hits, _ := st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	hits, _ := st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if len(hits) != 2 {
 		t.Fatalf("baseline: got %d hits, want 2", len(hits))
 	}
@@ -169,7 +169,7 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	if err := st.DeletePath(ctx, "a.go"); err != nil {
 		t.Fatal(err)
 	}
-	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if len(hits) != 1 || hits[0].Path != "b.go" {
 		t.Errorf("after DeletePath, got %d hits, top=%q; want 1 hit b.go", len(hits), pathOrNone(hits))
 	}
@@ -179,7 +179,7 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if len(hits) != 2 {
 		t.Errorf("after UpsertMany, got %d hits, want 2", len(hits))
 	}
@@ -188,7 +188,7 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	if _, err := st.PruneUnseen(ctx, time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 5)
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if len(hits) != 0 {
 		t.Errorf("after PruneUnseen all, got %d hits, want 0", len(hits))
 	}
@@ -221,7 +221,7 @@ func TestSearchDisabledCache(t *testing.T) {
 	}, now); err != nil {
 		t.Fatal(err)
 	}
-	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, 3)
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "", 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,9 +239,122 @@ func TestSearchDisabledCache(t *testing.T) {
 	if err := st.DeletePath(ctx, "a.go"); err != nil {
 		t.Fatal(err)
 	}
-	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, 3)
+	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, "", 3)
 	if len(hits) != 2 || hits[0].Path == "a.go" {
 		t.Errorf("after DeletePath, got %d hits top=%q; want 2 hits without a.go", len(hits), pathOrNone(hits))
+	}
+}
+
+// TestHybridSearchBM25Surfaces verifies hybrid search recovers an
+// exact-identifier match even when the semantic vector intentionally
+// points elsewhere. The "needle" chunk has a near-zero cosine to the
+// query vector, but its content contains the unique token
+// "validateToken" — BM25 should rank it #1, RRF lifts it into top-k.
+func TestHybridSearchBM25Surfaces(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	// 8 noise chunks with arbitrary content (all close to [1,0,0,0]).
+	rows := []PendingChunk{
+		{Path: "noise1.go", Kind: "fn", ContentSHA: "n1", Content: "func a() { return 1 }", Vec: []float32{1, 0, 0, 0}},
+		{Path: "noise2.go", Kind: "fn", ContentSHA: "n2", Content: "func b() { return 2 }", Vec: []float32{0.99, 0.1, 0, 0}},
+		{Path: "noise3.go", Kind: "fn", ContentSHA: "n3", Content: "func c() { return 3 }", Vec: []float32{0.98, 0.2, 0, 0}},
+		{Path: "noise4.go", Kind: "fn", ContentSHA: "n4", Content: "func d() { return 4 }", Vec: []float32{0.97, 0.3, 0, 0}},
+		// The needle: semantically orthogonal but contains the literal
+		// identifier "validateToken" that the query is asking for.
+		{Path: "auth.go", Kind: "fn", ContentSHA: "needle",
+			Content: "func validateToken(tok string) bool { return tok != \"\" }",
+			Vec:     []float32{0, 0, 1, 0}},
+	}
+	if err := st.UpsertMany(ctx, rows, now); err != nil {
+		t.Fatal(err)
+	}
+
+	queryVec := []float32{1, 0, 0, 0}
+
+	// Semantic-only — the needle should rank LAST because its vector
+	// is orthogonal to the query.
+	semHits, err := st.Search(ctx, queryVec, "", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(semHits) == 0 || semHits[0].Path == "auth.go" {
+		t.Fatalf("semantic-only should NOT put auth.go first (got top=%q)", semHits[0].Path)
+	}
+
+	// Hybrid — same query vector, but with the natural-language text
+	// that contains "validateToken". RRF should lift auth.go to #1.
+	hybridHits, err := st.Search(ctx, queryVec, "validateToken function", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hybridHits) == 0 || hybridHits[0].Path != "auth.go" {
+		t.Errorf("hybrid: top hit = %q, want auth.go (BM25 should surface it)", pathOrNone(hybridHits))
+	}
+	// The needle should have a populated BM25Score and RRFScore.
+	for _, h := range hybridHits {
+		if h.Path == "auth.go" {
+			if h.BM25Score <= 0 {
+				t.Errorf("auth.go BM25Score = %v, want > 0", h.BM25Score)
+			}
+			if h.RRFScore <= 0 {
+				t.Errorf("auth.go RRFScore = %v, want > 0", h.RRFScore)
+			}
+		}
+	}
+}
+
+// TestHybridDegradesGracefully covers the failure modes around BM25:
+// FTS5 query with only stop-symbols → empty MATCH expression → search
+// silently falls back to semantic-only, no error. Same for an explicit
+// DisableBM25.
+func TestHybridDegradesGracefully(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", ContentSHA: "h1", Content: "func A(){}", Vec: []float32{1, 0, 0, 0}},
+		{Path: "b.go", ContentSHA: "h2", Content: "func B(){}", Vec: []float32{0, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Query text with no usable tokens (single-char + punctuation).
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "@ ; ,", 5)
+	if err != nil {
+		t.Fatalf("hybrid search with unusable query text should not error: %v", err)
+	}
+	if len(hits) != 2 {
+		t.Errorf("got %d hits, want 2 (semantic fallback)", len(hits))
+	}
+}
+
+// TestDisableBM25 confirms the env-driven kill switch turns off the
+// lexical leg even when query text is present.
+func TestDisableBM25(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	st, err := OpenWith(ctx, dbPath, Options{DisableBM25: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	now := time.Now()
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "noise.go", ContentSHA: "n1", Content: "func irrelevant()", Vec: []float32{1, 0, 0, 0}},
+		{Path: "needle.go", ContentSHA: "n2", Content: "func validateToken()", Vec: []float32{0, 0, 1, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	// With BM25 disabled, even a perfect lexical match for "validateToken"
+	// should NOT lift needle.go above the semantically-aligned noise.go.
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "validateToken", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) == 0 || hits[0].Path != "noise.go" {
+		t.Errorf("DisableBM25: top = %q, want noise.go (semantic-only)", pathOrNone(hits))
+	}
+	if hits[0].BM25Score != 0 || hits[0].RRFScore != 0 {
+		t.Errorf("DisableBM25 should leave BM25Score/RRFScore zero; got %v / %v",
+			hits[0].BM25Score, hits[0].RRFScore)
 	}
 }
 

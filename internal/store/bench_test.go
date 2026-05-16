@@ -76,7 +76,7 @@ func benchSearch(b *testing.B, n, dim int) {
 	ctx := context.Background()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := st.Search(ctx, q, 8); err != nil {
+		if _, err := st.Search(ctx, q, "", 8); err != nil {
 			b.Fatal(err)
 		}
 	}
