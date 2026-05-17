@@ -197,6 +197,7 @@ func newChatClient() *chat.Client {
 func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	verbose := fs.Bool("v", false, "verbose")
+	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -210,6 +211,9 @@ func cmdIndex(ctx context.Context, args []string) error {
 	}
 	p, err := proj.Resolve(rest[0], base)
 	if err != nil {
+		return err
+	}
+	if err := proj.CheckIndexable(p, *force); err != nil {
 		return err
 	}
 	if err := p.EnsureCacheDir(); err != nil {
@@ -549,6 +553,7 @@ func cmdNuke(ctx context.Context, args []string) error {
 func cmdWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	verbose := fs.Bool("v", false, "verbose")
+	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -563,6 +568,9 @@ func cmdWatch(ctx context.Context, args []string) error {
 	}
 	p, err := proj.Resolve(rest[0], base)
 	if err != nil {
+		return err
+	}
+	if err := proj.CheckIndexable(p, *force); err != nil {
 		return err
 	}
 	if err := p.EnsureCacheDir(); err != nil {

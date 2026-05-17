@@ -157,6 +157,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
 | `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
+| `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
 
 ## Storage
