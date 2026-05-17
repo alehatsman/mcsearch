@@ -1,6 +1,6 @@
 # Spec 01: Cross-Encoder Reranker
 
-**Status:** 📝 Draft
+**Status:** ✅ Implemented (v1: phases 1–4, 2026-05-18). Phase 5 (`mcsearch eval` MRR/nDCG) and Phase 6 (dotfiles rerank endpoint) remain optional.
 **Effort:** S–M (3–5 days of focused work)
 **Value:** Quality. Today's hybrid RRF (semantic ⊕ BM25) is strong on
 recall but mis-orders the top-k on conceptual queries — the top hit

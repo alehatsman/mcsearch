@@ -43,6 +43,8 @@ also wired up.
 ```bash
 mcsearch index <path>            # index a project (or re-index incrementally)
 mcsearch query <path> "..."      # query an indexed project from the terminal
+                                 #   --rerank=off          skip rerank for this call
+                                 #   --format=json         emit hits as JSON (rerank_score included)
 mcsearch generate <path> "..."   # generate code grounded in the project's index
                                  # (RAG: top-k chunks → chat endpoint)
 mcsearch status [<path>]         # show indexed projects and endpoint health
@@ -174,6 +176,11 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
+| `MCSEARCH_RERANK_URL`     | unset                              | Cohere-compatible `/v1/rerank` base URL (TEI, vLLM with reranker, Cohere itself). Unset = rerank disabled. |
+| `MCSEARCH_RERANK_MODEL`   | `qwen3-reranker:4b`                | Model name forwarded to the reranker. |
+| `MCSEARCH_RERANK_POOL`    | `40`                               | Fused candidates fed to the reranker. Clamped to `[1, 100]`. Larger = better recall, slower call. |
+| `MCSEARCH_RERANK_TIMEOUT` | `5s`                               | HTTP timeout for each rerank request. |
+| `MCSEARCH_DISABLE_RERANK` | unset                              | Set to `1` to short-circuit rerank even when `MCSEARCH_RERANK_URL` is set. For A/B comparison. |
 
 ## Storage
 
@@ -217,6 +224,35 @@ Hits surface the underlying numbers: `score` is always the cosine for
 human comparability, `bm25_score` (larger = better) is filled when the
 chunk surfaced through the lexical leg, and `rrf_score` is the fused
 rank used for ordering.
+
+### Cross-encoder rerank (optional)
+
+Hybrid RRF is strong on recall but mis-orders top-k on conceptual
+queries — the right chunk often sits at position 3 or 4. A
+cross-encoder reranker scores `(query, chunk)` pairs *jointly* with
+cross-attention and reorders the fused pool before truncation. Off by
+default — set `MCSEARCH_RERANK_URL` to enable:
+
+```bash
+# TEI serving qwen3-reranker:4b on port 8083
+MCSEARCH_RERANK_URL=http://127.0.0.1:8083 mcsearch query ./ "configure embedding model"
+```
+
+When reachable, each `Hit` gains a `rerank_score` in `[0, 1]` (larger =
+more relevant), visible via `mcsearch query --format=json` and in the
+MCP `semantic_search` response. When the endpoint is unreachable the
+search falls back to pre-rerank fused order with no error surfaced —
+reranker outages never break the search path.
+
+The reranker lives on `Store.Options`, so it applies to every
+`store.Search` caller — `semantic_search`, `generate_code`'s RAG,
+`ask_codebase`'s RAG, and the CLI `query`. `summarize_path` does not
+touch `Search` and is unaffected. Per-call opt-out is
+`mcsearch query --rerank=off`; process-wide off is
+`MCSEARCH_DISABLE_RERANK=1`.
+
+Design and migration notes: see
+[`docs/specs/spec-01-rerank.md`](docs/specs/spec-01-rerank.md).
 
 ### Code generation (RAG + chat)
 
