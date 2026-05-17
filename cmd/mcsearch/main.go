@@ -1,14 +1,15 @@
 // mcsearch — local semantic-search helper for Claude Code.
 //
 // Subcommands:
-//   index <path>            Build or refresh the per-project index.
-//   query <path> <query...> Search an existing index from the terminal.
-//   status [<path>]         Show endpoint health and indexed projects.
-//   nuke <path>             Delete the on-disk index for a project.
-//   watch <path>            Keep the index fresh as files change.
-//   clone <src> <dst>       Seed dst's index from src's (worktrees).
-//   mcp                     Run as an MCP server over stdio.
-//   version                 Print the build version.
+//   index <path>             Build or refresh the per-project index.
+//   query <path> <query...>  Search an existing index from the terminal.
+//   generate <path> <prompt> Generate code grounded in the project's index.
+//   status [<path>]          Show endpoint health and indexed projects.
+//   nuke <path>              Delete the on-disk index for a project.
+//   watch <path>             Keep the index fresh as files change.
+//   clone <src> <dst>        Seed dst's index from src's (worktrees).
+//   mcp                      Run as an MCP server over stdio.
+//   version                  Print the build version.
 package main
 
 import (
@@ -26,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/index"
@@ -51,6 +53,8 @@ func main() {
 		err = cmdIndex(ctx, args)
 	case "query":
 		err = cmdQuery(ctx, args)
+	case "generate":
+		err = cmdGenerate(ctx, args)
 	case "status":
 		err = cmdStatus(ctx, args)
 	case "nuke":
@@ -94,6 +98,8 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   mcsearch index <path>             build or refresh the index for a project
   mcsearch query <path> <query>     return top-k chunks for a query
+  mcsearch generate <path> <prompt> generate code grounded in the project's
+                                    index (RAG: top-k chunks → chat endpoint)
   mcsearch status [<path>]          show endpoint health and project stats
   mcsearch nuke   <path>            delete the on-disk index for a project
   mcsearch mcp                      run as an MCP server over stdio
@@ -108,6 +114,9 @@ env:
   MCSEARCH_EMBED_MODEL        default Qwen/Qwen3-Embedding-4B
   MCSEARCH_EMBED_BATCH        default 32
   MCSEARCH_EMBED_TIMEOUT      default 60s (Go duration)
+  MCSEARCH_CHAT_URL           default http://127.0.0.1:8081
+  MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
+  MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
   MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
   MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
   MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg`)
@@ -169,6 +178,18 @@ func newEmbedClient() *embed.Client {
 		timeout = 60 * time.Second
 	}
 	return embed.New(url, model, batch, timeout)
+}
+
+func newChatClient() *chat.Client {
+	url := envOr("MCSEARCH_CHAT_URL", "http://127.0.0.1:8081")
+	model := envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+	rawTimeout := envOr("MCSEARCH_CHAT_TIMEOUT", "120s")
+	timeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_CHAT_TIMEOUT=%q is not a Go duration; using 120s\n", rawTimeout)
+		timeout = 120 * time.Second
+	}
+	return chat.New(url, model, timeout)
 }
 
 // ─── index ─────────────────────────────────────────────────────────────────
@@ -272,6 +293,117 @@ func cmdQuery(ctx context.Context, args []string) error {
 		fmt.Println()
 	}
 	return nil
+}
+
+// ─── generate ──────────────────────────────────────────────────────────────
+
+func cmdGenerate(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	k := fs.Int("k", 8, "number of RAG chunks to retrieve as context")
+	noRAG := fs.Bool("no-rag", false, "skip retrieval; send prompt to the chat endpoint without project context")
+	system := fs.String("system", "", "override the default system prompt")
+	temp := fs.Float64("temperature", 0, "sampling temperature (0 = server default)")
+	maxTok := fs.Int("max-tokens", 0, "max tokens to generate (0 = server default)")
+	showCtx := fs.Bool("show-context", false, "print the chunks fed as context before the model output")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return fmt.Errorf("generate needs <path> <prompt...>")
+	}
+	path := rest[0]
+	prompt := strings.Join(rest[1:], " ")
+	if strings.TrimSpace(prompt) == "" {
+		return fmt.Errorf("prompt is empty")
+	}
+
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(path, base)
+	if err != nil {
+		return err
+	}
+
+	var hits []store.Hit
+	if !*noRAG {
+		if _, err := os.Stat(p.DBPath); err != nil {
+			if os.IsNotExist(err) {
+				return fmt.Errorf("no index for %s — run `mcsearch index %s` first, or pass --no-rag to skip retrieval", p.Root, p.Root)
+			}
+			return err
+		}
+		st, err := openStore(ctx, p.DBPath)
+		if err != nil {
+			return err
+		}
+		em := newEmbedClient()
+		vecs, err := em.Embed(ctx, []string{prompt})
+		if err != nil {
+			st.Close()
+			return fmt.Errorf("embed: %w", err)
+		}
+		hits, err = st.Search(ctx, vecs[0], prompt, *k)
+		st.Close()
+		if err != nil {
+			return fmt.Errorf("search: %w", err)
+		}
+	}
+
+	sysPrompt := *system
+	if strings.TrimSpace(sysPrompt) == "" {
+		sysPrompt = "You are a precise coding assistant. " +
+			"When CONTEXT chunks from the user's project are provided, ground your answer in them — " +
+			"reference real symbols, paths, and conventions rather than inventing names. " +
+			"Output code in fenced blocks; keep prose minimal."
+	}
+
+	userContent := prompt
+	if len(hits) > 0 {
+		userContent = formatHitsAsContext(hits) + "\n\n---\n\n" + prompt
+	}
+
+	if *showCtx && len(hits) > 0 {
+		fmt.Fprintln(os.Stderr, "─── context fed to the model ───")
+		for i, h := range hits {
+			fmt.Fprintf(os.Stderr, "#%d %s:%d-%d  (%s)  score=%.4f\n", i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
+		}
+		fmt.Fprintln(os.Stderr, "────────────────────────────────")
+	}
+
+	cc := newChatClient()
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: sysPrompt},
+		{Role: "user", Content: userContent},
+	}, chat.Options{
+		Temperature: float32(*temp),
+		MaxTokens:   *maxTok,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Println(resp.Content)
+	if resp.FinishReason != "" && resp.FinishReason != "stop" {
+		fmt.Fprintf(os.Stderr, "\n(finish_reason=%s)\n", resp.FinishReason)
+	}
+	return nil
+}
+
+func formatHitsAsContext(hits []store.Hit) string {
+	var b strings.Builder
+	b.WriteString("CONTEXT — relevant chunks from the project's mcsearch index:\n\n")
+	for i, h := range hits {
+		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s, score=%.4f) ---\n",
+			i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
+		b.WriteString(h.Content)
+		if !strings.HasSuffix(h.Content, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 func truncate(s string, n int) string {
@@ -546,6 +678,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	}
 	srv := &mcp.Server{
 		EmbedClient: newEmbedClient(),
+		ChatClient:  newChatClient(),
 		IndexDir:    base,
 		StoreOpts:   storeOpts(),
 	}

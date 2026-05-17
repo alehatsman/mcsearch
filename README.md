@@ -6,8 +6,13 @@ endpoint (vLLM, TEI, or ollama — local GPU or SSH-tunneled to a remote
 host), and exposes a `semantic_search` tool over MCP so Claude can ask
 for ranked code chunks instead of fanning out grep calls.
 
+A second MCP tool, `generate_code`, reuses the same index as RAG context
+and routes the prompt through a self-hosted `/v1/chat/completions`
+endpoint — same wire shape, different model — so generation is grounded
+in real symbols and paths from your project.
+
 Source code never leaves the calling machine — only chunk text crosses
-the wire to the embedding endpoint, which you control.
+the wire to the embedding / chat endpoints, which you control.
 
 ## Install
 
@@ -25,16 +30,18 @@ also wired up.
 ## CLI
 
 ```bash
-mcsearch index <path>          # index a project (or re-index incrementally)
-mcsearch query <path> "..."    # query an indexed project from the terminal
-mcsearch status [<path>]       # show indexed projects and endpoint health
-mcsearch nuke <path>           # delete the on-disk index for a project
-mcsearch mcp                   # run as an MCP server over stdio
-mcsearch watch <path>          # keep the index fresh as files change (fsnotify)
-mcsearch clone <src> <dst>     # seed dst's index from src's (e.g. for a new
-                               # git worktree); follow with `mcsearch index
-                               # <dst>` to reconcile any chunks that differ
-mcsearch version               # print the build version
+mcsearch index <path>            # index a project (or re-index incrementally)
+mcsearch query <path> "..."      # query an indexed project from the terminal
+mcsearch generate <path> "..."   # generate code grounded in the project's index
+                                 # (RAG: top-k chunks → chat endpoint)
+mcsearch status [<path>]         # show indexed projects and endpoint health
+mcsearch nuke <path>             # delete the on-disk index for a project
+mcsearch mcp                     # run as an MCP server over stdio
+mcsearch watch <path>            # keep the index fresh as files change (fsnotify)
+mcsearch clone <src> <dst>       # seed dst's index from src's (e.g. for a new
+                                 # git worktree); follow with `mcsearch index
+                                 # <dst>` to reconcile any chunks that differ
+mcsearch version                 # print the build version
 ```
 
 ## Demo
@@ -148,6 +155,9 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_EMBED_BATCH`    | `32`                               | Max chunks per `/v1/embeddings` call.         |
 | `MCSEARCH_DISABLE_VEC_CACHE` | unset                           | Set to `1` to skip the in-RAM vector cache and use the per-row SQL hot path (slower; bounded RAM for very large indexes). |
 | `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
+| `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
+| `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
+| `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
 
 ## Storage
 
@@ -191,6 +201,47 @@ Hits surface the underlying numbers: `score` is always the cosine for
 human comparability, `bm25_score` (larger = better) is filled when the
 chunk surfaced through the lexical leg, and `rrf_score` is the fused
 rank used for ordering.
+
+### Code generation (RAG + chat)
+
+`mcsearch generate <path> "<prompt>"` runs the same hybrid retrieval as
+`query`, then prepends the top-k chunks to the prompt as a `CONTEXT`
+block and sends the result to a self-hosted `/v1/chat/completions`
+endpoint:
+
+```console
+$ mcsearch generate ./ "add a flag to skip the BM25 leg in cmdQuery"
+```
+
+The CLI flags (`-k`, `--no-rag`, `--system`, `--temperature`,
+`--max-tokens`, `--show-context`) let you steer or short-circuit RAG
+from the terminal. Over MCP the same capability surfaces as a
+`generate_code` tool, returning both the generated text and the chunks
+that were fed in as context — so Claude can verify the model didn't
+hallucinate names that weren't in the project:
+
+```json
+{
+  "status": "ok",
+  "project": "/home/aleh/projects/mcsearch",
+  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
+  "content": "```go\nif *noBM25 {\n    opts.DisableBM25 = true\n}\n```",
+  "finish_reason": "stop",
+  "context": [
+    { "path": "cmd/mcsearch/main.go", "start_line": 221, "end_line": 275, "kind": "function_declaration", "score": 0.51 },
+    { "path": "internal/store/store.go", "start_line": 328, "end_line": 417, "kind": "method_declaration", "score": 0.42 }
+  ]
+}
+```
+
+The `status` field follows the same convention as `semantic_search`:
+`ok` / `no-index` / `embedding-service-unreachable` /
+`chat-service-unreachable` / `error`, each with a `hint` so the caller
+can recover gracefully. Point `MCSEARCH_CHAT_URL` at any
+OpenAI-compatible `/v1/chat/completions` server — vLLM
+(`vllm serve … --task generate`), TEI's compat shim, or ollama (e.g.
+`ollama pull qwen2.5-coder:7b-instruct`, then
+`MCSEARCH_CHAT_URL=http://127.0.0.1:11434`).
 
 ### Vector cache
 
