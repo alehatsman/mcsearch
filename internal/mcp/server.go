@@ -35,10 +35,10 @@ type SearchInput struct {
 }
 
 type SearchHit struct {
-	Path      string  `json:"path"`
-	Kind      string  `json:"kind"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
+	Path      string `json:"path"`
+	Kind      string `json:"kind"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
 	// Score is the cosine similarity in [-1, 1]. Always populated.
 	Score float32 `json:"score"`
 	// BM25Score is the lexical (FTS5) score when the hit surfaced
@@ -152,13 +152,13 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 // ─── tool: generate_code ──────────────────────────────────────────────────
 
 type GenerateInput struct {
-	Prompt      string `json:"prompt" jsonschema:"natural-language description of the code to generate / change / explain"`
-	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
-	K           int    `json:"k,omitempty" jsonschema:"number of RAG chunks to retrieve as context (default 8, max 30; ignored when use_index=false)"`
-	UseIndex    *bool  `json:"use_index,omitempty" jsonschema:"prepend top-k chunks from the project's mcsearch index as context (default true)"`
-	System      string `json:"system,omitempty" jsonschema:"override the system prompt; default is a concise code-assistant prompt"`
+	Prompt      string  `json:"prompt" jsonschema:"natural-language description of the code to generate / change / explain"`
+	ProjectRoot string  `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	K           int     `json:"k,omitempty" jsonschema:"number of RAG chunks to retrieve as context (default 8, max 30; ignored when use_index=false)"`
+	UseIndex    *bool   `json:"use_index,omitempty" jsonschema:"prepend top-k chunks from the project's mcsearch index as context (default true)"`
+	System      string  `json:"system,omitempty" jsonschema:"override the system prompt; default is a concise code-assistant prompt"`
 	Temperature float32 `json:"temperature,omitempty" jsonschema:"sampling temperature (0 = server default)"`
-	MaxTokens   int    `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
+	MaxTokens   int     `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
 }
 
 type GenerateContextChunk struct {
@@ -372,20 +372,20 @@ type AskInput struct {
 // ─── tool: summarize_path ─────────────────────────────────────────────────
 
 type SummarizeInput struct {
-	Path        string `json:"path" jsonschema:"file path to summarize; relative paths are resolved against project_root"`
-	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
-	StartLine   int    `json:"start_line,omitempty" jsonschema:"first line to summarize (1-indexed, inclusive); 0 = beginning of file"`
-	EndLine     int    `json:"end_line,omitempty" jsonschema:"last line to summarize (1-indexed, inclusive); 0 = end of file"`
-	Focus       string `json:"focus,omitempty" jsonschema:"optional steering — e.g. 'public API surface', 'side effects', 'error handling'"`
+	Path        string  `json:"path" jsonschema:"file path to summarize; relative paths are resolved against project_root"`
+	ProjectRoot string  `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	StartLine   int     `json:"start_line,omitempty" jsonschema:"first line to summarize (1-indexed, inclusive); 0 = beginning of file"`
+	EndLine     int     `json:"end_line,omitempty" jsonschema:"last line to summarize (1-indexed, inclusive); 0 = end of file"`
+	Focus       string  `json:"focus,omitempty" jsonschema:"optional steering — e.g. 'public API surface', 'side effects', 'error handling'"`
 	Temperature float32 `json:"temperature,omitempty" jsonschema:"sampling temperature (0 = server default)"`
-	MaxTokens   int    `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
+	MaxTokens   int     `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
 }
 
 type SummarizeOutput struct {
 	Status       string `json:"status"` // "ok" | "chat-service-unreachable" | "error"
 	Hint         string `json:"hint,omitempty"`
 	Project      string `json:"project,omitempty"`
-	Path         string `json:"path,omitempty"`      // resolved path, relative to project root
+	Path         string `json:"path,omitempty"` // resolved path, relative to project root
 	StartLine    int    `json:"start_line,omitempty"`
 	EndLine      int    `json:"end_line,omitempty"`
 	Bytes        int    `json:"bytes,omitempty"`     // how many bytes were sent to the model
@@ -561,9 +561,12 @@ func countLines(data []byte) int {
 }
 
 func buildSummarizeSystem(focus string) string {
-	base := "You are a code summarizer. Given a single file (or slice), produce a tight, factual summary the reader can use as a substitute for opening the file. " +
-		"Lead with one sentence on what the file does. Then a short bulleted list of: exported types and functions with one-line behaviors, key invariants or side effects, and any non-obvious dependencies. " +
-		"Quote identifiers verbatim. No prose padding, no apologies, no restating the prompt. Keep under 200 words unless the file is genuinely larger than that warrants."
+	base := "You are a file summarizer. Given a single file (or slice), produce a tight, factual summary the reader can use as a substitute for opening the file. " +
+		"Lead with one sentence on what the file is for. Then a short bulleted list of the central items the file defines or exposes — picking the framing that fits the file kind: " +
+		"exported types/functions for source code, targets and variables for Makefiles, top-level keys for config (YAML/TOML/JSON), section headings for docs, etc. " +
+		"Also note key invariants, side effects, or constraints, and any non-obvious dependencies or cross-references. " +
+		"Quote identifiers and names verbatim. No prose padding, no apologies, no restating the prompt. " +
+		"Keep under 200 words. For trivial files (license, .gitignore, simple stubs) a single sentence is fine."
 	if strings.TrimSpace(focus) != "" {
 		base += " Focus specifically on: " + strings.TrimSpace(focus) + "."
 	}

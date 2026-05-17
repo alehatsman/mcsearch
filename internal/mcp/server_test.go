@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,28 @@ func TestSearchDefaultsToCwd(t *testing.T) {
 	_, out, _ := s.search(context.Background(), nil, SearchInput{Query: "G"})
 	if out.Status != "ok" {
 		t.Errorf("status = %q, want ok (project=%q)", out.Status, out.Project)
+	}
+}
+
+func TestBuildSummarizeSystem(t *testing.T) {
+	base := buildSummarizeSystem("")
+	for _, want := range []string{
+		"file summarizer",  // file-kind agnostic, not "code summarizer"
+		"Makefiles",        // hint that non-code files have their own framing
+		"top-level keys",   // config files
+		"section headings", // docs
+	} {
+		if !strings.Contains(base, want) {
+			t.Errorf("base prompt missing %q", want)
+		}
+	}
+	if strings.Contains(base, "Focus specifically on") {
+		t.Errorf("empty focus should not inject a focus clause; got: %s", base)
+	}
+
+	withFocus := buildSummarizeSystem("  public API surface  ")
+	if !strings.Contains(withFocus, "Focus specifically on: public API surface.") {
+		t.Errorf("focus clause missing or untrimmed; got: %s", withFocus)
 	}
 }
 
