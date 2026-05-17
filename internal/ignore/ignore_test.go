@@ -124,6 +124,31 @@ func TestIndexableExt(t *testing.T) {
 		"binary":      false,
 		"image.png":   false,
 		"sub/dir/x.c": true,
+		// extended language coverage
+		"App.swift":      true,
+		"Program.cs":     true,
+		"build.scala":    true,
+		"main.dart":      true,
+		"index.php":      true,
+		"Lib.hs":         true,
+		"app.ex":         true,
+		"app.exs":        true,
+		"node.erl":       true,
+		"main.tf":        true,
+		"schema.proto":   true,
+		"schema.graphql": true,
+		"schema.gql":     true,
+		"analysis.r":     true,
+		"workflow.jl":    true,
+		"main.zig":       true,
+		"config.fish":    true,
+		"deploy.ps1":     true,
+		// markup / web
+		"index.html": true,
+		"style.css":  true,
+		"theme.scss": true,
+		"App.vue":    true,
+		"App.svelte": true,
 	}
 	for path, want := range cases {
 		if got := IndexableExt(path); got != want {
@@ -134,16 +159,37 @@ func TestIndexableExt(t *testing.T) {
 
 func TestIndexableBasename(t *testing.T) {
 	cases := map[string]bool{
-		"Makefile":            true,
-		"GNUmakefile":         true,
-		"Dockerfile":          true,
-		"Containerfile":       true,
-		"sub/Dockerfile":      true,
-		"x.go":                false,
-		"makefile":            true,
-		"random":              false,
-		"CMakeLists.txt":      true,
+		"Makefile":             true,
+		"GNUmakefile":          true,
+		"Dockerfile":           true,
+		"Containerfile":        true,
+		"sub/Dockerfile":       true,
+		"x.go":                 false,
+		"makefile":             true,
+		"random":               false,
+		"CMakeLists.txt":       true,
 		"build/CMakeLists.txt": true,
+		// Go modules
+		"go.mod":  true,
+		"go.work": true,
+		// Ruby DSL-style / dev environment
+		"Brewfile":    true,
+		"Vagrantfile": true,
+		"Tiltfile":    true,
+		"Caddyfile":   true,
+		"Pipfile":     true,
+		// Editor
+		".editorconfig": true,
+		// License / docs without extension
+		"LICENSE":   true,
+		"COPYING":   true,
+		"AUTHORS":   true,
+		"NOTICE":    true,
+		"CHANGELOG": true,
+		"README":    true,
+		// negatives
+		"go.sum":  false,
+		"license": false, // case-sensitive on purpose
 	}
 	for path, want := range cases {
 		if got := IndexableBasename(path); got != want {
@@ -182,25 +228,25 @@ func TestIsTestPath(t *testing.T) {
 		"internal/ignore/ignore_test.go": true,
 		"main.go":                        false,
 		// Python
-		"tests/test_auth.py":     true,
-		"src/test_helpers.py":    true,
-		"src/auth_test.py":       true,
-		"src/auth.py":            false,
+		"tests/test_auth.py":  true,
+		"src/test_helpers.py": true,
+		"src/auth_test.py":    true,
+		"src/auth.py":         false,
 		// JS/TS
-		"src/foo.test.js":        true,
-		"src/foo.spec.ts":        true,
-		"src/foo.ts":             false,
-		"__tests__/util.ts":      true,
+		"src/foo.test.js":   true,
+		"src/foo.spec.ts":   true,
+		"src/foo.ts":        false,
+		"__tests__/util.ts": true,
 		// Rust
-		"tests/integration.rs":   true,
-		"src/util_test.rs":       true,
-		"src/util.rs":            false,
+		"tests/integration.rs": true,
+		"src/util_test.rs":     true,
+		"src/util.rs":          false,
 		// Ruby
 		"spec/models/user_spec.rb": true,
 		"app/models/user.rb":       false,
 		// Generic fixture dirs
-		"testdata/sample.json":     true,
-		"fixtures/keys.txt":        true,
+		"testdata/sample.json": true,
+		"fixtures/keys.txt":    true,
 	}
 	for path, want := range cases {
 		if got := IsTestPath(path); got != want {
