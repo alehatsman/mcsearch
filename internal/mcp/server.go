@@ -185,7 +185,33 @@ const defaultGenerateSystem = "You are a precise coding assistant. " +
 	"reference real symbols, paths, and conventions rather than inventing names. " +
 	"Output code in fenced blocks; keep prose minimal."
 
+// defaultAskSystem steers the model toward answering questions about
+// the project rather than emitting code. The retrieval pipeline is
+// identical to generate_code; only the framing differs — code chunks
+// in, prose out.
+const defaultAskSystem = "You are a precise repository analyst answering questions about the user's codebase. " +
+	"Ground every claim in the CONTEXT chunks: cite file paths and symbol names verbatim, " +
+	"never invent identifiers or guess at code you weren't shown. " +
+	"If the CONTEXT is insufficient, say so plainly and name what's missing. " +
+	"Prefer short, structured answers (bullets or numbered steps) over long prose. " +
+	"Quote code only when the literal text matters; otherwise describe it."
+
 func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in GenerateInput) (*sdk.CallToolResult, GenerateOutput, error) {
+	return s.runRAGChat(ctx, in, defaultGenerateSystem)
+}
+
+func (s *Server) ask(ctx context.Context, req *sdk.CallToolRequest, in AskInput) (*sdk.CallToolResult, GenerateOutput, error) {
+	// AskInput and GenerateInput are shape-compatible; the only
+	// reason ask_codebase has its own type is to advertise different
+	// jsonschema descriptions to MCP clients (Q&A vs. code gen).
+	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem)
+}
+
+// runRAGChat is the shared semantic-search → chat pipeline behind
+// both generate_code and ask_codebase. Caller picks the default system
+// prompt; everything else (retrieval, context formatting, error
+// translation) is identical.
+func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem string) (*sdk.CallToolResult, GenerateOutput, error) {
 	out := GenerateOutput{}
 	if s.ChatClient == nil {
 		return nil, GenerateOutput{Status: "error", Hint: "chat client not configured on this server"}, nil
@@ -266,7 +292,7 @@ func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in Gene
 
 	system := in.System
 	if strings.TrimSpace(system) == "" {
-		system = defaultGenerateSystem
+		system = defaultSystem
 	}
 
 	messages := []chat.Message{{Role: "system", Content: system}}
@@ -325,6 +351,223 @@ func formatContext(hits []store.Hit) string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// ─── tool: ask_codebase ───────────────────────────────────────────────────
+
+// AskInput is shape-compatible with GenerateInput — same retrieval
+// pipeline backs both — but exposes a Q&A-tuned jsonschema so MCP
+// clients pick the right tool for "explain how X works" vs. "write me
+// code that does X".
+type AskInput struct {
+	Prompt      string  `json:"prompt" jsonschema:"a question about the project (how does X work? where is Y handled? what calls Z?)"`
+	ProjectRoot string  `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	K           int     `json:"k,omitempty" jsonschema:"number of RAG chunks to retrieve as context (default 8, max 30; ignored when use_index=false)"`
+	UseIndex    *bool   `json:"use_index,omitempty" jsonschema:"retrieve top-k chunks from the mcsearch index and feed them as context (default true)"`
+	System      string  `json:"system,omitempty" jsonschema:"override the system prompt; default is a Q&A-tuned repo-analyst prompt"`
+	Temperature float32 `json:"temperature,omitempty" jsonschema:"sampling temperature (0 = server default)"`
+	MaxTokens   int     `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
+}
+
+// ─── tool: summarize_path ─────────────────────────────────────────────────
+
+type SummarizeInput struct {
+	Path        string `json:"path" jsonschema:"file path to summarize; relative paths are resolved against project_root"`
+	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	StartLine   int    `json:"start_line,omitempty" jsonschema:"first line to summarize (1-indexed, inclusive); 0 = beginning of file"`
+	EndLine     int    `json:"end_line,omitempty" jsonschema:"last line to summarize (1-indexed, inclusive); 0 = end of file"`
+	Focus       string `json:"focus,omitempty" jsonschema:"optional steering — e.g. 'public API surface', 'side effects', 'error handling'"`
+	Temperature float32 `json:"temperature,omitempty" jsonschema:"sampling temperature (0 = server default)"`
+	MaxTokens   int    `json:"max_tokens,omitempty" jsonschema:"maximum tokens to generate (0 = server default)"`
+}
+
+type SummarizeOutput struct {
+	Status       string `json:"status"` // "ok" | "chat-service-unreachable" | "error"
+	Hint         string `json:"hint,omitempty"`
+	Project      string `json:"project,omitempty"`
+	Path         string `json:"path,omitempty"`      // resolved path, relative to project root
+	StartLine    int    `json:"start_line,omitempty"`
+	EndLine      int    `json:"end_line,omitempty"`
+	Bytes        int    `json:"bytes,omitempty"`     // how many bytes were sent to the model
+	Truncated    bool   `json:"truncated,omitempty"` // true if the slice was cut to fit the cap
+	Model        string `json:"model,omitempty"`
+	Endpoint     string `json:"endpoint,omitempty"`
+	Content      string `json:"content,omitempty"`
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
+// maxSummarizeBytes caps the slice we send to the chat endpoint. Above
+// this the local model's quality drops sharply and latency spikes;
+// callers wanting a whole-repo overview should use ask_codebase with
+// RAG instead. Tuned to fit comfortably in a 32B-coder context window
+// alongside the system prompt and the summary itself.
+const maxSummarizeBytes = 64 * 1024
+
+func (s *Server) summarize(ctx context.Context, req *sdk.CallToolRequest, in SummarizeInput) (*sdk.CallToolResult, SummarizeOutput, error) {
+	out := SummarizeOutput{}
+	if s.ChatClient == nil {
+		return nil, SummarizeOutput{Status: "error", Hint: "chat client not configured on this server"}, nil
+	}
+	if strings.TrimSpace(in.Path) == "" {
+		return nil, SummarizeOutput{Status: "error", Hint: "path is empty"}, nil
+	}
+	root := in.ProjectRoot
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, SummarizeOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
+		}
+		root = wd
+	}
+	p, err := proj.Resolve(root, s.IndexDir)
+	if err != nil {
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	}
+	out.Project = p.Root
+	out.Endpoint = s.ChatClient.BaseURL
+	out.Model = s.ChatClient.Model
+
+	// Resolve path under the project root. Reject anything that
+	// escapes it (so an MCP caller can't read /etc/passwd by passing
+	// "/etc/passwd" or "../../etc/passwd").
+	target := in.Path
+	if !filepath.IsAbs(target) {
+		target = filepath.Join(p.Root, target)
+	}
+	realTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("file does not exist: %s", target)}, nil
+		}
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("resolve path: %v", err)}, nil
+	}
+	relTarget, err := filepath.Rel(p.Root, realTarget)
+	if err != nil || strings.HasPrefix(relTarget, "..") || relTarget == ".." {
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("path %s is outside project root %s", target, p.Root)}, nil
+	}
+	st, err := os.Stat(realTarget)
+	if err != nil {
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("stat: %v", err)}, nil
+	}
+	if st.IsDir() {
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("%s is a directory — pass a file path", relTarget)}, nil
+	}
+	out.Path = relTarget
+
+	data, err := os.ReadFile(realTarget)
+	if err != nil {
+		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("read: %v", err)}, nil
+	}
+
+	slice, sliceStart, sliceEnd := sliceLines(data, in.StartLine, in.EndLine)
+	out.StartLine = sliceStart
+	out.EndLine = sliceEnd
+
+	if len(slice) > maxSummarizeBytes {
+		slice = slice[:maxSummarizeBytes]
+		out.Truncated = true
+	}
+	out.Bytes = len(slice)
+
+	system := buildSummarizeSystem(in.Focus)
+	userContent := fmt.Sprintf("FILE: %s (lines %d-%d)\n\n```\n%s\n```",
+		relTarget, sliceStart, sliceEnd, slice)
+
+	resp, err := s.ChatClient.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: userContent},
+	}, chat.Options{
+		Temperature: in.Temperature,
+		MaxTokens:   in.MaxTokens,
+	})
+	if err != nil {
+		if errors.Is(err, chat.ErrUnreachable) {
+			out.Status = "chat-service-unreachable"
+			out.Hint = "the local chat-completion service is offline."
+			return nil, out, nil
+		}
+		out.Status = "error"
+		out.Hint = fmt.Sprintf("chat: %v", err)
+		return nil, out, nil
+	}
+
+	out.Status = "ok"
+	out.Content = resp.Content
+	out.FinishReason = resp.FinishReason
+	if resp.Model != "" {
+		out.Model = resp.Model
+	}
+	return nil, out, nil
+}
+
+// sliceLines returns the byte slice of `data` between lines start and
+// end (both 1-indexed, inclusive). Zero values mean "from start of
+// file" / "to end of file". Returned start/end are clamped to the
+// actual file extents so the caller can echo back what was used.
+func sliceLines(data []byte, start, end int) ([]byte, int, int) {
+	if start <= 0 && end <= 0 {
+		return data, 1, countLines(data)
+	}
+	if start <= 0 {
+		start = 1
+	}
+	// Walk newlines once. Cheap and avoids splitting the whole file.
+	var (
+		startByte = -1
+		endByte   = len(data)
+		line      = 1
+	)
+	if start == 1 {
+		startByte = 0
+	}
+	for i := range data {
+		if data[i] != '\n' {
+			continue
+		}
+		line++
+		if startByte < 0 && line == start {
+			startByte = i + 1
+		}
+		if end > 0 && line > end {
+			endByte = i + 1
+			break
+		}
+	}
+	if startByte < 0 {
+		// `start` is past EOF — return empty slice but record extents.
+		return nil, start, start - 1
+	}
+	if end <= 0 || end > line {
+		end = line
+	}
+	return data[startByte:endByte], start, end
+}
+
+func countLines(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	n := 1
+	for _, b := range data {
+		if b == '\n' {
+			n++
+		}
+	}
+	// A trailing newline doesn't add a "next" line for the user.
+	if data[len(data)-1] == '\n' {
+		n--
+	}
+	return n
+}
+
+func buildSummarizeSystem(focus string) string {
+	base := "You are a code summarizer. Given a single file (or slice), produce a tight, factual summary the reader can use as a substitute for opening the file. " +
+		"Lead with one sentence on what the file does. Then a short bulleted list of: exported types and functions with one-line behaviors, key invariants or side effects, and any non-obvious dependencies. " +
+		"Quote identifiers verbatim. No prose padding, no apologies, no restating the prompt. Keep under 200 words unless the file is genuinely larger than that warrants."
+	if strings.TrimSpace(focus) != "" {
+		base += " Focus specifically on: " + strings.TrimSpace(focus) + "."
+	}
+	return base
 }
 
 // ─── tool: mcsearch_status ────────────────────────────────────────────────
@@ -438,6 +681,24 @@ func (s *Server) RunStdio(ctx context.Context) error {
 				"On error, returns a structured status: 'no-index', 'embedding-service-unreachable', " +
 				"'chat-service-unreachable', or 'ok'.",
 		}, s.generate)
+
+		sdk.AddTool(srv, &sdk.Tool{
+			Name: "ask_codebase",
+			Description: "Answer a natural-language question about the project, grounded in the mcsearch index. " +
+				"Same retrieval pipeline as generate_code but tuned for Q&A: cites paths and symbols, returns prose " +
+				"rather than code blocks. Use this instead of fanning out Read calls when the user wants to understand " +
+				"how something works ('how does indexing handle deletions?', 'where is config loaded?'). " +
+				"On error, returns the same structured statuses as generate_code.",
+		}, s.ask)
+
+		sdk.AddTool(srv, &sdk.Tool{
+			Name: "summarize_path",
+			Description: "Summarize a single file (or line range) into a tight factual digest the caller can read instead " +
+				"of the full file. No retrieval — sends the file slice directly to the chat model. Pass `focus` to steer " +
+				"(e.g. 'public API surface', 'side effects'). Path must resolve inside project_root. Files larger than " +
+				"64 KB are truncated; for bigger overviews use ask_codebase. " +
+				"On error, returns a structured status: 'chat-service-unreachable' or 'error'.",
+		}, s.summarize)
 	}
 
 	return srv.Run(ctx, &sdk.StdioTransport{})

@@ -11,8 +11,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/chunk"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/ignore"
@@ -20,11 +22,24 @@ import (
 	"github.com/alehatsman/mcsearch/internal/store"
 )
 
+// summarizeCap bounds the slice we send to the chat endpoint per file.
+// Beyond this, summary quality degrades and latency spikes on local
+// hardware; whole-repo overviews belong in ask_codebase, not here.
+const summarizeCap = 64 * 1024
+
 // Options controls one index run.
 type Options struct {
 	MaxFileSize int64        // skip files larger than this (bytes); 0 = 1 MB default
 	Verbose     bool         // emit per-event log lines (skip/embedding/etc.)
 	Logger      *slog.Logger // destination for log output; nil = io.Discard
+	// Summarize, when true and Chat is non-nil, generates a one-paragraph
+	// per-file summary alongside the normal chunks. Summaries are stored
+	// as `kind="file_summary"` chunks keyed by SHA of the file's first
+	// summarizeCap bytes — so a re-index over unchanged content skips
+	// the chat call entirely. Off by default: each summary costs one
+	// chat round-trip per file.
+	Summarize bool
+	Chat      *chat.Client
 }
 
 // Indexer is the entry point.
@@ -177,6 +192,48 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			}
 			toEmbed = append(toEmbed, pending{rel: rel, chunk: c, sha: sha})
 		}
+
+		// Per-file summary, opt-in. SHA is computed on the slice we'd
+		// actually send to the model (so a file growing past the cap
+		// doesn't re-summarize on every run). If we already have a
+		// summary chunk for this exact slice, just bump last_seen_at
+		// and skip the chat round-trip.
+		if ix.Options.Summarize && ix.Options.Chat != nil && len(chunks) > 0 {
+			slice := data
+			truncated := false
+			if len(slice) > summarizeCap {
+				slice = slice[:summarizeCap]
+				truncated = true
+			}
+			fileSHA := chunkSHA(string(slice))
+			if existing[fileSHA] {
+				if err := ix.Store.TouchSeen(ctx, rel, fileSHA, startTime); err != nil {
+					return err
+				}
+				seen++
+			} else {
+				summary, err := summarizeFile(ctx, ix.Options.Chat, rel, slice)
+				if err != nil {
+					ix.Options.Logger.Warn("summarize failed", "path", rel, "err", err)
+				} else if strings.TrimSpace(summary) != "" {
+					if ix.Options.Verbose && truncated {
+						ix.Options.Logger.Info("summarize truncated", "path", rel, "size", len(data))
+					}
+					toEmbed = append(toEmbed, pending{
+						rel: rel,
+						chunk: chunk.Chunk{
+							Path:      rel,
+							Kind:      "file_summary",
+							StartLine: 1,
+							EndLine:   lineCount(data),
+							Content:   summary,
+						},
+						sha: fileSHA,
+					})
+					seen++
+				}
+			}
+		}
 		// Old rows for this file whose SHA disappeared get pruned at the
 		// end via PruneUnseen — they never had last_seen_at bumped on this
 		// run.
@@ -260,4 +317,43 @@ type pending struct {
 func chunkSHA(content string) string {
 	h := sha1.Sum([]byte(content))
 	return hex.EncodeToString(h[:])
+}
+
+// summarizeFile asks the chat endpoint for a tight, retrieval-friendly
+// summary of one file. Returns the summary text or an error if the
+// chat call fails. Caller decides whether the failure is fatal — the
+// indexer logs and skips so one bad file doesn't break a whole run.
+func summarizeFile(ctx context.Context, cc *chat.Client, rel string, data []byte) (string, error) {
+	const system = "You are a code summarizer. Summarize this single file in 2-4 sentences so a reader can decide whether to open it. " +
+		"Lead with what the file does. Name the exported types and functions verbatim. Note any non-obvious side effects or invariants. " +
+		"No prose padding, no apologies, no restating the prompt."
+	user := fmt.Sprintf("FILE: %s\n\n```\n%s\n```", rel, data)
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, chat.Options{MaxTokens: 300})
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+// lineCount returns the number of lines in data, counting a trailing
+// newline as the terminator of the previous line rather than the start
+// of an empty one (so file_summary EndLine matches what an editor
+// would show for a typical POSIX file).
+func lineCount(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	n := 1
+	for _, b := range data {
+		if b == '\n' {
+			n++
+		}
+	}
+	if data[len(data)-1] == '\n' {
+		n--
+	}
+	return n
 }

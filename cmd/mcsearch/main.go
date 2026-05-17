@@ -205,6 +205,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	summarize := fs.Bool("summarize", false, "also generate a per-file summary via the chat endpoint (slow; opt-in)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -235,7 +236,12 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: cliLogger()})
+	opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
+	if *summarize {
+		opts.Summarize = true
+		opts.Chat = newChatClient()
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, opts)
 	if err := ix.Run(ctx); err != nil {
 		return err
 	}
