@@ -14,16 +14,18 @@ import (
 	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/mcsearch/internal/rerank"
 	"github.com/alehatsman/mcsearch/internal/store"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Server holds everything the MCP handlers need.
 type Server struct {
-	EmbedClient *embed.Client
-	ChatClient  *chat.Client  // optional — when nil, generate_code is not registered
-	IndexDir    string        // base dir holding per-project index folders
-	StoreOpts   store.Options // applied to every Store opened by the server
+	EmbedClient  *embed.Client
+	ChatClient   *chat.Client   // optional — when nil, generate_code is not registered
+	RerankClient *rerank.Client // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
+	IndexDir     string         // base dir holding per-project index folders
+	StoreOpts    store.Options  // applied to every Store opened by the server
 }
 
 // ─── tool: semantic_search ────────────────────────────────────────────────
@@ -48,7 +50,10 @@ type SearchHit struct {
 	// RRFScore is the fused rank used for ordering when hybrid search
 	// is active. Zero when search ran semantic-only.
 	RRFScore float32 `json:"rrf_score,omitempty"`
-	Content  string  `json:"content"`
+	// RerankScore is the cross-encoder relevance score in [0, 1] when
+	// rerank ran. Zero when no reranker was wired or it failed open.
+	RerankScore float32 `json:"rerank_score,omitempty"`
+	Content     string  `json:"content"`
 }
 
 type SearchOutput struct {
@@ -136,14 +141,15 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 	out.Status = "ok"
 	for _, h := range hits {
 		out.Hits = append(out.Hits, SearchHit{
-			Path:      h.Path,
-			Kind:      h.Kind,
-			StartLine: h.StartLine,
-			EndLine:   h.EndLine,
-			Score:     h.Score,
-			BM25Score: h.BM25Score,
-			RRFScore:  h.RRFScore,
-			Content:   h.Content,
+			Path:        h.Path,
+			Kind:        h.Kind,
+			StartLine:   h.StartLine,
+			EndLine:     h.EndLine,
+			Score:       h.Score,
+			BM25Score:   h.BM25Score,
+			RRFScore:    h.RRFScore,
+			RerankScore: h.RerankScore,
+			Content:     h.Content,
 		})
 	}
 	return nil, out, nil
@@ -586,16 +592,19 @@ type ProjectStatus struct {
 }
 
 type StatusOutput struct {
-	Endpoint      string          `json:"endpoint"`
-	Reachable     bool            `json:"reachable"`
-	Model         string          `json:"model"`
-	ChatEndpoint  string          `json:"chat_endpoint,omitempty"`
-	ChatReachable bool            `json:"chat_reachable,omitempty"`
-	ChatModel     string          `json:"chat_model,omitempty"`
-	Version       string          `json:"version"`
-	IndexDir      string          `json:"index_dir"`
-	Projects      []ProjectStatus `json:"projects,omitempty"`
-	Error         string          `json:"error,omitempty"`
+	Endpoint        string          `json:"endpoint"`
+	Reachable       bool            `json:"reachable"`
+	Model           string          `json:"model"`
+	ChatEndpoint    string          `json:"chat_endpoint,omitempty"`
+	ChatReachable   bool            `json:"chat_reachable,omitempty"`
+	ChatModel       string          `json:"chat_model,omitempty"`
+	RerankEndpoint  string          `json:"rerank_endpoint,omitempty"`
+	RerankReachable bool            `json:"rerank_reachable,omitempty"`
+	RerankModel     string          `json:"rerank_model,omitempty"`
+	Version         string          `json:"version"`
+	IndexDir        string          `json:"index_dir"`
+	Projects        []ProjectStatus `json:"projects,omitempty"`
+	Error           string          `json:"error,omitempty"`
 }
 
 func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusInput) (*sdk.CallToolResult, StatusOutput, error) {
@@ -621,6 +630,15 @@ func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusI
 			out.ChatReachable = true
 		}
 		ccancel()
+	}
+	if s.RerankClient != nil {
+		out.RerankEndpoint = s.RerankClient.BaseURL
+		out.RerankModel = s.RerankClient.Model
+		rctx, rcancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := s.RerankClient.Health(rctx); err == nil {
+			out.RerankReachable = true
+		}
+		rcancel()
 	}
 
 	entries, err := os.ReadDir(s.IndexDir)

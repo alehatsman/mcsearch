@@ -18,6 +18,7 @@ import (
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/index"
 	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/mcsearch/internal/rerank"
 	"github.com/alehatsman/mcsearch/internal/store"
 )
 
@@ -300,6 +301,97 @@ func TestBuildSummarizeSystem(t *testing.T) {
 	withFocus := buildSummarizeSystem("  public API surface  ")
 	if !strings.Contains(withFocus, "Focus specifically on: public API surface.") {
 		t.Errorf("focus clause missing or untrimmed; got: %s", withFocus)
+	}
+}
+
+// stubReranker returns the docs in input order with descending
+// scores; enough to drive a non-zero RerankScore on every Hit.
+type stubReranker struct{}
+
+func (stubReranker) Rerank(_ context.Context, _ string, docs []string) ([]rerank.Score, error) {
+	out := make([]rerank.Score, len(docs))
+	for i := range docs {
+		out[i] = rerank.Score{Index: i, Score: 1.0 - float32(i)*0.1}
+	}
+	return out, nil
+}
+
+func TestSearchPopulatesRerankScore(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	// 8 chunks so the fused pool exceeds k=3 and the rerank stage fires.
+	for i := range 8 {
+		writeFile(t, filepath.Join(projDir, "f"+itoa(i)+".go"),
+			"package main\nfunc F"+itoa(i)+"() {}\n")
+	}
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+
+	s := &Server{
+		EmbedClient: embed.New(srv.URL, "fake", 16, 5*time.Second),
+		IndexDir:    cacheDir,
+		StoreOpts:   store.Options{Reranker: stubReranker{}},
+	}
+	_, out, err := s.search(context.Background(), nil, SearchInput{
+		Query:       "function",
+		ProjectRoot: root,
+		K:           3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q, want ok (hint: %q)", out.Status, out.Hint)
+	}
+	if len(out.Hits) == 0 {
+		t.Fatal("expected hits")
+	}
+	for i, h := range out.Hits {
+		if h.RerankScore <= 0 {
+			t.Errorf("hit[%d] %q: RerankScore = %v, want > 0", i, h.Path, h.RerankScore)
+		}
+	}
+}
+
+func TestStatusReportsRerankEndpoint(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	rerankSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":   "fake-reranker",
+			"results": []map[string]any{{"index": 0, "relevance_score": 0.99}},
+		})
+	}))
+	defer rerankSrv.Close()
+
+	s := &Server{
+		EmbedClient:  embed.New(embedSrv.URL, "fake-embed", 16, 5*time.Second),
+		RerankClient: rerank.New(rerankSrv.URL, "fake-reranker", 5*time.Second),
+		IndexDir:     t.TempDir(),
+	}
+	_, out, _ := s.status(context.Background(), nil, StatusInput{})
+	if out.RerankEndpoint != rerankSrv.URL {
+		t.Errorf("RerankEndpoint = %q, want %q", out.RerankEndpoint, rerankSrv.URL)
+	}
+	if out.RerankModel != "fake-reranker" {
+		t.Errorf("RerankModel = %q, want fake-reranker", out.RerankModel)
+	}
+	if !out.RerankReachable {
+		t.Error("RerankReachable = false, want true (fake server is up)")
+	}
+}
+
+func TestStatusOmitsRerankWhenUnwired(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	s := newServer(srv.URL, t.TempDir())
+
+	_, out, _ := s.status(context.Background(), nil, StatusInput{})
+	if out.RerankEndpoint != "" || out.RerankModel != "" || out.RerankReachable {
+		t.Errorf("rerank fields should be zero when RerankClient is nil; got endpoint=%q model=%q reachable=%v",
+			out.RerankEndpoint, out.RerankModel, out.RerankReachable)
 	}
 }
 

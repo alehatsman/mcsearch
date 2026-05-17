@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/rerank"
 	_ "modernc.org/sqlite"
 )
 
@@ -42,6 +43,18 @@ type Options struct {
 	// or for indexes built before the chunks_fts migration on a
 	// truly old SQLite without FTS5 (unlikely).
 	DisableBM25 bool
+
+	// Reranker, when non-nil, reorders the fused candidate pool via a
+	// cross-encoder before truncating to k. Nil = today's behaviour
+	// (pure RRF). On rerank.ErrUnreachable the search falls back to
+	// the pre-rerank order without surfacing an error to the caller.
+	Reranker rerank.Reranker
+
+	// RerankPool caps the fused candidate pool sent to the reranker.
+	// Only honored when Reranker is non-nil. Zero = no cap (use the
+	// natural pool size, max(5×k, 30)). Typical values 40–100: larger
+	// = better recall but slower rerank call.
+	RerankPool int
 }
 
 type Store struct {
@@ -428,6 +441,11 @@ type Hit struct {
 	// is active: 1/(60+sem_rank) + 1/(60+bm25_rank). Zero when search
 	// ran semantic-only (empty query text or MCSEARCH_DISABLE_BM25=1).
 	RRFScore float32
+
+	// RerankScore is the cross-encoder relevance score in [0, 1] for
+	// the (query, chunk) pair. Zero when rerank didn't run (no client
+	// wired, pool ≤ k, or endpoint unreachable). Larger = more relevant.
+	RerankScore float32
 }
 
 // scored holds one chunk's score during ranking. Used internally by
@@ -478,7 +496,7 @@ func (s *Store) Search(ctx context.Context, queryVec []float32, queryText string
 		if len(semScores) > k {
 			semScores = semScores[:k]
 		}
-		return s.fetchHits(ctx, semScores, nil, nil)
+		return s.fetchHits(ctx, semScores, nil, nil, nil, nil)
 	}
 
 	// Pull more candidates per leg than the final k so fusion has
@@ -486,6 +504,11 @@ func (s *Store) Search(ctx context.Context, queryVec []float32, queryText string
 	pool := k * 5
 	if pool < 30 {
 		pool = 30
+	}
+	// When a reranker is wired, cap the pool so we don't pay
+	// cross-encoder cost on more docs than the operator chose.
+	if s.opts.Reranker != nil && s.opts.RerankPool > 0 && pool > s.opts.RerankPool {
+		pool = s.opts.RerankPool
 	}
 
 	// Semantic top-pool.
@@ -528,10 +551,90 @@ func (s *Store) Search(ctx context.Context, queryVec []float32, queryText string
 		fused = append(fused, scored{id, r})
 	}
 	sort.Slice(fused, func(i, j int) bool { return fused[i].score > fused[j].score })
+
+	// Rerank stage: only fires if a client is wired and we actually
+	// have more candidates than k (otherwise reordering is a no-op).
+	// On ErrUnreachable, fall through to the pre-rerank truncation so
+	// reranker outages never surface as search failures.
+	if s.opts.Reranker != nil && len(fused) > k {
+		reranked, rerankScore, err := s.rerank(ctx, queryText, fused, k)
+		switch {
+		case err == nil:
+			return s.fetchHits(ctx, reranked, semCosine, bm25Score, rrf, rerankScore)
+		case errors.Is(err, rerank.ErrUnreachable):
+			// fall through to non-reranked path
+		default:
+			return nil, err
+		}
+	}
+
 	if len(fused) > k {
 		fused = fused[:k]
 	}
-	return s.fetchHits(ctx, fused, semCosine, bm25Score)
+	return s.fetchHits(ctx, fused, semCosine, bm25Score, nil, nil)
+}
+
+// rerank fetches `Content` for the fused pool, sends (query, docs) to
+// the reranker, maps the returned indices back to chunk IDs, and
+// returns the top-k slice together with a per-id rerank score map.
+func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k int) ([]scored, map[int64]float32, error) {
+	if len(fused) == 0 {
+		return nil, nil, nil
+	}
+	idArgs := make([]any, len(fused))
+	for i, sc := range fused {
+		idArgs[i] = sc.id
+	}
+	placeholders := strings.Repeat("?,", len(idArgs))
+	placeholders = placeholders[:len(placeholders)-1]
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content FROM chunks WHERE id IN (`+placeholders+`)`,
+		idArgs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer rows.Close()
+	contentByID := make(map[int64]string, len(fused))
+	for rows.Next() {
+		var id int64
+		var content string
+		if err := rows.Scan(&id, &content); err != nil {
+			return nil, nil, err
+		}
+		contentByID[id] = content
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, err
+	}
+	// Build docs in fused order so rerank.Score.Index maps cleanly back.
+	docs := make([]string, 0, len(fused))
+	docIDs := make([]int64, 0, len(fused))
+	for _, sc := range fused {
+		c, ok := contentByID[sc.id]
+		if !ok {
+			continue // chunk vanished between fusion and content fetch
+		}
+		docs = append(docs, c)
+		docIDs = append(docIDs, sc.id)
+	}
+	scores, err := s.opts.Reranker.Rerank(ctx, queryText, docs)
+	if err != nil {
+		return nil, nil, err
+	}
+	reranked := make([]scored, 0, len(scores))
+	rerankScore := make(map[int64]float32, len(scores))
+	for _, sc := range scores {
+		if sc.Index < 0 || sc.Index >= len(docIDs) {
+			continue
+		}
+		id := docIDs[sc.Index]
+		reranked = append(reranked, scored{id: id, score: sc.Score})
+		rerankScore[id] = sc.Score
+	}
+	if len(reranked) > k {
+		reranked = reranked[:k]
+	}
+	return reranked, rerankScore, nil
 }
 
 // scoreSemantic computes cosine similarity for every chunk against
@@ -692,8 +795,16 @@ func buildFTSQuery(q string) string {
 
 // fetchHits issues one SELECT to get content for the supplied
 // (ordered) scored IDs, then returns them as Hits with their scores
-// joined back in. semCosine/bm25Score may be nil (semantic-only mode).
-func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25Score map[int64]float32) ([]Hit, error) {
+// joined back in.
+//
+//   - semCosine / bm25Score: nil for semantic-only mode.
+//   - rrfScore: non-nil only on the reranked path, where `ranked[i].score`
+//     carries the rerank score instead of the RRF score. When nil and
+//     semCosine is non-nil, fetchHits falls back to using ranked[i].score
+//     as the RRF score (today's pre-rerank hybrid behaviour).
+//   - rerankScore: non-nil only on the reranked path; populates
+//     Hit.RerankScore.
+func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25Score, rrfScore, rerankScore map[int64]float32) ([]Hit, error) {
 	if len(ranked) == 0 {
 		return nil, nil
 	}
@@ -729,17 +840,27 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 			continue
 		}
 		// Score is always the cosine (what humans read). RRFScore /
-		// BM25Score are filled in when hybrid mode produced them.
+		// BM25Score / RerankScore are filled in when hybrid (and
+		// possibly reranked) mode produced them.
 		if semCosine != nil {
 			if c, ok := semCosine[sc.id]; ok {
 				h.Score = c
 			}
-			h.RRFScore = sc.score
+			if rrfScore != nil {
+				// Reranked path: ranked[i].score is the rerank score, so
+				// RRFScore must come from the explicit map.
+				h.RRFScore = rrfScore[sc.id]
+			} else {
+				h.RRFScore = sc.score
+			}
 		} else {
 			h.Score = sc.score
 		}
 		if bm25Score != nil {
 			h.BM25Score = bm25Score[sc.id]
+		}
+		if rerankScore != nil {
+			h.RerankScore = rerankScore[sc.id]
 		}
 		out = append(out, h)
 	}

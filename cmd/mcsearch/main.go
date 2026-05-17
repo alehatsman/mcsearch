@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -34,6 +35,7 @@ import (
 	"github.com/alehatsman/mcsearch/internal/index"
 	"github.com/alehatsman/mcsearch/internal/mcp"
 	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/mcsearch/internal/rerank"
 	"github.com/alehatsman/mcsearch/internal/store"
 	"github.com/alehatsman/mcsearch/internal/watch"
 )
@@ -124,9 +126,18 @@ env:
   MCSEARCH_CHAT_URL           default http://127.0.0.1:8081
   MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
   MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
+  MCSEARCH_RERANK_URL         unset by default; set to enable cross-encoder rerank
+  MCSEARCH_RERANK_MODEL       default qwen3-reranker:4b
+  MCSEARCH_RERANK_POOL        default 40 (candidates before rerank; clamped to 1..100)
+  MCSEARCH_RERANK_TIMEOUT     default 5s (Go duration)
+  MCSEARCH_DISABLE_RERANK     set to 1 to short-circuit rerank even if URL is set
   MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
   MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
-  MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg`)
+  MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg
+
+flags:
+  mcsearch query --rerank=off <path> "..."     skip rerank for this call
+  mcsearch query --format=json <path> "..."    emit hits as JSON`)
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────
@@ -155,6 +166,8 @@ func storeOpts() store.Options {
 	return store.Options{
 		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
 		DisableBM25:     os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
+		Reranker:        newRerankClient(),
+		RerankPool:      rerankPool(),
 	}
 }
 
@@ -197,6 +210,44 @@ func newChatClient() *chat.Client {
 		timeout = 120 * time.Second
 	}
 	return chat.New(url, model, timeout)
+}
+
+// newRerankClient returns a configured rerank client, or nil when
+// reranking is disabled. Rerank is OFF by default — empty
+// MCSEARCH_RERANK_URL or MCSEARCH_DISABLE_RERANK=1 yields nil, and
+// store.Search treats nil as "skip the stage" (today's behaviour).
+func newRerankClient() *rerank.Client {
+	url := os.Getenv("MCSEARCH_RERANK_URL")
+	if url == "" {
+		return nil
+	}
+	if os.Getenv("MCSEARCH_DISABLE_RERANK") == "1" {
+		return nil
+	}
+	model := envOr("MCSEARCH_RERANK_MODEL", "qwen3-reranker:4b")
+	rawTimeout := envOr("MCSEARCH_RERANK_TIMEOUT", "5s")
+	timeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_TIMEOUT=%q is not a Go duration; using 5s\n", rawTimeout)
+		timeout = 5 * time.Second
+	}
+	return rerank.New(url, model, timeout)
+}
+
+// rerankPool reads the candidate-pool cap from the environment.
+// Default 40, clamped to [1, 100]. Larger = better recall but slower
+// cross-encoder call. Only consulted when a Reranker is wired.
+func rerankPool() int {
+	raw := envOr("MCSEARCH_RERANK_POOL", "40")
+	pool, err := strconv.Atoi(raw)
+	if err != nil || pool <= 0 {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_POOL=%q is not a positive integer; using 40\n", raw)
+		pool = 40
+	}
+	if pool > 100 {
+		pool = 100
+	}
+	return pool
 }
 
 // ─── index ─────────────────────────────────────────────────────────────────
@@ -262,6 +313,8 @@ func cmdIndex(ctx context.Context, args []string) error {
 func cmdQuery(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
 	k := fs.Int("k", 8, "number of results to return")
+	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
+	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -289,7 +342,11 @@ func cmdQuery(ctx context.Context, args []string) error {
 		}
 		return err
 	}
-	st, err := openStore(ctx, p.DBPath)
+	opts := storeOpts()
+	if *rerankFlag == "off" {
+		opts.Reranker = nil
+	}
+	st, err := store.OpenWith(ctx, p.DBPath, opts)
 	if err != nil {
 		return err
 	}
@@ -307,12 +364,57 @@ func cmdQuery(ctx context.Context, args []string) error {
 		fmt.Fprintln(os.Stderr, "no results")
 		return nil
 	}
-	for i, h := range hits {
-		fmt.Printf("─── #%d %s:%d-%d  (%s)  score=%.4f\n", i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
-		fmt.Println(truncate(h.Content, 1500))
-		fmt.Println()
+	switch *format {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(hitsToJSON(hits))
+	case "", "text":
+		for i, h := range hits {
+			header := fmt.Sprintf("─── #%d %s:%d-%d  (%s)  score=%.4f", i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
+			if h.RerankScore > 0 {
+				header += fmt.Sprintf("  rerank=%.4f", h.RerankScore)
+			}
+			fmt.Println(header)
+			fmt.Println(truncate(h.Content, 1500))
+			fmt.Println()
+		}
+		return nil
+	default:
+		return fmt.Errorf("unknown format %q (want text|json)", *format)
 	}
-	return nil
+}
+
+// queryJSONHit is the wire shape for `mcsearch query --format=json`.
+// Mirrors mcp.SearchHit so the two CLI/MCP surfaces stay aligned.
+type queryJSONHit struct {
+	Path        string  `json:"path"`
+	Kind        string  `json:"kind"`
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line"`
+	Score       float32 `json:"score"`
+	BM25Score   float32 `json:"bm25_score,omitempty"`
+	RRFScore    float32 `json:"rrf_score,omitempty"`
+	RerankScore float32 `json:"rerank_score,omitempty"`
+	Content     string  `json:"content"`
+}
+
+func hitsToJSON(hits []store.Hit) []queryJSONHit {
+	out := make([]queryJSONHit, len(hits))
+	for i, h := range hits {
+		out[i] = queryJSONHit{
+			Path:        h.Path,
+			Kind:        h.Kind,
+			StartLine:   h.StartLine,
+			EndLine:     h.EndLine,
+			Score:       h.Score,
+			BM25Score:   h.BM25Score,
+			RRFScore:    h.RRFScore,
+			RerankScore: h.RerankScore,
+			Content:     h.Content,
+		}
+	}
+	return out
 }
 
 // ─── generate ──────────────────────────────────────────────────────────────
@@ -839,11 +941,20 @@ func cmdMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	// Build the rerank client once and share it with both the Server
+	// (for `status` health reporting) and Store.Options (for the
+	// query-time rerank stage). storeOpts() would call newRerankClient
+	// internally, but reusing one instance avoids the redundant HTTP
+	// client allocation.
+	rerankClient := newRerankClient()
+	opts := storeOpts()
+	opts.Reranker = rerankClient
 	srv := &mcp.Server{
-		EmbedClient: newEmbedClient(),
-		ChatClient:  newChatClient(),
-		IndexDir:    base,
-		StoreOpts:   storeOpts(),
+		EmbedClient:  newEmbedClient(),
+		ChatClient:   newChatClient(),
+		RerankClient: rerankClient,
+		IndexDir:     base,
+		StoreOpts:    opts,
 	}
 	return srv.RunStdio(ctx)
 }

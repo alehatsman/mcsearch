@@ -13,7 +13,8 @@ top of the list (the only positions Claude usually reads).
 ## Problem
 
 `store.Search` fuses cosine and BM25 rankings via Reciprocal Rank Fusion
-(`store.go:444`). Both legs are "bi-encoder" style: query and chunk are
+(`store.go` `Search`, fusion block around lines 518-534). Both legs are
+"bi-encoder" style: query and chunk are
 embedded independently, then compared. That trades a lot of signal for
 speed — there's no cross-attention between the query tokens and the
 chunk tokens, so subtle topical mismatches (e.g. a chunk that *mentions*
@@ -71,10 +72,14 @@ Three things are missing:
   individual semantic/BM25 lists. RRF stays.
 - Learned sparse retrieval (SPLADE), ColBERT-style late interaction,
   or any reranker that needs index-side changes.
-- Reranking inside `generate_code`'s RAG context selection — same
-  store, same client, but a separate decision (does the chat model
-  benefit from rerank as much as the human/agent reader does?).
-  Punt to a follow-up after we see v1 query metrics.
+- Per-tool opt-out of rerank. v1 wires the reranker into `Store.Options`,
+  which is set once at Store-open time, so **every caller of `store.Search`
+  picks it up** — `semantic_search`, `generate_code`, `ask_codebase`, and
+  the CLI `mcsearch query` alike. `summarize_path` does not call Search,
+  so it is unaffected. If Phase 5 metrics show a per-tool regression (most
+  likely candidate: `generate_code` if chat models prefer broader RAG
+  context over more-relevant context), we add a per-call `SearchOpts.DisableRerank`
+  knob then; not in v1.
 - Server-side provisioning of the rerank endpoint (that lives in
   [dotfiles `components/mcsearch/server.yml`]). This spec
   defines the *client*; the dotfiles change is a one-line
@@ -293,9 +298,16 @@ just for rerank.
 4. **Cohere `Authorization` header.** If we want first-class hosted
    Cohere support in v1, the client needs `MCSEARCH_RERANK_AUTH`.
    Small addition; flagged here so it's not a surprise during review.
-5. **Generate-code RAG context.** Out of scope here, but the same
-   reranker should plausibly improve RAG selection in
-   `generate_code`. Punt to a follow-up so v1 stays focused.
+5. **Universal application across tools.** Because the reranker lives
+   on `Store.Options` (set once when the MCP server / CLI opens its
+   Store), it applies to every `store.Search` call — `semantic_search`,
+   `generate_code`'s RAG retrieval, `ask_codebase`'s RAG retrieval, and
+   the CLI `query`. `summarize_path` doesn't touch Search and is
+   unaffected. Expected: net win across the board. Hedge: chat models
+   sometimes prefer broader (less tightly relevant) RAG context; if
+   Phase 5 eval shows a regression for `generate_code` or
+   `ask_codebase`, the follow-up is a per-call `SearchOpts.DisableRerank`
+   knob, not architectural surgery.
 
 ---
 

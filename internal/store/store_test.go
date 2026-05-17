@@ -3,8 +3,11 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/alehatsman/mcsearch/internal/rerank"
 )
 
 func newStore(t *testing.T) (*Store, context.Context) {
@@ -356,6 +359,161 @@ func TestDisableBM25(t *testing.T) {
 		t.Errorf("DisableBM25 should leave BM25Score/RRFScore zero; got %v / %v",
 			hits[0].BM25Score, hits[0].RRFScore)
 	}
+}
+
+// reverseReranker is a deterministic stub: it returns the input docs
+// in reversed order so we can verify the rerank stage actually
+// reorders the fused candidates.
+type reverseReranker struct{}
+
+func (reverseReranker) Rerank(_ context.Context, _ string, docs []string) ([]rerank.Score, error) {
+	out := make([]rerank.Score, len(docs))
+	for i := range docs {
+		out[i] = rerank.Score{
+			Index: len(docs) - 1 - i,
+			// Descending scores so fetchHits's order = ranking order.
+			Score: 1.0 - float32(i)/float32(len(docs)),
+		}
+	}
+	return out, nil
+}
+
+// unreachableReranker mirrors what a network-down rerank.Client returns.
+// store.Search must catch this and degrade to pre-rerank truncation.
+type unreachableReranker struct{}
+
+func (unreachableReranker) Rerank(_ context.Context, _ string, _ []string) ([]rerank.Score, error) {
+	return nil, rerank.ErrUnreachable
+}
+
+func TestSearchReranks(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	// 10 chunks, distinguishable by path and content. Vec varies just
+	// enough to give a deterministic cosine ordering; every content has
+	// the literal "rerank" so all chunks enter the BM25 pool too. Both
+	// legs of hybrid retrieval are populated → fused has 10 candidates.
+	var rows []PendingChunk
+	for i := range 10 {
+		rows = append(rows, PendingChunk{
+			Path: "f" + strconv.Itoa(i) + ".go", Kind: "fn",
+			ContentSHA: "sha" + strconv.Itoa(i),
+			Content:    "rerank candidate " + strconv.Itoa(i),
+			Vec:        []float32{1.0 - float32(i)*0.01, float32(i) * 0.01, 0, 0},
+		})
+	}
+	if err := st.UpsertMany(ctx, rows, now); err != nil {
+		t.Fatal(err)
+	}
+
+	queryVec := []float32{1, 0, 0, 0}
+	const k = 5
+
+	// Baseline: no reranker, capture top-k order.
+	baseline, err := st.Search(ctx, queryVec, "rerank candidate", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(baseline) != k {
+		t.Fatalf("baseline returned %d hits, want %d", len(baseline), k)
+	}
+	for _, h := range baseline {
+		if h.RerankScore != 0 {
+			t.Errorf("baseline %q: RerankScore = %v, want 0 (no reranker wired)", h.Path, h.RerankScore)
+		}
+	}
+
+	// Reranked: stub reverses the fused order.
+	st.opts.Reranker = reverseReranker{}
+	reranked, err := st.Search(ctx, queryVec, "rerank candidate", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reranked) != k {
+		t.Fatalf("reranked returned %d hits, want %d", len(reranked), k)
+	}
+
+	// Order must differ — the reverse stub guarantees a permutation.
+	sameOrder := true
+	for i := range k {
+		if baseline[i].Path != reranked[i].Path {
+			sameOrder = false
+			break
+		}
+	}
+	if sameOrder {
+		t.Errorf("reranked order equals baseline; rerank stage did not reorder.\nbaseline: %v\nreranked: %v",
+			paths(baseline), paths(reranked))
+	}
+
+	// Every reranked hit has a non-zero RerankScore, and the slice is
+	// sorted descending (stub returns sorted; fetchHits preserves order).
+	for i, h := range reranked {
+		if h.RerankScore <= 0 {
+			t.Errorf("reranked[%d] %q: RerankScore = %v, want > 0", i, h.Path, h.RerankScore)
+		}
+		if i > 0 && reranked[i-1].RerankScore < h.RerankScore {
+			t.Errorf("reranked not sorted desc by RerankScore: %v < %v at i=%d",
+				reranked[i-1].RerankScore, h.RerankScore, i)
+		}
+		// RRFScore must survive the reorder — Search keeps the original
+		// RRF score map alive precisely for this.
+		if h.RRFScore <= 0 {
+			t.Errorf("reranked[%d] %q: RRFScore = %v, want > 0 (should survive rerank)", i, h.Path, h.RRFScore)
+		}
+	}
+}
+
+func TestSearchRerankerUnreachableFallsBack(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	var rows []PendingChunk
+	for i := range 10 {
+		rows = append(rows, PendingChunk{
+			Path: "f" + strconv.Itoa(i) + ".go", Kind: "fn",
+			ContentSHA: "sha" + strconv.Itoa(i),
+			Content:    "rerank candidate " + strconv.Itoa(i),
+			Vec:        []float32{1.0 - float32(i)*0.01, float32(i) * 0.01, 0, 0},
+		})
+	}
+	if err := st.UpsertMany(ctx, rows, now); err != nil {
+		t.Fatal(err)
+	}
+
+	queryVec := []float32{1, 0, 0, 0}
+	const k = 5
+
+	baseline, err := st.Search(ctx, queryVec, "rerank candidate", k)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	st.opts.Reranker = unreachableReranker{}
+	fallback, err := st.Search(ctx, queryVec, "rerank candidate", k)
+	if err != nil {
+		t.Fatalf("unreachable reranker should not surface as error: %v", err)
+	}
+	if len(fallback) != len(baseline) {
+		t.Fatalf("fallback returned %d hits, baseline %d", len(fallback), len(baseline))
+	}
+	for i := range fallback {
+		if fallback[i].Path != baseline[i].Path {
+			t.Errorf("fallback[%d] = %q, want %q (should equal pre-rerank order)",
+				i, fallback[i].Path, baseline[i].Path)
+		}
+		if fallback[i].RerankScore != 0 {
+			t.Errorf("fallback[%d] %q: RerankScore = %v, want 0 (rerank didn't run)",
+				i, fallback[i].Path, fallback[i].RerankScore)
+		}
+	}
+}
+
+func paths(hits []Hit) []string {
+	out := make([]string, len(hits))
+	for i, h := range hits {
+		out[i] = h.Path
+	}
+	return out
 }
 
 func TestProjectRootRoundTrip(t *testing.T) {
