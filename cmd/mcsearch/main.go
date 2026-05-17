@@ -163,12 +163,18 @@ func indexDir() (string, error) {
 // storeOpts reads runtime tweaks from the environment so every code
 // path that opens a Store sees the same configuration.
 func storeOpts() store.Options {
-	return store.Options{
+	opts := store.Options{
 		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
 		DisableBM25:     os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
-		Reranker:        newRerankClient(),
 		RerankPool:      rerankPool(),
 	}
+	// Assign through a typed-nil check: a (*rerank.Client)(nil) stored
+	// in the Reranker interface field would still compare != nil, and
+	// store.Search would dispatch into a nil receiver.
+	if rc := newRerankClient(); rc != nil {
+		opts.Reranker = rc
+	}
+	return opts
 }
 
 func openStore(ctx context.Context, dbPath string) (*store.Store, error) {
@@ -948,7 +954,9 @@ func cmdMCP(ctx context.Context, args []string) error {
 	// client allocation.
 	rerankClient := newRerankClient()
 	opts := storeOpts()
-	opts.Reranker = rerankClient
+	if rerankClient != nil {
+		opts.Reranker = rerankClient
+	}
 	srv := &mcp.Server{
 		EmbedClient:  newEmbedClient(),
 		ChatClient:   newChatClient(),
