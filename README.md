@@ -19,8 +19,19 @@ the wire to the embedding / chat endpoints, which you control.
 ```bash
 git clone https://github.com/alehatsman/mcsearch.git
 cd mcsearch
-make install        # builds and copies to /usr/local/bin
+make install        # builds and installs to ~/.local/bin (no sudo)
 ```
+
+For a system-wide install, override `INSTALL_PATH`:
+
+```bash
+sudo make install INSTALL_PATH=/usr/local/bin
+```
+
+`install` uses an atomic `rename(2)` swap, so it's safe to re-run while
+`mcsearch mcp` or `mcsearch watch` is currently using the binary —
+the running process keeps its old inode, and the next invocation picks
+up the new one.
 
 This repo is normally deployed by the [`mcsearch` component in
 dotfiles](https://github.com/alehatsman/dotfiles/tree/main/components/mcsearch) —
@@ -36,6 +47,10 @@ mcsearch generate <path> "..."   # generate code grounded in the project's index
                                  # (RAG: top-k chunks → chat endpoint)
 mcsearch status [<path>]         # show indexed projects and endpoint health
 mcsearch nuke <path>             # delete the on-disk index for a project
+mcsearch reindex <path>          # drop and re-embed a project from scratch
+mcsearch reindex --all --yes     # drop and re-embed every known project
+                                 # (skips pre-migration indexes; one fresh
+                                 # `mcsearch index <path>` registers them)
 mcsearch mcp                     # run as an MCP server over stdio
 mcsearch watch <path>            # keep the index fresh as files change (fsnotify)
 mcsearch clone <src> <dst>       # seed dst's index from src's (e.g. for a new

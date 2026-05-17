@@ -1,15 +1,16 @@
 // mcsearch — local semantic-search helper for Claude Code.
 //
 // Subcommands:
-//   index <path>             Build or refresh the per-project index.
-//   query <path> <query...>  Search an existing index from the terminal.
-//   generate <path> <prompt> Generate code grounded in the project's index.
-//   status [<path>]          Show endpoint health and indexed projects.
-//   nuke <path>              Delete the on-disk index for a project.
-//   watch <path>             Keep the index fresh as files change.
-//   clone <src> <dst>        Seed dst's index from src's (worktrees).
-//   mcp                      Run as an MCP server over stdio.
-//   version                  Print the build version.
+//
+//	index <path>             Build or refresh the per-project index.
+//	query <path> <query...>  Search an existing index from the terminal.
+//	generate <path> <prompt> Generate code grounded in the project's index.
+//	status [<path>]          Show endpoint health and indexed projects.
+//	nuke <path>              Delete the on-disk index for a project.
+//	watch <path>             Keep the index fresh as files change.
+//	clone <src> <dst>        Seed dst's index from src's (worktrees).
+//	mcp                      Run as an MCP server over stdio.
+//	version                  Print the build version.
 package main
 
 import (
@@ -59,6 +60,8 @@ func main() {
 		err = cmdStatus(ctx, args)
 	case "nuke":
 		err = cmdNuke(ctx, args)
+	case "reindex":
+		err = cmdReindex(ctx, args)
 	case "mcp":
 		err = cmdMCP(ctx, args)
 	case "watch":
@@ -102,6 +105,10 @@ func usage() {
                                     index (RAG: top-k chunks → chat endpoint)
   mcsearch status [<path>]          show endpoint health and project stats
   mcsearch nuke   <path>            delete the on-disk index for a project
+  mcsearch reindex <path>           drop and re-embed a project from scratch
+  mcsearch reindex --all --yes      drop and re-embed every known project
+                                    (skips indexes from before this feature;
+                                    those need one fresh `+"`mcsearch index <path>`"+`)
   mcsearch mcp                      run as an MCP server over stdio
   mcsearch watch  <path>            keep the index fresh as files change
   mcsearch clone  <src> <dst>       seed dst's index from src's (e.g. for a
@@ -230,6 +237,9 @@ func cmdIndex(ctx context.Context, args []string) error {
 	}
 	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: cliLogger()})
 	if err := ix.Run(ctx); err != nil {
+		return err
+	}
+	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
 		return err
 	}
 	stats, err := st.Stats(ctx)
@@ -548,6 +558,145 @@ func cmdNuke(ctx context.Context, args []string) error {
 	return nil
 }
 
+// ─── reindex ───────────────────────────────────────────────────────────────
+
+func cmdReindex(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+	all := fs.Bool("all", false, "drop and re-index every known project under MCSEARCH_INDEX_DIR")
+	yes := fs.Bool("yes", false, "confirm the destructive sweep required by --all")
+	verbose := fs.Bool("v", false, "verbose")
+	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	rest := fs.Args()
+
+	if *all {
+		if len(rest) != 0 {
+			return fmt.Errorf("reindex --all takes no path argument")
+		}
+		if !*yes {
+			return fmt.Errorf("reindex --all drops every project index and re-embeds from scratch; pass --yes to confirm")
+		}
+		roots, err := knownProjectRoots(ctx, base)
+		if err != nil {
+			return err
+		}
+		if len(roots) == 0 {
+			fmt.Printf("nothing to reindex under %s\n", base)
+			return nil
+		}
+		var failed []string
+		for _, root := range roots {
+			fmt.Printf("→ reindexing %s\n", root)
+			if err := reindexOne(ctx, root, base, *verbose, *force); err != nil {
+				fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
+				failed = append(failed, root)
+			}
+		}
+		if len(failed) > 0 {
+			return fmt.Errorf("%d of %d project(s) failed to reindex", len(failed), len(roots))
+		}
+		return nil
+	}
+
+	if len(rest) != 1 {
+		return fmt.Errorf("reindex needs exactly one path argument (or --all)")
+	}
+	return reindexOne(ctx, rest[0], base, *verbose, *force)
+}
+
+// reindexOne drops the existing per-project cache dir and re-runs the
+// indexer from scratch. Used by both `reindex <path>` and the loop in
+// `reindex --all`.
+func reindexOne(ctx context.Context, root, base string, verbose, force bool) error {
+	p, err := proj.Resolve(root, base)
+	if err != nil {
+		return err
+	}
+	if err := proj.CheckIndexable(p, force); err != nil {
+		return err
+	}
+	if _, err := os.Stat(p.CacheDir); err == nil {
+		if err := os.RemoveAll(p.CacheDir); err != nil {
+			return err
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		return err
+	}
+	st, err := openStore(ctx, p.DBPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		return err
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: verbose, Logger: cliLogger()})
+	if err := ix.Run(ctx); err != nil {
+		return err
+	}
+	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
+		return err
+	}
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✓ reindexed %s\n", p.Root)
+	fmt.Printf("  chunks: %d  files: %d  dim: %d\n", stats.Chunks, stats.Files, stats.Dim)
+	return nil
+}
+
+// knownProjectRoots walks the index dir, opening each per-project index
+// and reading the recorded `project_root` meta. Entries written before
+// that meta existed are reported to stderr and skipped — the user can
+// `mcsearch nuke <path>` + `mcsearch index <path>` once to re-record it.
+func knownProjectRoots(ctx context.Context, base string) ([]string, error) {
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var roots []string
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dbPath := filepath.Join(base, e.Name(), "index.db")
+		if _, err := os.Stat(dbPath); err != nil {
+			continue
+		}
+		st, err := openStore(ctx, dbPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: open: %v\n", e.Name(), err)
+			continue
+		}
+		root, err := st.ProjectRoot(ctx)
+		st.Close()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", e.Name(), err)
+			continue
+		}
+		if root == "" {
+			fmt.Fprintf(os.Stderr, "warning: skipping %s: no recorded project_root (pre-migration index)\n", e.Name())
+			continue
+		}
+		roots = append(roots, root)
+	}
+	return roots, nil
+}
+
 // ─── watch ─────────────────────────────────────────────────────────────────
 
 func cmdWatch(ctx context.Context, args []string) error {
@@ -692,4 +841,3 @@ func cmdMCP(ctx context.Context, args []string) error {
 	}
 	return srv.RunStdio(ctx)
 }
-

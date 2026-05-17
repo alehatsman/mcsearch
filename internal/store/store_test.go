@@ -358,6 +358,40 @@ func TestDisableBM25(t *testing.T) {
 	}
 }
 
+func TestProjectRootRoundTrip(t *testing.T) {
+	st, ctx := newStore(t)
+
+	got, err := st.ProjectRoot(ctx)
+	if err != nil {
+		t.Fatalf("ProjectRoot on fresh db: %v", err)
+	}
+	if got != "" {
+		t.Errorf("fresh db should have empty project_root; got %q", got)
+	}
+
+	want := "/abs/path/to/proj"
+	if err := st.SetProjectRoot(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err = st.ProjectRoot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Errorf("ProjectRoot = %q, want %q", got, want)
+	}
+
+	// Overwrite — upsert semantics, not insert-or-error.
+	want = "/abs/path/to/other"
+	if err := st.SetProjectRoot(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.ProjectRoot(ctx)
+	if got != want {
+		t.Errorf("after overwrite ProjectRoot = %q, want %q", got, want)
+	}
+}
+
 func TestPersistsDimAcrossOpen(t *testing.T) {
 	dir := t.TempDir()
 	db := filepath.Join(dir, "test.db")

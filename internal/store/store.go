@@ -186,10 +186,10 @@ func (s *Store) migrate(ctx context.Context) error {
 
 // Stats reports the current state of an index.
 type Stats struct {
-	Chunks     int
-	Files      int
-	Dim        int
-	LastIndex  time.Time
+	Chunks    int
+	Files     int
+	Dim       int
+	LastIndex time.Time
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
@@ -221,6 +221,31 @@ func (s *Store) SetLastIndexedAt(ctx context.Context, t time.Time) error {
 	return err
 }
 
+// SetProjectRoot records the absolute project path this index belongs
+// to. Needed by `reindex --all`, which walks the sha256(path)-keyed
+// cache dirs and has to recover each project's original on-disk root.
+func (s *Store) SetProjectRoot(ctx context.Context, root string) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta(key,value) VALUES('project_root', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, root)
+	return err
+}
+
+// ProjectRoot returns the path previously recorded by SetProjectRoot.
+// Returns "" (not an error) if the row is missing — that's the
+// pre-migration case for indexes built before this metadata existed.
+func (s *Store) ProjectRoot(ctx context.Context) (string, error) {
+	var v string
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='project_root'`)
+	if err := row.Scan(&v); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", err
+	}
+	return v, nil
+}
+
 // ExistingSHAs returns the set of content_sha1 already present for path,
 // so the indexer can skip re-embedding unchanged chunks.
 func (s *Store) ExistingSHAs(ctx context.Context, path string) (map[string]bool, error) {
@@ -242,13 +267,13 @@ func (s *Store) ExistingSHAs(ctx context.Context, path string) (map[string]bool,
 
 // PendingChunk is one row destined for an UpsertMany batch.
 type PendingChunk struct {
-	Path        string
-	Kind        string
-	StartLine   int
-	EndLine     int
-	ContentSHA  string
-	Content     string
-	Vec         []float32
+	Path       string
+	Kind       string
+	StartLine  int
+	EndLine    int
+	ContentSHA string
+	Content    string
+	Vec        []float32
 }
 
 // UpsertMany inserts a batch of chunks in a single transaction. One
@@ -305,7 +330,6 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	s.invalidateCache()
 	return nil
 }
-
 
 // TouchSeen bumps last_seen_at for an already-present (path, sha) pair.
 // Used when we re-walk a project and encounter unchanged content.
@@ -814,4 +838,3 @@ func encodeVec(v []float32) []byte {
 	}
 	return buf
 }
-
