@@ -30,9 +30,26 @@ func TestDefaultsIgnoreVendorDirs(t *testing.T) {
 		{"id_ed25519.pub", false, true},
 		{"secrets.yml", false, true},
 		{"foo.min.js", false, true},
+		// license-family files: ignored at the gitignore layer so
+		// their uniform legalese can't pollute RAG.
+		{"LICENSE", false, true},
+		{"LICENSE.md", false, true},
+		{"LICENSE.txt", false, true},
+		{"LICENCE", false, true},
+		{"License.md", false, true},
+		{"license.txt", false, true},
+		{"COPYING", false, true},
+		{"COPYING.LESSER", false, true},
+		{"COPYRIGHT", false, true},
+		{"NOTICE", false, true},
+		{"NOTICE.md", false, true},
+		{"AUTHORS", false, true},
+		{"PATENTS", false, true},
+		{"LEGAL.md", false, true},
 		// negatives
 		{"src/main.go", false, false},
 		{"README.md", false, false},
+		{"CHANGELOG.md", false, false},
 		{".github/workflows/ci.yml", false, false},
 	}
 	for _, c := range cases {
@@ -180,14 +197,20 @@ func TestIndexableBasename(t *testing.T) {
 		"Pipfile":     true,
 		// Editor
 		".editorconfig": true,
-		// License / docs without extension
-		"LICENSE":   true,
-		"COPYING":   true,
-		"AUTHORS":   true,
-		"NOTICE":    true,
+		// Substantive docs without extension stay indexable.
 		"CHANGELOG": true,
 		"README":    true,
-		// negatives
+		// License-family files: the basename whitelist does NOT carry
+		// them — they're filtered at the gitignore-pattern layer
+		// (see TestDefaultsIgnoreVendorDirs). The whitelist is the
+		// first gate, so they wouldn't reach the matcher anyway, but
+		// being explicit about it here documents the contract.
+		"LICENSE": false,
+		"COPYING": false,
+		"AUTHORS": false,
+		"NOTICE":  false,
+		"PATENTS": false,
+		"LEGAL":   false,
 		"go.sum":  false,
 		"license": false, // case-sensitive on purpose
 	}

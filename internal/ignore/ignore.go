@@ -62,6 +62,31 @@ var DefaultPatterns = []string{
 	"*.lock",
 	"*.min.js",
 	"*.min.css",
+	// License / legal-text files. They index successfully but their
+	// uniform legalese gives the embedder something to latch onto for
+	// almost any query, polluting RAG context with chunks that have
+	// nothing to do with the question. Cover the all-caps GNU/Apache
+	// conventions plus common case variants and extension forms.
+	"LICENSE",
+	"LICENSE.*",
+	"LICENCE",
+	"LICENCE.*",
+	"License",
+	"License.*",
+	"license",
+	"license.*",
+	"COPYING",
+	"COPYING.*",
+	"COPYRIGHT",
+	"COPYRIGHT.*",
+	"NOTICE",
+	"NOTICE.*",
+	"AUTHORS",
+	"AUTHORS.*",
+	"PATENTS",
+	"PATENTS.*",
+	"LEGAL",
+	"LEGAL.*",
 }
 
 // IndexableExtensions are the file extensions mcsearch will attempt to
@@ -255,12 +280,12 @@ var IndexableBasenames = map[string]bool{
 	"Caddyfile":      true,
 	"Pipfile":        true,
 	".editorconfig":  true,
-	"LICENSE":        true,
-	"COPYING":        true,
-	"AUTHORS":        true,
-	"NOTICE":         true,
-	"CHANGELOG":      true,
-	"README":         true,
+	// LICENSE / COPYING / AUTHORS / NOTICE / PATENTS / LEGAL are
+	// deliberately not whitelisted — DefaultPatterns above filters
+	// them and their .md/.txt variants. Keep CHANGELOG and README
+	// (substantive prose, not legal boilerplate).
+	"CHANGELOG": true,
+	"README":    true,
 }
 
 // IndexableBasename returns true for known basenames that lack an
