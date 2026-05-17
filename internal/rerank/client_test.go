@@ -44,8 +44,8 @@ func TestRerankHappyPath(t *testing.T) {
 func TestRerankSendsExpectedFields(t *testing.T) {
 	var got rerankRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/rerank" {
-			t.Errorf("path = %q, want /v1/rerank", r.URL.Path)
+		if r.URL.Path != "/rerank" {
+			t.Errorf("path = %q, want /rerank", r.URL.Path)
 		}
 		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
 			t.Errorf("Content-Type = %q, want application/json", ct)

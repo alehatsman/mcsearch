@@ -176,7 +176,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
-| `MCSEARCH_RERANK_URL`     | unset                              | Cohere-compatible `/v1/rerank` base URL (TEI, vLLM with reranker, Cohere itself). Unset = rerank disabled. |
+| `MCSEARCH_RERANK_URL`     | unset                              | Base URL of a Cohere-shape `/rerank` server (TEI, Infinity, vLLM with reranker). Unset = rerank disabled. |
 | `MCSEARCH_RERANK_MODEL`   | `qwen3-reranker:4b`                | Model name forwarded to the reranker. |
 | `MCSEARCH_RERANK_POOL`    | `40`                               | Fused candidates fed to the reranker. Clamped to `[1, 100]`. Larger = better recall, slower call. |
 | `MCSEARCH_RERANK_TIMEOUT` | `5s`                               | HTTP timeout for each rerank request. |

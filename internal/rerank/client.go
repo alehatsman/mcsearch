@@ -1,9 +1,13 @@
-// Package rerank talks to a Cohere-compatible /v1/rerank endpoint (TEI,
-// vLLM with a reranker model, Cohere itself). It is the relevance-side
+// Package rerank talks to a Cohere-shape /rerank endpoint (TEI,
+// Infinity, vLLM with a reranker model). It is the relevance-side
 // companion to internal/embed and internal/chat: where embed turns text
 // into vectors for bi-encoder retrieval, rerank scores (query, doc)
 // pairs jointly with cross-attention to reorder the fused candidate
 // pool that store.Search produces.
+//
+// The request body matches Cohere (`documents` + `top_n`), but the
+// path is the open-source convention `/rerank`. Cohere's own API uses
+// `/v1/rerank`; a proxy is needed to point this client at api.cohere.ai.
 package rerank
 
 import (
@@ -46,7 +50,7 @@ type Reranker interface {
 }
 
 // New builds a client. baseURL is the server root (e.g.
-// http://127.0.0.1:8082), not the /v1/rerank path.
+// http://127.0.0.1:8082), not the /rerank path.
 func New(baseURL, model string, timeout time.Duration) *Client {
 	if timeout <= 0 {
 		timeout = 5 * time.Second
@@ -77,7 +81,7 @@ type rerankResponse struct {
 	} `json:"error,omitempty"`
 }
 
-// Rerank sends (query, docs) to /v1/rerank and returns the server's
+// Rerank sends (query, docs) to /rerank and returns the server's
 // ordering of indices into docs along with relevance scores. Results
 // come back in descending-relevance order.
 //
@@ -99,7 +103,7 @@ func (c *Client) Rerank(ctx context.Context, query string, docs []string) ([]Sco
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/v1/rerank", bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+"/rerank", bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
