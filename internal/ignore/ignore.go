@@ -1,15 +1,35 @@
 // Package ignore decides which files to skip during indexing.
 //
-// Three layers, evaluated in order:
-//  1. Built-in defaults (always-skip: vendor dirs, build outputs, secret
-//     filenames). Hard-coded; not overridable.
-//  2. .gitignore at the project root (best-effort — we read the root
-//     file only, not nested .gitignore. Enough in practice for the
-//     ignore-most-of-vendored-stuff job).
-//  3. .mcsearch-ignore at the project root (same syntax as .gitignore).
+// The full filter chain a file passes through:
 //
-// A separate secret pre-scan checks file contents for AWS keys / private
-// keys / GitHub tokens before embedding.
+//  1. Allow-list gate (IndexableExt / IndexableBasename): the file's
+//     extension must appear in IndexableExtensions, OR its basename in
+//     IndexableBasenames. Anything else is dropped before any further
+//     check runs. This is the first gate, not a fallback.
+//
+//  2. Matcher (gitignore-style exclusion): three sub-layers composed
+//     and evaluated together by github.com/sabhiram/go-gitignore — so
+//     full gitignore semantics apply (anchoring, negation, `**`,
+//     dir-only patterns, later-pattern-wins). The sub-layers, in
+//     declaration order:
+//       a. DefaultPatterns — hard-coded: vendor dirs, build outputs,
+//          secret-shaped filenames, license-family files.
+//       b. .gitignore at the project root (root file only; nested
+//          .gitignore files are intentionally not read).
+//       c. .mcsearch-ignore at the project root (same syntax).
+//
+//  3. LooksBinary — NUL-byte heuristic for binaries that slipped
+//     through the allow-list (e.g. a `.yml` that's actually a packed
+//     binary).
+//
+//  4. LooksLikeSecret — scans the first 4 KB of content against a
+//     panel of well-known secret regexes (AWS, GitHub PAT, Slack,
+//     OpenAI, Stripe, GitLab, SendGrid, …). Suppressed when
+//     IsTestPath(path) is true so test files holding fake credentials
+//     aren't dropped.
+//
+// MaxFileSize and other indexer-orchestration limits live in
+// internal/index/index.go, not here.
 package ignore
 
 import (
