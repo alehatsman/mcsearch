@@ -369,12 +369,13 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	return nil
 }
 
-// TouchSeen bumps last_seen_at for an already-present (path, sha) pair.
-// Used when we re-walk a project and encounter unchanged content.
-func (s *Store) TouchSeen(ctx context.Context, path, contentSHA string, now time.Time) error {
+// TouchSeen bumps last_seen_at for an already-present (path, sha) pair and
+// backfills the name column — so chunks indexed before the name column was
+// added get their names populated on the next walk without re-embedding.
+func (s *Store) TouchSeen(ctx context.Context, path, contentSHA, name string, now time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`UPDATE chunks SET last_seen_at=? WHERE path=? AND content_sha1=?`,
-		now.UnixNano(), path, contentSHA)
+		`UPDATE chunks SET last_seen_at=?, name=? WHERE path=? AND content_sha1=?`,
+		now.UnixNano(), name, path, contentSHA)
 	return err
 }
 

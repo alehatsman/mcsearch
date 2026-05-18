@@ -81,7 +81,7 @@ func TestPruneUnseen(t *testing.T) {
 	}, t0)
 	// Advance: touch only `live.go`.
 	t1 := t0.Add(time.Millisecond)
-	if err := st.TouchSeen(ctx, "live.go", "h2", t1); err != nil {
+	if err := st.TouchSeen(ctx, "live.go", "h2", "", t1); err != nil {
 		t.Fatal(err)
 	}
 	n, err := st.PruneUnseen(ctx, t1)

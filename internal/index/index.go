@@ -78,10 +78,10 @@ func New(p *proj.Project, st *store.Store, em *embed.Client, ig *ignore.Matcher,
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	var (
-		toEmbed     []pending
-		seen        int
-		skipped     int
-		mtimeSkips  int
+		toEmbed    []pending
+		seen       int
+		skipped    int
+		mtimeSkips int
 	)
 
 	prevStats, statsErr := ix.Store.Stats(ctx)
@@ -193,7 +193,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		for _, c := range chunks {
 			sha := chunkSHA(c.Content)
 			if existing[sha] {
-				if err := ix.Store.TouchSeen(ctx, rel, sha, startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, rel, sha, c.Name, startTime); err != nil {
 					return err
 				}
 				continue
@@ -215,7 +215,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			}
 			fileSHA := chunkSHA(string(slice))
 			if existing[fileSHA] {
-				if err := ix.Store.TouchSeen(ctx, rel, fileSHA, startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, rel, fileSHA, "", startTime); err != nil {
 					return err
 				}
 				seen++
@@ -254,7 +254,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				}
 				sumSHA := chunkSHA("chunk_summary:" + c.Content)
 				if existing[sumSHA] {
-					if err := ix.Store.TouchSeen(ctx, rel, sumSHA, startTime); err != nil {
+					if err := ix.Store.TouchSeen(ctx, rel, sumSHA, "", startTime); err != nil {
 						return err
 					}
 					seen++
