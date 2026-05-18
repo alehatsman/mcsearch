@@ -689,13 +689,21 @@ func (s *Server) RunStdio(ctx context.Context) error {
 		Description: "PRIMARY ENTRY POINT for code-understanding questions. Call this BEFORE Grep/Glob/Read fan-out. " +
 			"Given a free-text question (and optional intent override), it picks a strategy, composes semantic_search " +
 			"+ find_symbol + graph expansion, and returns a compact bundle: `semantic_hits`, `symbols`, `suggested_reads` " +
-			"(file ranges with their CONTENTS inlined by default — no follow-up Read needed in the common case), a prose " +
-			"`next_action` directive you can execute verbatim, and an `avoid` line telling you what NOT to do. Suggested " +
-			"reads are capped per-intent: targeted intents get ~2 reads × 60 lines / 4 KB each (~12 KB total); exploration " +
-			"intents (architecture, package_topology) widen to ~5 reads × 120 lines / 8 KB each (~40 KB total) so the " +
-			"initial bundle alone gives a real cross-file picture. Oversize ranges arrive with `truncated: true` and the " +
-			"original line range, so the caller can Read the rest if needed. Pass `no_inline: true` to omit the content " +
-			"payload when you already have the files open. Intent is inferred automatically " +
+			"(both lanes carry their CONTENTS inlined by default — no follow-up Read needed in the common case), a prose " +
+			"`next_action` directive you can execute verbatim, and an `avoid` line telling you what NOT to do. Each " +
+			"SymbolHit carries `signature` (declaration line) and `doc` (leading comment block) so you can see the API " +
+			"without reading the body. `annotations` is a per-path map populated by intent: always-on entries include " +
+			"sibling `tests` (foo.go ↔ foo_test.go) and `nearest_doc` (closest CLAUDE.md / doc.go / README.md walking " +
+			"up); editing_context adds `last_commit` / `last_author` (git blame) and `owners` (CODEOWNERS); architecture " +
+			"and editing_context add `build_tags` and `package`. `references` is populated for callers/callees with a " +
+			"ripgrep-backed list of usage sites (stand-in until the `calls` graph layer lands). Inline content " +
+			"shares ONE per-intent byte pool across both lanes: targeted intents budget ~60 lines / 4 KB per range " +
+			"and ~12 KB total; exploration intents (architecture, package_topology) widen to ~120 lines / 8 KB per " +
+			"range and ~40 KB total. Suggested_reads (~2 targeted / ~5 exploration) are filled first as the curated " +
+			"cut; semantic_hits use the remaining budget. A range that appears in both lanes is read once and " +
+			"charged once. Oversize ranges arrive with `truncated: true` and the original line range, so the caller " +
+			"can Read the rest if needed. Pass `no_inline: true` to omit content payloads when you already have the " +
+			"files open. Intent is inferred automatically " +
 			"(behavior_search/symbol_lookup/callers/callees/architecture/package_topology/editing_context) — pass `intent` " +
 			"only to override. Returns 'no-index' / 'embedding-service-unreachable' for graceful fallback to grep.",
 	}, s.contextRouter)

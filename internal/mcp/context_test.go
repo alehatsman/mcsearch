@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -147,6 +148,44 @@ func TestPickSuggestedReadsCodePreferredOverDocs(t *testing.T) {
 	}
 }
 
+func TestPickSuggestedReadsCodePreferredOverBuildFiles(t *testing.T) {
+	// Taskfile.yml shouldn't beat the .go file it wraps when the
+	// intent is implementation-oriented. Architecture intentionally
+	// keeps the build file since it can reveal structure.
+	sem := []SemHit{
+		{Path: "Taskfile.yml", Score: 0.66},
+		{Path: "internal/mcp/server.go", Score: 0.40},
+	}
+	got := pickSuggestedReads(IntentEditingContext, sem, nil, nil)
+	if len(got) == 0 || got[0].Path != "internal/mcp/server.go" {
+		t.Errorf("editing_context should prefer .go over Taskfile.yml; got %+v", got)
+	}
+	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	if len(gotArch) == 0 || gotArch[0].Path != "Taskfile.yml" {
+		t.Errorf("architecture should leave score order intact; got %+v", gotArch)
+	}
+}
+
+func TestIsBuildOrConfigPath(t *testing.T) {
+	tests := map[string]bool{
+		"Taskfile.yml":    true,
+		"Taskfile.yaml":   true,
+		"Dockerfile":      true,
+		"Makefile":        true,
+		".github/ci.yml":  true,
+		"config.toml":     true,
+		"internal/x.go":   false,
+		"README.md":       false,
+		"go.mod":          false, // intentionally not demoted
+		"package.json":    false,
+	}
+	for p, want := range tests {
+		if got := isBuildOrConfigPath(p); got != want {
+			t.Errorf("isBuildOrConfigPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
 func TestIsDocPath(t *testing.T) {
 	tests := map[string]bool{
 		"README.md":              true,
@@ -172,7 +211,7 @@ func TestInlineSuggestedReadsBasic(t *testing.T) {
 		"line 1\nline 2\nline 3\nline 4\nline 5\n")
 
 	reads := []SuggestedRead{{Path: "f.go", StartLine: 2, EndLine: 4, Reason: "x"}}
-	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+	inlineContent(root, IntentBehaviorSearch, reads, nil)
 
 	want := "line 2\nline 3\nline 4\n"
 	if reads[0].Content != want {
@@ -194,7 +233,7 @@ func TestInlineSuggestedReadsPerReadLineCap(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.go"), b.String())
 
 	reads := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+	inlineContent(root, IntentBehaviorSearch, reads, nil)
 
 	if !reads[0].Truncated {
 		t.Error("want truncated=true when range exceeds per-read cap")
@@ -230,7 +269,7 @@ func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
 		{Path: "c.go", StartLine: 1, EndLine: 30},
 		{Path: "d.go", StartLine: 1, EndLine: 30},
 	}
-	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+	inlineContent(root, IntentBehaviorSearch, reads, nil)
 
 	total := 0
 	for _, r := range reads {
@@ -245,10 +284,57 @@ func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
 	}
 }
 
+func TestInlineContentSemanticHitsAlsoFilled(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.go"), "line 1\nline 2\nline 3\n")
+	writeFile(t, filepath.Join(root, "b.go"), "line A\nline B\nline C\n")
+
+	reads := []SuggestedRead{{Path: "a.go", StartLine: 1, EndLine: 3}}
+	sem := []SemHit{
+		{Path: "a.go", StartLine: 1, EndLine: 3},
+		{Path: "b.go", StartLine: 1, EndLine: 3},
+	}
+	inlineContent(root, IntentBehaviorSearch, reads, sem)
+
+	if sem[0].Content == "" {
+		t.Error("semantic_hits[0] should be filled (cache-hit from suggested_reads)")
+	}
+	if sem[1].Content == "" {
+		t.Error("semantic_hits[1] should be filled (separate file, within budget)")
+	}
+	if reads[0].Content == "" {
+		t.Error("suggested_reads[0] should still be filled")
+	}
+}
+
+func TestInlineContentSharedBudgetDoesNotDoubleCharge(t *testing.T) {
+	// Same range appears in both lanes; the read cache should serve
+	// the second request without re-charging the budget, so plenty
+	// of headroom remains for other hits.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "shared.go"), "line 1\nline 2\nline 3\n")
+	writeFile(t, filepath.Join(root, "other.go"), "x\ny\nz\n")
+
+	reads := []SuggestedRead{{Path: "shared.go", StartLine: 1, EndLine: 3}}
+	sem := []SemHit{
+		{Path: "shared.go", StartLine: 1, EndLine: 3},
+		{Path: "other.go", StartLine: 1, EndLine: 3},
+	}
+	inlineContent(root, IntentBehaviorSearch, reads, sem)
+
+	if reads[0].Content == "" || sem[0].Content == "" || sem[1].Content == "" {
+		t.Errorf("expected all three to be filled; got reads=%q sem0=%q sem1=%q",
+			reads[0].Content, sem[0].Content, sem[1].Content)
+	}
+	if reads[0].Content != sem[0].Content {
+		t.Errorf("dedup cache should return identical content")
+	}
+}
+
 func TestInlineSuggestedReadsMissingFileGraceful(t *testing.T) {
 	root := t.TempDir()
 	reads := []SuggestedRead{{Path: "does-not-exist.go", StartLine: 1, EndLine: 5}}
-	inlineSuggestedReads(root, IntentBehaviorSearch, reads) // must not panic
+	inlineContent(root, IntentBehaviorSearch, reads, nil) // must not panic
 	if reads[0].Content != "" {
 		t.Errorf("missing file should leave content empty, got %q", reads[0].Content)
 	}
@@ -355,11 +441,11 @@ func TestInlineSuggestedReadsExplorationDenser(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.go"), b.String())
 
 	targeted := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineSuggestedReads(root, IntentBehaviorSearch, targeted)
+	inlineContent(root, IntentBehaviorSearch, targeted, nil)
 	targetedLines := strings.Count(targeted[0].Content, "\n")
 
 	exploration := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineSuggestedReads(root, IntentArchitecture, exploration)
+	inlineContent(root, IntentArchitecture, exploration, nil)
 	explorationLines := strings.Count(exploration[0].Content, "\n")
 
 	if !(explorationLines > targetedLines) {
@@ -422,7 +508,7 @@ func TestBuildAvoid(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := buildAvoid(tc.intent, tc.sem, tc.syms, tc.graphIndexed)
+			got := buildAvoid(tc.intent, tc.sem, tc.syms, tc.graphIndexed, false)
 			if tc.want == "" {
 				if got != "" {
 					t.Errorf("want empty, got %q", got)
@@ -537,9 +623,23 @@ func TestContextRouterCallersGraphDeferred(t *testing.T) {
 	if out.Intent != IntentCallers {
 		t.Errorf("intent=%s, want callers", out.Intent)
 	}
-	if !strings.Contains(out.Avoid, "`calls` edges are not yet extracted") {
-		t.Errorf("avoid should flag calls-edges deferred status: %q", out.Avoid)
+	// avoid message branches on whether the references lane (rg) found
+	// usages. With rg available + a real usage in UsesSearch we expect
+	// the "references already lists usages" variant; if rg isn't on
+	// PATH or returned empty we fall back to the original "calls edges
+	// not extracted" line. Both mention `calls` graph caveat.
+	if !strings.Contains(out.Avoid, "calls") {
+		t.Errorf("avoid should flag the calls-graph caveat: %q", out.Avoid)
 	}
+	// If rg is available, references should be populated for this fixture.
+	if hasRg() && len(out.References) == 0 {
+		t.Errorf("expected references for `Search` usages when rg is available; got 0")
+	}
+}
+
+func hasRg() bool {
+	_, err := exec.LookPath("rg")
+	return err == nil
 }
 
 func TestContextRouterNoIndex(t *testing.T) {

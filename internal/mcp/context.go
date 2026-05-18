@@ -94,18 +94,24 @@ type ContextInput struct {
 	Question string `json:"question" jsonschema:"free-text question about the codebase (e.g. 'where is filesystem event debouncing handled?', 'how does indexing work?', 'callers of (*Store).Search')"`
 	Intent   string `json:"intent,omitempty" jsonschema:"force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context (default: auto)"`
 	K        int    `json:"k,omitempty" jsonschema:"max hits per lane (default 8, max 30)"`
-	NoInline bool   `json:"no_inline,omitempty" jsonschema:"skip inlining file contents into suggested_reads. Default off: each suggested_read carries its line-range content (per-read cap ~60 lines / 4 KB, total cap ~12 KB across reads; oversize ranges are clipped with truncated=true). Set true if you already have the files open."`
+	NoInline bool   `json:"no_inline,omitempty" jsonschema:"skip inlining file contents into suggested_reads and semantic_hits. Default off: both lanes carry their line-range content from one shared per-intent byte pool (per-range cap ~60 lines / 4 KB; total cap ~12 KB targeted / ~40 KB exploration; oversize ranges are clipped with truncated=true). Set true if you already have the files open."`
 }
 
 // SemHit is a semantic-search result reduced to the wire shape the
-// issue specifies. Full chunk content is not included — `suggested_reads`
-// tells the caller which file/range to open in full.
+// issue specifies. Content is inlined by default so the caller doesn't
+// have to issue a follow-up Read for hits below the suggested_reads
+// cut; the same per-intent budget pool covers both lanes (see
+// inlineCapsFor / inlineContent). Empty when no_inline=true, when the
+// file cannot be opened, or when the shared byte budget was exhausted
+// before this hit.
 type SemHit struct {
 	Path      string  `json:"path"`
 	StartLine int     `json:"start_line"`
 	EndLine   int     `json:"end_line"`
 	Score     float32 `json:"score"`
 	Reason    string  `json:"reason,omitempty"`
+	Content   string  `json:"content,omitempty"`
+	Truncated bool    `json:"truncated,omitempty"`
 }
 
 type SymbolHit struct {
@@ -114,6 +120,54 @@ type SymbolHit struct {
 	StartLine     int    `json:"start_line,omitempty"`
 	EndLine       int    `json:"end_line,omitempty"`
 	Kind          string `json:"kind,omitempty"`
+	// Signature is the declaration line (e.g. `func (s *Store) Search(q
+	// string) ([]Hit, error)`). Cheap: one file line at StartLine. Lets
+	// the caller see the API contract without reading the body.
+	Signature string `json:"signature,omitempty"`
+	// Doc is the contiguous comment block immediately above StartLine
+	// (Go `//` lines, Python `#` lines). Capped at ~10 lines / 600 B.
+	Doc string `json:"doc,omitempty"`
+}
+
+// RefHit is a lexical reference produced by the references lane
+// (callers/callees intents). Stand-in for the deferred `calls` graph
+// edges — ripgrep over the bare symbol name, capped to a few dozen
+// hits. The definition line is filtered out so the list is genuinely
+// "uses of" rather than "appearances of".
+type RefHit struct {
+	Path    string `json:"path"`
+	Line    int    `json:"line"`
+	Snippet string `json:"snippet,omitempty"` // single-line excerpt
+	Symbol  string `json:"symbol,omitempty"`  // which symbol this is a ref to
+}
+
+// PathMeta is the per-file annotation bundle keyed by relative path in
+// ContextOutput.Annotations. Fields are populated conditionally based
+// on intent and may individually be empty. Designed so all data about
+// a single file lives in one place — the caller joins by path.
+type PathMeta struct {
+	// LastCommit / LastAuthor are populated for editing_context. Short
+	// SHA + short date + author; e.g. "5a79083 2026-05-19 Aleh Atsman".
+	LastCommit string `json:"last_commit,omitempty"`
+	LastAuthor string `json:"last_author,omitempty"`
+	// Owners from the project's CODEOWNERS file, matched by glob.
+	// Populated for editing_context only.
+	Owners []string `json:"owners,omitempty"`
+	// NearestDoc is the closest documentation file walking up from the
+	// path's directory — CLAUDE.md > doc.go > README.md, stopping at
+	// projectRoot. Always-on (cheap dir walk).
+	NearestDoc string `json:"nearest_doc,omitempty"`
+	// Tests are sibling test files paired by language convention
+	// (foo.go ↔ foo_test.go; foo.py ↔ test_foo.py; foo.ts ↔
+	// foo.test.ts). Always-on (pure path heuristic).
+	Tests []string `json:"tests,omitempty"`
+	// BuildTags is the //go:build or // +build constraint line plus the
+	// package clause for Go files; populated for editing_context,
+	// architecture, and package_topology.
+	BuildTags string `json:"build_tags,omitempty"`
+	// Package is the `package x` clause for Go files; populated
+	// alongside BuildTags.
+	Package string `json:"package,omitempty"`
 }
 
 // GraphResult is the placeholder for the deferred graph layer. Always
@@ -155,18 +209,27 @@ type SuggestedRead struct {
 }
 
 type ContextOutput struct {
-	Status        string          `json:"status"` // ok | no-index | embedding-service-unreachable | error
-	Hint          string          `json:"hint,omitempty"`
-	Endpoint      string          `json:"endpoint,omitempty"` // populated when embed is unreachable
-	Project       string          `json:"project,omitempty"`
-	Intent        string          `json:"intent,omitempty"`
-	Stale         bool            `json:"stale,omitempty"`
-	SemanticHits  []SemHit        `json:"semantic_hits,omitempty"`
-	Symbols       []SymbolHit     `json:"symbols,omitempty"`
-	Graph         *GraphResult    `json:"graph,omitempty"`
-	SuggestedReads []SuggestedRead `json:"suggested_reads,omitempty"`
-	NextAction    string          `json:"next_action,omitempty"`
-	Avoid         string          `json:"avoid,omitempty"`
+	Status         string              `json:"status"` // ok | no-index | embedding-service-unreachable | error
+	Hint           string              `json:"hint,omitempty"`
+	Endpoint       string              `json:"endpoint,omitempty"` // populated when embed is unreachable
+	Project        string              `json:"project,omitempty"`
+	Intent         string              `json:"intent,omitempty"`
+	Stale          bool                `json:"stale,omitempty"`
+	SemanticHits   []SemHit            `json:"semantic_hits,omitempty"`
+	Symbols        []SymbolHit         `json:"symbols,omitempty"`
+	Graph          *GraphResult        `json:"graph,omitempty"`
+	SuggestedReads []SuggestedRead     `json:"suggested_reads,omitempty"`
+	NextAction     string              `json:"next_action,omitempty"`
+	Avoid          string              `json:"avoid,omitempty"`
+	// References is the ripgrep-backed reference list. Populated for
+	// callers/callees intents when at least one SymbolHit is present.
+	// Stand-in for the deferred `calls` graph edges.
+	References []RefHit `json:"references,omitempty"`
+	// Annotations is per-file metadata keyed by the same relative path
+	// used in SuggestedReads / Symbols / SemanticHits. Which sub-fields
+	// are populated depends on intent (see enrich.go for the gating
+	// matrix). Callers join by path.
+	Annotations map[string]PathMeta `json:"annotations,omitempty"`
 }
 
 // ContextRouter is the exported entry point used by the CLI
@@ -256,10 +319,11 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	enrichGraph(&out, intent, graphView, out.SemanticHits, out.Symbols)
 	out.SuggestedReads = pickSuggestedReads(intent, out.SemanticHits, out.Symbols, symbolPaths)
 	if !in.NoInline {
-		inlineSuggestedReads(p.Root, intent, out.SuggestedReads)
+		inlineContent(p.Root, intent, out.SuggestedReads, out.SemanticHits)
 	}
+	enrich(ctx, p.Root, intent, &out)
 	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols)
-	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil)
+	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil, len(out.References) > 0)
 	out.Status = "ok"
 	if embedFailed && out.Hint == "" {
 		out.Hint = "embed offline; results from symbol lane only."
@@ -465,6 +529,33 @@ func isDocPath(p string) bool {
 	return false
 }
 
+// isBuildOrConfigPath returns true for build/CI/config files that
+// rarely contain the implementation a caller is asking about for
+// editing_context or behavior_search intents. Same demotion mechanic
+// as isDocPath: when the rerank stage lets a Taskfile.yml outscore the
+// .go file it's wrapping, the tiebreaker should pick the code. Kept
+// narrow on purpose — go.mod / package.json are sometimes the right
+// answer ("bump version"), so they stay out.
+func isBuildOrConfigPath(p string) bool {
+	base := filepath.Base(p)
+	switch {
+	case strings.HasSuffix(p, ".yml"),
+		strings.HasSuffix(p, ".yaml"),
+		strings.HasSuffix(p, ".toml"):
+		return true
+	}
+	switch base {
+	case "Dockerfile", "Makefile", "Taskfile.yml", "Taskfile.yaml":
+		return true
+	}
+	return false
+}
+
+// isNonImplPath unifies the doc + build/config demotion checks.
+func isNonImplPath(p string) bool {
+	return isDocPath(p) || isBuildOrConfigPath(p)
+}
+
 // ─── suggested_reads ──────────────────────────────────────────────────────
 
 // pickSuggestedReads merges the top results from both lanes into a
@@ -513,27 +604,29 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 	}
 
 	// Pass 2: semantic hits, biased toward cross-lane agreement.
-	// For code-oriented intents we also demote doc paths (.md/.rst/...)
-	// as a tiebreaker, so a README at score 0.66 doesn't beat the
-	// store.go that implements the feature at score 0.51. Architecture
-	// is the exception — the README often IS the right read.
+	// For code-oriented intents we also demote non-implementation paths
+	// (docs and build/CI config) as a tiebreaker, so a README or
+	// Taskfile.yml doesn't beat the .go file that implements the
+	// feature when scores are close. Architecture is the exception —
+	// the README often IS the right read, and build files can reveal
+	// structure.
 	preferCode := intent != IntentArchitecture
 	type ranked struct {
 		hit       SemHit
 		crossLane bool
-		isDoc     bool
+		nonImpl   bool
 	}
 	rs := make([]ranked, 0, len(semHits))
 	for _, h := range semHits {
 		_, cross := symbolPaths[h.Path]
-		rs = append(rs, ranked{hit: h, crossLane: cross, isDoc: isDocPath(h.Path)})
+		rs = append(rs, ranked{hit: h, crossLane: cross, nonImpl: isNonImplPath(h.Path)})
 	}
 	sort.SliceStable(rs, func(i, j int) bool {
 		if rs[i].crossLane != rs[j].crossLane {
 			return rs[i].crossLane // cross-lane agreement first
 		}
-		if preferCode && rs[i].isDoc != rs[j].isDoc {
-			return !rs[i].isDoc // non-doc beats doc
+		if preferCode && rs[i].nonImpl != rs[j].nonImpl {
+			return !rs[i].nonImpl // implementation beats doc/build
 		}
 		return rs[i].hit.Score > rs[j].hit.Score
 	})
@@ -610,9 +703,15 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit) 
 // have strong signals (exact symbol found → don't grep); softer
 // otherwise. `graphIndexed` is true when the project has a graph
 // available — `callers`/`callees` still warn because layer 1 doesn't
-// emit `calls` edges, regardless.
-func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndexed bool) string {
+// emit `calls` edges, regardless. `hasRefs` softens the callers/callees
+// message: when ripgrep already populated a reference list the agent
+// has the surface it needs, so the message shifts from "verify with
+// grep" to "do not re-grep, the list is here."
+func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndexed, hasRefs bool) string {
 	if _, deferred := graphDeferredIntents[intent]; deferred {
+		if hasRefs {
+			return "Do not grep for the identifier — the `references` field already lists usages. Treat it as a best-effort lexical list (no `calls` graph yet); rely on it for navigation, verify edge cases by reading the snippets."
+		}
 		return "Do not trust the symbols list as exhaustive — `calls` edges are not yet extracted, so caller/callee coverage is best-effort. Verify with grep on the symbol name."
 	}
 	if !graphIndexed && graphSupportsIntent(intent) {
@@ -652,34 +751,84 @@ func inlineCapsFor(intent string) inlineCaps {
 	}
 }
 
-// inlineSuggestedReads fills each SuggestedRead.Content with the file
-// slice for its [StartLine, EndLine] range so callers don't need a
-// follow-up Read for the common case. Bounds are enforced at two
-// levels: per-read (lines + bytes) and total bytes across all reads,
-// so a minified single-line file or a 1000-line suggested range can't
-// blow up the response. Caps scale with intent (see inlineCapsFor).
+// inlineContent fills the Content/Truncated fields on suggested_reads
+// and semantic_hits from a single per-intent byte budget, so the
+// caller gets a usable bundle without follow-up Reads. Suggested_reads
+// are filled first (they are the curated cut); remaining budget then
+// covers semantic_hits in order. A small read cache means a range
+// that appears in both lanes is loaded once and charged once against
+// the budget.
 //
-// Failures (missing file, unreadable, scanner error) leave Content
-// empty and the caller still has Path/StartLine/EndLine to fall back
-// on a manual Read.
-func inlineSuggestedReads(projectRoot, intent string, reads []SuggestedRead) {
+// Bounds are enforced at two levels: per-read (lines + bytes) and
+// total bytes across both arrays. Caps scale with intent (see
+// inlineCapsFor). Failures (missing file, unreadable, scanner error)
+// leave Content empty and the caller still has Path/StartLine/EndLine
+// to fall back on a manual Read.
+func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemHit) {
 	caps := inlineCapsFor(intent)
 	budget := caps.totalBytesCap
+
+	type key struct {
+		path           string
+		start, end     int
+		maxLines, maxB int
+	}
+	type cached struct {
+		content   string
+		truncated bool
+	}
+	cache := map[key]cached{}
+
+	fetch := func(path string, start, end int) (string, bool, bool) {
+		// Returns (content, truncated, charged) where charged=true
+		// means we drew from the budget on this call (cache miss).
+		perBytes := min(caps.maxBytesPerRead, budget)
+		k := key{path, start, end, caps.maxLinesPerRead, perBytes}
+		if c, ok := cache[k]; ok {
+			return c.content, c.truncated, false
+		}
+		if budget <= 0 {
+			return "", false, false
+		}
+		abs := path
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(projectRoot, abs)
+		}
+		content, truncated, err := readLineRange(abs, start, end, caps.maxLinesPerRead, perBytes)
+		if err != nil {
+			return "", false, false
+		}
+		cache[k] = cached{content, truncated}
+		return content, truncated, true
+	}
+
 	for i := range reads {
 		if budget <= 0 {
 			return
 		}
-		abs := reads[i].Path
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(projectRoot, abs)
-		}
-		content, truncated, err := readLineRange(abs, reads[i].StartLine, reads[i].EndLine, caps.maxLinesPerRead, min(caps.maxBytesPerRead, budget))
-		if err != nil {
+		content, truncated, charged := fetch(reads[i].Path, reads[i].StartLine, reads[i].EndLine)
+		if content == "" && !truncated {
 			continue
 		}
 		reads[i].Content = content
 		reads[i].Truncated = truncated
-		budget -= len(content)
+		if charged {
+			budget -= len(content)
+		}
+	}
+	for i := range sem {
+		if budget <= 0 {
+			return
+		}
+		content, truncated, charged := fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)
+		if content == "" && !truncated {
+			continue
+		}
+		sem[i].Content = content
+		sem[i].Truncated = truncated
+		if charged {
+			budget -= len(content)
+		}
 	}
 }
 
