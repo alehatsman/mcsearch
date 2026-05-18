@@ -322,6 +322,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				rows[i] = store.PendingChunk{
 					Path:       p.rel,
 					Kind:       p.chunk.Kind,
+					Name:       p.chunk.Name,
 					StartLine:  p.chunk.StartLine,
 					EndLine:    p.chunk.EndLine,
 					ContentSHA: p.sha,

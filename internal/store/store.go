@@ -55,6 +55,10 @@ type Options struct {
 	// natural pool size, max(5×k, 30)). Typical values 40–100: larger
 	// = better recall but slower rerank call.
 	RerankPool int
+
+	// MaxHitsPerFile, when > 0, caps results returned per unique file path.
+	// Applied after ranking, before final truncation to k. Zero = no cap.
+	MaxHitsPerFile int
 }
 
 type Store struct {
@@ -139,6 +143,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		   id            INTEGER PRIMARY KEY,
 		   path          TEXT NOT NULL,
 		   kind          TEXT NOT NULL,
+		   name          TEXT NOT NULL DEFAULT '',
 		   start_line    INTEGER NOT NULL,
 		   end_line      INTEGER NOT NULL,
 		   content_sha1  TEXT NOT NULL,
@@ -193,6 +198,23 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO meta(key, value) VALUES('fts_built', '1')
 			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
 			return fmt.Errorf("migrate: fts flag: %w", err)
+		}
+	}
+	// Add name column to existing databases that pre-date this migration.
+	// On fresh databases the column already exists from CREATE TABLE, so
+	// we silently ignore "duplicate column name" errors from ALTER TABLE.
+	var nameColAdded string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='name_col_added'`).Scan(&nameColAdded)
+	if nameColAdded != "1" {
+		if _, err := s.db.ExecContext(ctx,
+			`ALTER TABLE chunks ADD COLUMN name TEXT NOT NULL DEFAULT ''`); err != nil &&
+			!strings.Contains(err.Error(), "duplicate column name") {
+			return fmt.Errorf("migrate: add name column: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES('name_col_added', '1')
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+			return fmt.Errorf("migrate: name_col flag: %w", err)
 		}
 	}
 	return nil
@@ -283,6 +305,7 @@ func (s *Store) ExistingSHAs(ctx context.Context, path string) (map[string]bool,
 type PendingChunk struct {
 	Path       string
 	Kind       string
+	Name       string
 	StartLine  int
 	EndLine    int
 	ContentSHA string
@@ -312,10 +335,11 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 		return err
 	}
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks(path, kind, start_line, end_line, content_sha1, content, vec, last_seen_at)
-		 VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks(path, kind, name, start_line, end_line, content_sha1, content, vec, last_seen_at)
+		 VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(path, content_sha1) DO UPDATE SET
 		   kind=excluded.kind,
+		   name=excluded.name,
 		   start_line=excluded.start_line,
 		   end_line=excluded.end_line,
 		   content=excluded.content,
@@ -332,7 +356,7 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 			return fmt.Errorf("vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)", s.dim, len(r.Vec))
 		}
 		if _, err := stmt.ExecContext(ctx,
-			r.Path, r.Kind, r.StartLine, r.EndLine, r.ContentSHA, r.Content,
+			r.Path, r.Kind, r.Name, r.StartLine, r.EndLine, r.ContentSHA, r.Content,
 			encodeVec(r.Vec), now.UnixNano()); err != nil {
 			_ = tx.Rollback()
 			return err
@@ -422,6 +446,7 @@ func escapeLike(s string) string {
 type Hit struct {
 	Path      string
 	Kind      string
+	Name      string
 	StartLine int
 	EndLine   int
 	Content   string
@@ -504,25 +529,39 @@ type scored struct {
 // Cormack et al. (2009); behavior is robust to values in [10, 100].
 const rrfK = 60
 
-// Search returns the top-k chunks ranked by hybrid scoring.
-//
-// When `queryText` is non-empty AND BM25 isn't disabled, results from
-// the cosine path and the FTS5/BM25 path are fused via Reciprocal
-// Rank Fusion: rrf_score(id) = Σ 1/(60+rank_in_list). RRF is
-// scale-free, so the two heterogenous scoring schemes compose without
-// per-corpus tuning. When `queryText` is empty (or BM25 disabled),
-// search degrades to semantic-only — the legacy behaviour, kept so
-// internal tests that drive Search with a pure vector still work.
-//
-// Hot path notes:
-//   - Semantic scoring uses the in-RAM vector cache when enabled (see
-//     Options.DisableVecCache); same code path either way.
-//   - BM25 runs once via FTS5's `MATCH` + `bm25()`. We OR-join the
-//     tokens (default FTS5 AND is too strict for natural-language
-//     queries) and cap at 5×k for fusion headroom.
-//   - One `SELECT ... WHERE id IN (...)` fetches content for the
-//     final top-k. Content is never read for non-finalist chunks.
+// Search returns the top-k chunks ranked by hybrid scoring with optional
+// per-file diversity via Options.MaxHitsPerFile.
 func (s *Store) Search(ctx context.Context, queryVec []float32, queryText string, k int) ([]Hit, error) {
+	hits, err := s.searchRaw(ctx, queryVec, queryText, k)
+	if err != nil || len(hits) == 0 || s.opts.MaxHitsPerFile <= 0 {
+		return hits, err
+	}
+	return diversify(hits, s.opts.MaxHitsPerFile), nil
+}
+
+// diversify caps the number of hits per unique file path, preserving
+// the existing score-based ordering. Hits beyond the cap are dropped.
+func diversify(hits []Hit, maxPerFile int) []Hit {
+	counts := make(map[string]int, len(hits)/2)
+	out := make([]Hit, 0, len(hits))
+	for _, h := range hits {
+		if counts[h.Path] >= maxPerFile {
+			continue
+		}
+		counts[h.Path]++
+		out = append(out, h)
+	}
+	return out
+}
+
+// searchRaw is the internal search implementation. See Search for the
+// public API. When `queryText` is non-empty AND BM25 isn't disabled,
+// results from the cosine path and the FTS5/BM25 path are fused via
+// Reciprocal Rank Fusion: rrf_score(id) = Σ 1/(60+rank_in_list). RRF
+// is scale-free, so the two heterogenous scoring schemes compose without
+// per-corpus tuning. When `queryText` is empty (or BM25 disabled),
+// search degrades to semantic-only.
+func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText string, k int) ([]Hit, error) {
 	if k <= 0 {
 		k = 8
 	}
@@ -860,7 +899,7 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 	placeholders := strings.Repeat("?,", len(idArgs))
 	placeholders = placeholders[:len(placeholders)-1]
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path, kind, start_line, end_line, content FROM chunks WHERE id IN (`+placeholders+`)`,
+		`SELECT id, path, kind, name, start_line, end_line, content FROM chunks WHERE id IN (`+placeholders+`)`,
 		idArgs...)
 	if err != nil {
 		return nil, err
@@ -870,7 +909,7 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 	for rows.Next() {
 		var id int64
 		var h Hit
-		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.StartLine, &h.EndLine, &h.Content); err != nil {
+		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.Name, &h.StartLine, &h.EndLine, &h.Content); err != nil {
 			return nil, err
 		}
 		byID[id] = h
@@ -910,6 +949,94 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 		out = append(out, h)
 	}
 	return dedupChunkSummaries(out), nil
+}
+
+// FindSymbol returns chunks whose `name` column exactly matches the
+// given identifier. Results are ordered by (path, start_line). Uses a
+// SQL index scan — no embedding required — so it is fast regardless of
+// index size.
+func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, error) {
+	if k <= 0 {
+		k = 10
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, path, kind, name, start_line, end_line, content
+		 FROM chunks WHERE name = ?
+		 ORDER BY path, start_line LIMIT ?`,
+		name, k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Hit
+	for rows.Next() {
+		var id int64
+		var h Hit
+		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.Name, &h.StartLine, &h.EndLine, &h.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// RelatedChunks returns the top-k chunks most similar to the chunk at
+// (path, startLine), excluding the source chunk itself. Uses the in-RAM
+// vector cache for speed. Returns an error if no chunk is found at the
+// given location.
+func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k int) ([]Hit, error) {
+	if k <= 0 {
+		k = 8
+	}
+	var blob []byte
+	var sourceID int64
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, vec FROM chunks WHERE path = ? AND start_line = ?`,
+		path, startLine)
+	if err := row.Scan(&sourceID, &blob); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("no chunk at %s:%d", path, startLine)
+		}
+		return nil, err
+	}
+	if len(blob)%4 != 0 {
+		return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
+	}
+	dim := len(blob) / 4
+	queryVec := make([]float32, dim)
+	for i := range dim {
+		queryVec[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+	}
+	if err := s.ensureCache(ctx); err != nil {
+		return nil, err
+	}
+	s.cacheMu.RLock()
+	ids := s.cacheIDs
+	vecs := s.cacheVecs
+	norms := s.cacheNorms
+	cDim := s.dim
+	s.cacheMu.RUnlock()
+	qNorm := norm(queryVec)
+	if qNorm == 0 {
+		return nil, fmt.Errorf("source chunk has zero-norm vector")
+	}
+	scores := make([]scored, 0, len(ids))
+	for i, id := range ids {
+		if id == sourceID {
+			continue
+		}
+		off := i * cDim
+		var dot float32
+		for j, qv := range queryVec {
+			dot += qv * vecs[off+j]
+		}
+		scores = append(scores, scored{id, dot / (qNorm * norms[i])})
+	}
+	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
+	if len(scores) > k {
+		scores = scores[:k]
+	}
+	return s.fetchHits(ctx, scores, nil, nil, nil, nil)
 }
 
 // ensureCache lazily loads (id, vec) for every chunk into a flat

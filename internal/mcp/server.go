@@ -50,9 +50,10 @@ type Server struct {
 // ─── tool: semantic_search ────────────────────────────────────────────────
 
 type SearchInput struct {
-	Query       string `json:"query" jsonschema:"natural-language or code query"`
-	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
-	K           int    `json:"k,omitempty" jsonschema:"number of results to return (default 8, max 30)"`
+	Query       string   `json:"query" jsonschema:"natural-language or code query"`
+	ProjectRoot string   `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	K           int      `json:"k,omitempty" jsonschema:"number of results to return (default 8, max 30)"`
+	Exclude     []string `json:"exclude,omitempty" jsonschema:"path prefixes to skip (e.g. ['vendor/', 'internal/legacy/'])"`
 }
 
 type SearchHit struct {
@@ -159,6 +160,9 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 	}
 	out.Status = "ok"
 	for _, h := range hits {
+		if excluded(h.Path, in.Exclude) {
+			continue
+		}
 		out.Hits = append(out.Hits, SearchHit{
 			Path:        h.Path,
 			Kind:        h.Kind,
@@ -169,6 +173,157 @@ func (s *Server) search(ctx context.Context, req *sdk.CallToolRequest, in Search
 			RRFScore:    h.RRFScore,
 			RerankScore: h.RerankScore,
 			Content:     h.Content,
+		})
+	}
+	return nil, out, nil
+}
+
+// excluded returns true when path matches any entry in the exclude list.
+// An exclude entry matches if path equals it or path has it as a prefix
+// (treating it as a directory prefix).
+func excluded(path string, exclude []string) bool {
+	for _, ex := range exclude {
+		if ex == "" {
+			continue
+		}
+		if path == ex || strings.HasPrefix(path, ex) {
+			return true
+		}
+	}
+	return false
+}
+
+// ─── tool: find_symbol ────────────────────────────────────────────────────
+
+type FindSymbolInput struct {
+	Name        string `json:"name" jsonschema:"exact identifier name to look up (case-sensitive, e.g. 'MyFunc', 'HTTPHandler')"`
+	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	K           int    `json:"k,omitempty" jsonschema:"max results to return (default 10)"`
+}
+
+type FindSymbolOutput struct {
+	Status  string      `json:"status"` // "ok" | "no-index" | "not-found" | "error"
+	Hint    string      `json:"hint,omitempty"`
+	Project string      `json:"project,omitempty"`
+	Hits    []SearchHit `json:"hits,omitempty"`
+}
+
+func (s *Server) findSymbol(ctx context.Context, req *sdk.CallToolRequest, in FindSymbolInput) (*sdk.CallToolResult, FindSymbolOutput, error) {
+	if strings.TrimSpace(in.Name) == "" {
+		return nil, FindSymbolOutput{Status: "error", Hint: "name is empty"}, nil
+	}
+	root := in.ProjectRoot
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, FindSymbolOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
+		}
+		root = wd
+	}
+	p, err := proj.Resolve(root, s.IndexDir)
+	if err != nil {
+		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	}
+	if _, err := os.Stat(p.DBPath); os.IsNotExist(err) {
+		return nil, FindSymbolOutput{Status: "no-index", Project: p.Root,
+			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+	}
+	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
+	if err != nil {
+		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("open index: %v", err)}, nil
+	}
+	defer st.Close()
+	hits, err := st.FindSymbol(ctx, in.Name, in.K)
+	if err != nil {
+		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("find_symbol: %v", err)}, nil
+	}
+	out := FindSymbolOutput{Status: "ok", Project: p.Root}
+	if len(hits) == 0 {
+		out.Status = "not-found"
+		out.Hint = fmt.Sprintf("no chunk with name=%q in the index; check spelling or re-index if recently added.", in.Name)
+		return nil, out, nil
+	}
+	for _, h := range hits {
+		out.Hits = append(out.Hits, SearchHit{
+			Path:      h.Path,
+			Kind:      h.Kind,
+			StartLine: h.StartLine,
+			EndLine:   h.EndLine,
+			Score:     1.0,
+			Content:   h.Content,
+		})
+	}
+	return nil, out, nil
+}
+
+// ─── tool: related_chunks ─────────────────────────────────────────────────
+
+type RelatedInput struct {
+	Path        string `json:"path" jsonschema:"relative file path of the source chunk (e.g. 'internal/store/store.go')"`
+	StartLine   int    `json:"start_line" jsonschema:"start line of the source chunk (1-indexed)"`
+	ProjectRoot string `json:"project_root,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
+	K           int    `json:"k,omitempty" jsonschema:"number of related chunks to return (default 8, max 30)"`
+}
+
+type RelatedOutput struct {
+	Status  string      `json:"status"` // "ok" | "no-index" | "not-found" | "embedding-service-unreachable" | "error"
+	Hint    string      `json:"hint,omitempty"`
+	Project string      `json:"project,omitempty"`
+	Hits    []SearchHit `json:"hits,omitempty"`
+}
+
+func (s *Server) related(ctx context.Context, req *sdk.CallToolRequest, in RelatedInput) (*sdk.CallToolResult, RelatedOutput, error) {
+	if strings.TrimSpace(in.Path) == "" {
+		return nil, RelatedOutput{Status: "error", Hint: "path is empty"}, nil
+	}
+	if in.StartLine <= 0 {
+		return nil, RelatedOutput{Status: "error", Hint: "start_line must be ≥ 1"}, nil
+	}
+	root := in.ProjectRoot
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, RelatedOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
+		}
+		root = wd
+	}
+	p, err := proj.Resolve(root, s.IndexDir)
+	if err != nil {
+		return nil, RelatedOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	}
+	if _, err := os.Stat(p.DBPath); os.IsNotExist(err) {
+		return nil, RelatedOutput{Status: "no-index", Project: p.Root,
+			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+	}
+	k := in.K
+	if k <= 0 {
+		k = 8
+	}
+	if k > 30 {
+		k = 30
+	}
+	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
+	if err != nil {
+		return nil, RelatedOutput{Status: "error", Hint: fmt.Sprintf("open index: %v", err)}, nil
+	}
+	defer st.Close()
+	hits, err := st.RelatedChunks(ctx, in.Path, in.StartLine, k)
+	if err != nil {
+		if strings.Contains(err.Error(), "no chunk at") {
+			return nil, RelatedOutput{Status: "not-found", Project: p.Root,
+				Hint: err.Error() + " — check that path and start_line match an indexed chunk exactly."}, nil
+		}
+		return nil, RelatedOutput{Status: "error", Hint: fmt.Sprintf("related: %v", err)}, nil
+	}
+	out := RelatedOutput{Status: "ok", Project: p.Root}
+	for _, h := range hits {
+		out.Hits = append(out.Hits, SearchHit{
+			Path:      h.Path,
+			Kind:      h.Kind,
+			StartLine: h.StartLine,
+			EndLine:   h.EndLine,
+			Score:     h.Score,
+			Content:   h.Content,
 		})
 	}
 	return nil, out, nil
@@ -954,9 +1109,25 @@ func (s *Server) RunStdio(ctx context.Context) error {
 		Name: "semantic_search",
 		Description: "Search a project's code semantically by embedding the query and returning the top-k matching chunks. " +
 			"Use this instead of fanning out grep when the user's intent is described in natural language. " +
+			"Supports exclude list to skip paths. " +
 			"On error, the tool returns a structured status: 'no-index' (run mcsearch index first), " +
 			"'embedding-service-unreachable' (fall back to grep), or 'ok'.",
 	}, s.search)
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "find_symbol",
+		Description: "Look up chunks by exact identifier name (function, method, type, class). " +
+			"Fast SQL lookup — no embedding required. " +
+			"Use when you already know the exact name of a symbol and want to find its definition(s). " +
+			"Returns 'not-found' when no chunk with that name exists in the index.",
+	}, s.findSymbol)
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "related_chunks",
+		Description: "Return chunks most similar to a specific chunk at (path, start_line). " +
+			"Uses vector cosine similarity — finds code that is semantically related even without keyword overlap. " +
+			"Use after semantic_search or find_symbol to explore the neighbourhood of a known chunk.",
+	}, s.related)
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name:        "mcsearch_status",

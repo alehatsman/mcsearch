@@ -7,11 +7,13 @@ SSH-tunneled to a remote host), and exposes a small toolkit so the agent
 can retrieve, reason about, and generate code grounded in real symbols
 and paths from your project:
 
-- `semantic_search` — hybrid retrieval (cosine + BM25 + optional cross-encoder rerank) over the project index. Replaces fanning-out `grep` for natural-language queries.
-- `summarize_path` — one-shot file-or-range gist; no retrieval, just sends the slice to the chat model with a structured framing prompt.
+- `semantic_search` — hybrid retrieval (cosine + BM25 + optional cross-encoder rerank). Supports `exclude` path-prefix filter and `k` up to 30.
+- `find_symbol` — exact identifier lookup by name (SQL, no embedding). Fast zero-latency lookups for known symbol names.
+- `related_chunks` — vector neighbours of a known chunk at `path:start_line`. Finds semantically related code without a query string.
+- `summarize_path` — one-shot file-or-range gist; no retrieval, just sends the slice to the chat model.
 - `mcsearch_status` — endpoint health (embed / chat / rerank) and the list of indexed projects.
 
-`semantic_search` and `mcsearch_status` are always available. `summarize_path`
+`semantic_search`, `find_symbol`, `related_chunks`, and `mcsearch_status` are always available. `summarize_path`
 registers only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
 server. See the [MCP tools](#mcp-tools) section at the end for the full
 input/output contract.
@@ -178,6 +180,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_EMBED_BATCH`    | `32`                               | Max chunks per `/v1/embeddings` call.         |
 | `MCSEARCH_DISABLE_VEC_CACHE` | unset                           | Set to `1` to skip the in-RAM vector cache and use the per-row SQL hot path (slower; bounded RAM for very large indexes). |
 | `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
+| `MCSEARCH_MAX_HITS_PER_FILE` | unset (no cap)                  | Set to a positive integer to cap how many search hits come from a single file (promotes result diversity). |
 | `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
@@ -397,12 +400,13 @@ time with a warning.
 ## MCP tools
 
 When running as `mcsearch mcp`, the server registers the following tools
-for the calling agent. `semantic_search` and `mcsearch_status` are always
-available; `summarize_path` registers only when `MCSEARCH_CHAT_URL` is set.
+for the calling agent. All tools except `summarize_path` are always available.
 
 | Tool | Always on? | What it does | Key inputs |
 | --- | --- | --- | --- |
-| `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval over the project's index. Returns the top-k chunks with `path`, `kind`, `start_line`, `end_line`, `score`, `bm25_score`, `rrf_score`, `rerank_score`, `content`. Prefer this over fanning out `grep` when the query is described in natural language. | `query`, `project_root?`, `k?` (default 8, max 30) |
+| `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval. Returns top-k chunks with scores. Use for natural-language queries. Supports `exclude` path-prefix list for noisy directories. | `query`, `project_root?`, `k?` (default 8, max 30), `exclude?` |
+| `find_symbol` | yes | Exact identifier lookup by name — SQL index scan, no embedding. Fast and reliable for known symbol names (`MyFunc`, `HTTPHandler`). | `name`, `project_root?`, `k?` (default 10) |
+| `related_chunks` | yes | Vector neighbours of a known chunk at `path:start_line`. Finds semantically related code without a query string — use after `find_symbol` or `semantic_search` to explore the neighbourhood. | `path`, `start_line`, `project_root?`, `k?` (default 8, max 30) |
 | `mcsearch_status` | yes | Reports embed / chat / rerank endpoint health and the list of indexed projects with chunk counts, dim, and `last_indexed`. Use it before chasing a "missing result" through the code — the index may be absent, stale, or the embedding endpoint may be down. | — |
 | `summarize_path` | needs chat | One-shot file-or-range gist. No retrieval — reads the path directly and sends the slice to the chat model. Path must resolve inside `project_root`; slices larger than 64 KB are truncated (`truncated: true` in the response). Use `focus` to steer (`"public API surface"`, `"side effects"`, etc.). | `path`, `project_root?`, `start_line?`, `end_line?`, `focus?`, `temperature?`, `max_tokens?` |
 

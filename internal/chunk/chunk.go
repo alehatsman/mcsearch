@@ -45,6 +45,7 @@ type Chunk struct {
 	Path      string // relative to project root
 	Kind      string // tree-sitter node kind or "window"
 	Name      string // primary identifier (function/method/type name); empty for windows/orphans
+	Parent    string // enclosing class/struct/impl name; empty for top-level chunks
 	StartLine int    // 1-based, inclusive
 	EndLine   int    // 1-based, inclusive
 	Content   string
@@ -106,6 +107,39 @@ var languages = map[string]langConfig{
 	".zsh": {bash.GetLanguage(), set(
 		"function_definition",
 	)},
+}
+
+// containerMethods maps top-level container node kinds to the method-level
+// node kinds found inside them. We walk one level of body/block wrappers
+// to reach the actual method nodes (e.g. Python's `block`, Java's
+// `class_body`, JS's `class_body`).
+var containerMethods = map[string]map[string]bool{
+	"class_declaration": {
+		"method_definition":  true, // JS/TS
+		"method_declaration": true, // Java
+	},
+	"class_definition": {
+		"function_definition": true, // Python
+	},
+	"class_specifier": {
+		"function_definition": true, // C++
+	},
+	"impl_item": {
+		"function_item": true, // Rust
+	},
+	"trait_item": {
+		"function_item": true, // Rust
+	},
+	"interface_declaration": {
+		"method_declaration": true, // Java / TS
+	},
+	"enum_declaration": {
+		"method_declaration": true, // Java
+	},
+	"module": {
+		"method":           true, // Ruby
+		"singleton_method": true, // Ruby
+	},
 }
 
 func set(items ...string) map[string]bool {
@@ -201,20 +235,77 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 				startByte: startByte,
 				endByte:   endByte,
 			})
-			continue
+		} else {
+			// Oversized declaration → fall back to line windows over its body.
+			bodyLines := strings.Split(body, "\n")
+			for _, w := range windowOver(bodyLines, startLine) {
+				w.Path = relPath
+				w.Kind = kind + ":window"
+				w.Name = name
+				w.startByte = startByte
+				w.endByte = endByte
+				out = append(out, w)
+			}
 		}
-		// Oversized declaration → fall back to line windows over its body.
-		bodyLines := strings.Split(body, "\n")
-		for _, w := range windowOver(bodyLines, startLine) {
-			w.Path = relPath
-			w.Kind = kind + ":window"
-			w.Name = name
-			w.startByte = startByte
-			w.endByte = endByte
-			out = append(out, w)
+		// For container kinds (class, impl, trait, module), also extract
+		// nested method chunks so each method gets its own index entry with
+		// the parent name stamped in EmbedText for richer retrieval.
+		if methodKinds, ok := containerMethods[kind]; ok {
+			out = append(out, nestedChunks(relPath, src, n, methodKinds, name)...)
 		}
 	}
 	return out, nil
+}
+
+// nestedChunks walks one node looking for method-level children and
+// returns a Chunk per match. It descends one level of wrapper nodes
+// (body, class_body, block) to reach the actual method nodes.
+func nestedChunks(relPath string, src []byte, container *sitter.Node, methodKinds map[string]bool, parentName string) []Chunk {
+	var out []Chunk
+	collectMethods(relPath, src, container, methodKinds, parentName, 2, &out)
+	return out
+}
+
+func collectMethods(relPath string, src []byte, n *sitter.Node, methodKinds map[string]bool, parentName string, depth int, out *[]Chunk) {
+	if depth <= 0 {
+		return
+	}
+	for i := range int(n.NamedChildCount()) {
+		child := n.NamedChild(i)
+		if child == nil {
+			continue
+		}
+		if methodKinds[child.Type()] {
+			if c, ok := buildNestedChunk(relPath, src, child, parentName); ok {
+				*out = append(*out, c)
+			}
+		} else {
+			collectMethods(relPath, src, child, methodKinds, parentName, depth-1, out)
+		}
+	}
+}
+
+func buildNestedChunk(relPath string, src []byte, n *sitter.Node, parentName string) (Chunk, bool) {
+	startByte := int(n.StartByte())
+	endByte := int(n.EndByte())
+	startByte = backfillComments(src, startByte)
+	body := string(src[startByte:endByte])
+	if strings.TrimSpace(body) == "" {
+		return Chunk{}, false
+	}
+	startLine := lineOf(src, startByte)
+	endLine := max(lineOf(src, endByte-1), startLine)
+	name := nodeIdentifier(n, src)
+	if len(body) > MaxBytes {
+		body = body[:MaxBytes]
+	}
+	return Chunk{
+		Path: relPath, Kind: n.Type(), Name: name, Parent: parentName,
+		StartLine: startLine, EndLine: endLine,
+		Content:   body,
+		startByte: startByte,
+		endByte:   endByte,
+	}, true
 }
 
 // nodeIdentifier extracts the primary identifier of a tree-sitter node by
@@ -450,8 +541,8 @@ func byteWindows(line string, lineNumber int) []Chunk {
 }
 
 // EmbedText is what's actually sent to the embedding endpoint. Stamping
-// path + kind into the embedded text consistently improves code-search
-// retrieval.
+// path + kind + name + parent into the embedded text improves retrieval
+// for both top-level and nested declarations.
 func (c Chunk) EmbedText() string {
 	var b strings.Builder
 	b.WriteString("// path: ")
@@ -460,6 +551,11 @@ func (c Chunk) EmbedText() string {
 	if c.Kind != "" && c.Kind != "window" {
 		b.WriteString("// kind: ")
 		b.WriteString(c.Kind)
+		b.WriteByte('\n')
+	}
+	if c.Parent != "" {
+		b.WriteString("// parent: ")
+		b.WriteString(c.Parent)
 		b.WriteByte('\n')
 	}
 	if c.Name != "" {

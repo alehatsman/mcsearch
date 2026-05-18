@@ -142,6 +142,7 @@ env:
   MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
   MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
   MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg
+  MCSEARCH_MAX_HITS_PER_FILE  max hits per file in search results (0 = no cap)
 
 flags:
   mcsearch query --rerank=off <path> "..."     skip rerank for this call
@@ -176,6 +177,7 @@ func storeOpts() store.Options {
 		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
 		DisableBM25:     os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
 		RerankPool:      rerankPool(),
+		MaxHitsPerFile:  maxHitsPerFile(),
 	}
 	// Assign through a typed-nil check: a (*rerank.Client)(nil) stored
 	// in the Reranker interface field would still compare != nil, and
@@ -184,6 +186,23 @@ func storeOpts() store.Options {
 		opts.Reranker = rc
 	}
 	return opts
+}
+
+// maxHitsPerFile reads MCSEARCH_MAX_HITS_PER_FILE from the environment.
+// Zero means no per-file cap (default). Positive values enforce result
+// diversity — useful when a single heavily-matched file would otherwise
+// dominate the top-k results.
+func maxHitsPerFile() int {
+	raw := os.Getenv("MCSEARCH_MAX_HITS_PER_FILE")
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_MAX_HITS_PER_FILE=%q is not a non-negative integer; ignoring\n", raw)
+		return 0
+	}
+	return n
 }
 
 func openStore(ctx context.Context, dbPath string) (*store.Store, error) {
