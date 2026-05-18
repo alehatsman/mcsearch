@@ -272,6 +272,63 @@ func (s *Server) ask(ctx context.Context, req *sdk.CallToolRequest, in AskInput)
 	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem, s.AskChatModel, false)
 }
 
+// retrieveContext runs the shared RAG retrieval step: checks index
+// existence, embeds the prompt, and returns the top-k context chunks.
+//
+// Returns ok=false and a ready-to-return GenerateOutput when retrieval
+// cannot proceed (no index, embed unreachable, etc.). When use_index=false
+// it returns an empty slice with ok=true immediately.
+func (s *Server) retrieveContext(ctx context.Context, in GenerateInput, p *proj.Project) (chunks []store.Hit, errOut GenerateOutput, ok bool) {
+	useIndex := true
+	if in.UseIndex != nil {
+		useIndex = *in.UseIndex
+	}
+	if !useIndex {
+		return nil, GenerateOutput{}, true
+	}
+
+	if _, err := os.Stat(p.DBPath); err != nil {
+		if os.IsNotExist(err) {
+			return nil, GenerateOutput{
+				Status: "no-index",
+				Hint:   fmt.Sprintf("no index for %s — run `mcsearch index %s` first, or retry with use_index=false to generate without project context.", p.Root, p.Root),
+			}, false
+		}
+		return nil, GenerateOutput{Status: "error", Hint: err.Error()}, false
+	}
+
+	k := in.K
+	if k <= 0 {
+		k = 8
+	}
+	if k > 30 {
+		k = 30
+	}
+
+	vecs, err := s.EmbedClient.Embed(ctx, []string{in.Prompt})
+	if err != nil {
+		if errors.Is(err, embed.ErrUnreachable) {
+			return nil, GenerateOutput{
+				Status:   "embedding-service-unreachable",
+				Endpoint: s.EmbedClient.BaseURL,
+				Hint:     "the local embedding service is offline — retry later, or pass use_index=false to skip RAG.",
+			}, false
+		}
+		return nil, GenerateOutput{Status: "error", Hint: fmt.Sprintf("embed: %v", err)}, false
+	}
+
+	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
+	if err != nil {
+		return nil, GenerateOutput{Status: "error", Hint: fmt.Sprintf("open index: %v", err)}, false
+	}
+	hits, err := st.Search(ctx, vecs[0], in.Prompt, k)
+	st.Close()
+	if err != nil {
+		return nil, GenerateOutput{Status: "error", Hint: fmt.Sprintf("search: %v", err)}, false
+	}
+	return hits, GenerateOutput{}, true
+}
+
 // runRAGChat is the shared semantic-search → chat pipeline behind
 // both generate_code and ask_codebase. Caller picks the default system
 // prompt; everything else (retrieval, context formatting, error
@@ -300,59 +357,9 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	out.Endpoint = s.ChatClient.BaseURL
 	out.Model = s.ChatClient.Model
 
-	// RAG is on by default; caller can opt out with use_index=false.
-	useIndex := true
-	if in.UseIndex != nil {
-		useIndex = *in.UseIndex
-	}
-
-	var contextChunks []store.Hit
-	if useIndex {
-		if _, err := os.Stat(p.DBPath); err != nil {
-			if os.IsNotExist(err) {
-				out.Status = "no-index"
-				out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first, or retry with use_index=false to generate without project context.", p.Root, p.Root)
-				return nil, out, nil
-			}
-			out.Status = "error"
-			out.Hint = err.Error()
-			return nil, out, nil
-		}
-
-		k := in.K
-		if k <= 0 {
-			k = 8
-		}
-		if k > 30 {
-			k = 30
-		}
-
-		vecs, err := s.EmbedClient.Embed(ctx, []string{in.Prompt})
-		if err != nil {
-			if errors.Is(err, embed.ErrUnreachable) {
-				out.Status = "embedding-service-unreachable"
-				out.Endpoint = s.EmbedClient.BaseURL
-				out.Hint = "the local embedding service is offline — retry later, or pass use_index=false to skip RAG."
-				return nil, out, nil
-			}
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("embed: %v", err)
-			return nil, out, nil
-		}
-
-		st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
-		if err != nil {
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("open index: %v", err)
-			return nil, out, nil
-		}
-		contextChunks, err = st.Search(ctx, vecs[0], in.Prompt, k)
-		st.Close()
-		if err != nil {
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("search: %v", err)
-			return nil, out, nil
-		}
+	contextChunks, errOut, ok := s.retrieveContext(ctx, in, p)
+	if !ok {
+		return nil, errOut, nil
 	}
 
 	system := in.System
@@ -363,7 +370,7 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	messages := []chat.Message{{Role: "system", Content: system}}
 	userContent := in.Prompt
 	if len(contextChunks) > 0 {
-		ctxText := formatContext(contextChunks)
+		ctxText := store.FormatHits(contextChunks)
 		if allowCompress && s.CompressClient != nil {
 			if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
 				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
@@ -407,31 +414,13 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	return nil, out, nil
 }
 
-// formatContext renders retrieved chunks as a fenced CONTEXT block. Each
-// chunk gets a path:line header so the model can cite locations back to
-// the caller without us inventing a schema the model has to follow.
-func formatContext(hits []store.Hit) string {
-	var b strings.Builder
-	b.WriteString("CONTEXT — relevant chunks from the project's mcsearch index:\n\n")
-	for i, h := range hits {
-		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s, score=%.4f) ---\n",
-			i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
-		b.WriteString(h.Content)
-		if !strings.HasSuffix(h.Content, "\n") {
-			b.WriteByte('\n')
-		}
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
-
 // compressHits calls CompressClient to distil the retrieved chunks into a
 // dense, query-focused prose summary. The caller replaces the raw
-// formatContext block in the user message with this output, reducing the
-// token cost of each ask_codebase / generate_code call at the price of
-// one extra round-trip to a fast local model.
+// store.FormatHits block in the user message with this output, reducing the
+// token cost of a generate_code call at the price of one extra round-trip
+// to a fast local model.
 //
-// On any error the caller falls back to the raw formatContext output so
+// On any error the caller falls back to the raw store.FormatHits output so
 // an offline or slow CompressClient never breaks generation.
 func compressHits(ctx context.Context, cc *chat.Client, query string, hits []store.Hit) (string, error) {
 	const system = "You are a code context distiller. Given retrieved code chunks and a query, write a concise, dense summary (≤350 words) of what the chunks collectively reveal that is relevant to the query.\n\n" +
@@ -510,72 +499,24 @@ func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (
 	out.Endpoint = s.ChatClient.BaseURL
 	out.Model = s.ChatClient.Model
 
-	useIndex := true
-	if in.UseIndex != nil {
-		useIndex = *in.UseIndex
+	contextChunks, errOut, ok := s.retrieveContext(ctx, in, p)
+	if !ok {
+		return nil, errOut, nil
 	}
 
-	var contextChunks []store.Hit
-	if useIndex {
-		if _, err := os.Stat(p.DBPath); err != nil {
-			if os.IsNotExist(err) {
-				out.Status = "no-index"
-				out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first, or retry with use_index=false to generate without project context.", p.Root, p.Root)
-				return nil, out, nil
-			}
-			out.Status = "error"
-			out.Hint = err.Error()
-			return nil, out, nil
-		}
-		k := in.K
-		if k <= 0 {
-			k = 8
-		}
-		if k > 30 {
-			k = 30
-		}
-		vecs, err := s.EmbedClient.Embed(ctx, []string{in.Prompt})
-		if err != nil {
-			if errors.Is(err, embed.ErrUnreachable) {
-				out.Status = "embedding-service-unreachable"
-				out.Endpoint = s.EmbedClient.BaseURL
-				out.Hint = "the local embedding service is offline — retry later, or pass use_index=false to skip RAG."
-				return nil, out, nil
-			}
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("embed: %v", err)
-			return nil, out, nil
-		}
-		st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
-		if err != nil {
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("open index: %v", err)
-			return nil, out, nil
-		}
-		contextChunks, err = st.Search(ctx, vecs[0], in.Prompt, k)
-		st.Close()
-		if err != nil {
-			out.Status = "error"
-			out.Hint = fmt.Sprintf("search: %v", err)
-			return nil, out, nil
-		}
-	}
-
-	// Build context text — compressed when CompressClient is wired.
-	ctxText := ""
+	// The draft model always gets the raw code chunks — it needs actual
+	// symbol names, types, and file paths to generate working code.
+	// Compression (if configured) is applied only for the refine step,
+	// where the expensive main model benefits most from token reduction.
+	rawCtxText := ""
 	if len(contextChunks) > 0 {
-		ctxText = formatContext(contextChunks)
-		if s.CompressClient != nil {
-			if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
-				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
-			}
-		}
+		rawCtxText = store.FormatHits(contextChunks)
 	}
 
 	// Phase 1: speculative draft from the local model.
 	draftUserContent := in.Prompt
-	if ctxText != "" {
-		draftUserContent = ctxText + "\n\n---\n\n" + in.Prompt
+	if rawCtxText != "" {
+		draftUserContent = rawCtxText + "\n\n---\n\n" + in.Prompt
 	}
 	draftResp, draftErr := s.DraftClient.Generate(ctx, []chat.Message{
 		{Role: "system", Content: defaultDraftSystem},
@@ -591,7 +532,15 @@ func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (
 	// draftErr != nil → out.Draft stays ""; refine step falls back to
 	// direct generation using defaultGenerateSystem instead.
 
-	// Phase 2: validation / refinement by the main model.
+	// Phase 2: validation / refinement by the main model. The refine
+	// step can use compressed context — this is where token savings matter.
+	refineCtxText := rawCtxText
+	if rawCtxText != "" && s.CompressClient != nil {
+		if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
+			refineCtxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
+		}
+	}
+
 	system := in.System
 	if strings.TrimSpace(system) == "" {
 		if out.Draft != "" {
@@ -602,8 +551,8 @@ func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (
 	}
 
 	var parts []string
-	if ctxText != "" {
-		parts = append(parts, ctxText)
+	if refineCtxText != "" {
+		parts = append(parts, refineCtxText)
 	}
 	if out.Draft != "" {
 		parts = append(parts, "[LOCAL_DRAFT]\n"+out.Draft+"\n[/LOCAL_DRAFT]")

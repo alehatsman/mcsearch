@@ -653,6 +653,65 @@ func TestDraftClientFallsBackOnFailure(t *testing.T) {
 	}
 }
 
+func TestDraftClientReceivesRawContextWhenCompressIsWired(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	compressSrv := fakeChat(t, "compressed summary of chunks")
+	defer compressSrv.Close()
+
+	draftSrv, draftMsgCh := fakeCapturingChat(t, "```go\nfunc Baz() {} // draft\n```")
+	defer draftSrv.Close()
+	chatSrv, chatMsgCh := fakeCapturingChat(t, "```go\nfunc Baz() {} // refined\n```")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "baz.go"), "package main\n\nfunc Baz() {}\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient:    embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:     chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		DraftClient:    chat.New(draftSrv.URL, "fake-draft", 10*time.Second),
+		CompressClient: chat.New(compressSrv.URL, "fake-compress", 10*time.Second),
+		IndexDir:       cacheDir,
+	}
+
+	_, out, err := s.generate(context.Background(), nil, GenerateInput{
+		Prompt: "add a BazVariant function", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q, hint: %q", out.Status, out.Hint)
+	}
+
+	// Draft model must receive raw chunk content (real symbols, not distilled prose).
+	select {
+	case draftMsg := <-draftMsgCh:
+		if strings.Contains(draftMsg, "DISTILLED CONTEXT") {
+			t.Error("draft model received compressed context — it needs raw code chunks to generate grounded code")
+		}
+		if !strings.Contains(draftMsg, "CONTEXT — relevant chunks from the project") {
+			t.Errorf("draft model did not receive raw formatHits context; got prefix: %q", draftMsg[:clamp(200, len(draftMsg))])
+		}
+	default:
+		t.Fatal("draft server received no request")
+	}
+
+	// Refine (main) model should receive compressed context.
+	select {
+	case chatMsg := <-chatMsgCh:
+		if !strings.Contains(chatMsg, "DISTILLED CONTEXT") {
+			t.Errorf("refine model did not receive compressed context; got prefix: %q", chatMsg[:clamp(200, len(chatMsg))])
+		}
+	default:
+		t.Fatal("main chat server received no request")
+	}
+}
+
 func TestStatusReportsCompressAndDraftEndpoints(t *testing.T) {
 	embedSrv := fakeEmbed(t, 16)
 	defer embedSrv.Close()

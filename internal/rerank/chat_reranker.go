@@ -255,6 +255,10 @@ func yesNoFromLogprobs(tops []logprobToken) float32 {
 // yesNoFromText parses plain "yes"/"no" from the generated text when logprobs
 // are unavailable. Returns 0.5 for any other response so the hit is ordered
 // between clear yes and clear no rather than discarded.
+//
+// Soft "no" containment is intentionally absent: "no" appears inside common
+// identifiers (filename, node, unknown, annotation) and would produce scores
+// lower than the neutral 0.5 on false matches — worse than doing nothing.
 func yesNoFromText(content string) float32 {
 	switch strings.ToLower(strings.TrimSpace(content)) {
 	case "yes":
@@ -264,9 +268,6 @@ func yesNoFromText(content string) float32 {
 	default:
 		if strings.Contains(strings.ToLower(content), "yes") {
 			return 0.8
-		}
-		if strings.Contains(strings.ToLower(content), "no") {
-			return 0.2
 		}
 		return 0.5
 	}

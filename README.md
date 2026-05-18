@@ -184,11 +184,13 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_ASK_MODEL`      | unset                              | Override `MCSEARCH_CHAT_MODEL` for the `ask_codebase` tool only — useful when an instruct-tuned model follows the citation template more reliably than a coder-tuned one. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
-| `MCSEARCH_RERANK_URL`     | unset                              | Base URL of a Cohere-shape `/rerank` server (TEI, Infinity, vLLM with reranker). Unset = rerank disabled. |
-| `MCSEARCH_RERANK_MODEL`   | `qwen3-reranker:4b`                | Model name forwarded to the reranker. |
-| `MCSEARCH_RERANK_POOL`    | `40`                               | Fused candidates fed to the reranker. Clamped to `[1, 100]`. Larger = better recall, slower call. |
-| `MCSEARCH_RERANK_TIMEOUT` | `5s`                               | HTTP timeout for each rerank request. |
-| `MCSEARCH_DISABLE_RERANK` | unset                              | Set to `1` to short-circuit rerank even when `MCSEARCH_RERANK_URL` is set. For A/B comparison. |
+| `MCSEARCH_RERANK_URL`         | unset                              | Base URL of a rerank server. Unset = rerank disabled. |
+| `MCSEARCH_RERANK_STYLE`       | `cohere`                           | Reranker backend: `cohere` (Cohere-shape `/rerank` — TEI, Infinity, vLLM cross-encoder) or `chat` (decoder-style via `/v1/chat/completions` + logprobs — for Qwen3-Reranker-4B on vLLM). |
+| `MCSEARCH_RERANK_MODEL`       | `qwen3-reranker:4b`                | Model name forwarded to the reranker. |
+| `MCSEARCH_RERANK_POOL`        | `40`                               | Fused candidates fed to the reranker. Clamped to `[1, 100]`. Larger = better recall, slower call. |
+| `MCSEARCH_RERANK_TIMEOUT`     | `5s`                               | HTTP timeout for each rerank request. |
+| `MCSEARCH_RERANK_CONCURRENCY` | `4`                                | Parallel scoring calls for the `chat` reranker style. Higher values reduce wall-clock latency on a dedicated GPU (try 8–16 on a 5090). Ignored for `cohere` style. |
+| `MCSEARCH_DISABLE_RERANK`     | unset                              | Set to `1` to short-circuit rerank even when `MCSEARCH_RERANK_URL` is set. For A/B comparison. |
 
 ## Storage
 

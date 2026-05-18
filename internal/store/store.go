@@ -448,6 +448,50 @@ type Hit struct {
 	RerankScore float32
 }
 
+// FormatHits renders a slice of hits as a fenced CONTEXT block for
+// injection into a chat completion message. Each chunk gets a header
+// with path:line coordinates so the model can cite real locations.
+func FormatHits(hits []Hit) string {
+	var b strings.Builder
+	b.WriteString("CONTEXT — relevant chunks from the project's mcsearch index:\n\n")
+	for i, h := range hits {
+		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s, score=%.4f) ---\n",
+			i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
+		b.WriteString(h.Content)
+		if !strings.HasSuffix(h.Content, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// dedupChunkSummaries drops chunk_summary hits whose source chunk already
+// appears at the same path:start_line in the result set. When --summarize
+// was used during indexing both a code chunk and its prose summary land in
+// the index; without dedup they consume two top-k slots for the same
+// function. Ordering is preserved.
+func dedupChunkSummaries(hits []Hit) []Hit {
+	type locKey struct {
+		path string
+		line int
+	}
+	codeAt := make(map[locKey]bool, len(hits))
+	for _, h := range hits {
+		if h.Kind != "chunk_summary" {
+			codeAt[locKey{h.Path, h.StartLine}] = true
+		}
+	}
+	out := make([]Hit, 0, len(hits))
+	for _, h := range hits {
+		if h.Kind == "chunk_summary" && codeAt[locKey{h.Path, h.StartLine}] {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 // scored holds one chunk's score during ranking. Used internally by
 // both the semantic and BM25 legs; the RRF fuser then walks both lists.
 type scored struct {
@@ -864,7 +908,7 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 		}
 		out = append(out, h)
 	}
-	return out, nil
+	return dedupChunkSummaries(out), nil
 }
 
 // ensureCache lazily loads (id, vec) for every chunk into a flat

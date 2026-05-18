@@ -323,7 +323,11 @@ func TestChunkSummaryIndexing(t *testing.T) {
 		t.Fatal("expected at least one chat call for LongFunc chunk summary; got 0")
 	}
 
-	// Search for the summary text — it must appear as a chunk_summary hit.
+	// Search for the summary text. The chunk_summary for long.go is in the
+	// index (the chat call above proves that), but dedupChunkSummaries removes
+	// it when the source function_declaration also appears in the top-k —
+	// that would waste two slots on the same function. Verify the source
+	// appears and the summary is not a duplicate alongside it.
 	summaryText := "LongFunc processes the input."
 	qvec, err := em.Embed(ctx, []string{summaryText})
 	if err != nil {
@@ -333,15 +337,20 @@ func TestChunkSummaryIndexing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var foundSummary bool
+	var foundDecl, foundSummaryDuplicate bool
 	for _, h := range hits {
+		if h.Kind == "function_declaration" && h.Path == "long.go" {
+			foundDecl = true
+		}
 		if h.Kind == "chunk_summary" && h.Path == "long.go" {
-			foundSummary = true
-			break
+			foundSummaryDuplicate = true
 		}
 	}
-	if !foundSummary {
-		t.Errorf("expected a chunk_summary hit for long.go; got hits: %+v", hits)
+	if !foundDecl {
+		t.Errorf("expected a function_declaration hit for long.go; got hits: %+v", hits)
+	}
+	if foundSummaryDuplicate {
+		t.Errorf("chunk_summary should be deduped when its source function_declaration is present; got hits: %+v", hits)
 	}
 
 	// Second run: cache hit — chat must not be called again.

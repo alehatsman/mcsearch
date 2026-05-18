@@ -553,7 +553,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 
 	userContent := prompt
 	if len(hits) > 0 {
-		userContent = formatHitsAsContext(hits) + "\n\n---\n\n" + prompt
+		userContent = store.FormatHits(hits) + "\n\n---\n\n" + prompt
 	}
 
 	if *showCtx && len(hits) > 0 {
@@ -582,20 +582,6 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	return nil
 }
 
-func formatHitsAsContext(hits []store.Hit) string {
-	var b strings.Builder
-	b.WriteString("CONTEXT — relevant chunks from the project's mcsearch index:\n\n")
-	for i, h := range hits {
-		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s, score=%.4f) ---\n",
-			i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
-		b.WriteString(h.Content)
-		if !strings.HasSuffix(h.Content, "\n") {
-			b.WriteByte('\n')
-		}
-		b.WriteByte('\n')
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
