@@ -74,11 +74,12 @@ type Store struct {
 	// Acceptable for our target "one project per server" deployment;
 	// callers worried about footprint can set Options.DisableVecCache
 	// to fall back to the per-row SQL hot path.
-	cacheMu     sync.RWMutex
-	cacheLoaded bool
-	cacheIDs    []int64
-	cacheVecs   []float32 // flat [len(cacheIDs) * dim]
-	cacheNorms  []float32 // precomputed |v| per row, zero-norm rows skipped at load time
+	cacheMu        sync.RWMutex
+	cacheLoaded    bool
+	cacheIndexedAt int64   // last_indexed_at (nanoseconds) when the cache was built
+	cacheIDs       []int64
+	cacheVecs      []float32 // flat [len(cacheIDs) * dim]
+	cacheNorms     []float32 // precomputed |v| per row, zero-norm rows skipped at load time
 }
 
 // Open opens or creates the SQLite file at path with default
@@ -914,18 +915,37 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 // ensureCache lazily loads (id, vec) for every chunk into a flat
 // in-RAM slab plus a parallel slice of precomputed norms. Subsequent
 // Search calls work entirely off this slab — no SQL on the hot path.
+//
+// Cross-process staleness: if another process (e.g. `mcsearch index`)
+// wrote new chunks since the cache was built, last_indexed_at in the meta
+// table will have advanced. We detect this with a cheap scalar query and
+// invalidate before rebuilding, so long-lived MCP server processes always
+// serve fresh results without a restart.
 func (s *Store) ensureCache(ctx context.Context) error {
+	// Read last_indexed_at from meta to detect out-of-process mutations.
+	var currentIndexedAt int64
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='last_indexed_at'`)
+	var raw string
+	if err := row.Scan(&raw); err == nil {
+		fmt.Sscanf(raw, "%d", &currentIndexedAt)
+	}
+
 	s.cacheMu.RLock()
-	loaded := s.cacheLoaded
+	loaded := s.cacheLoaded && s.cacheIndexedAt == currentIndexedAt
 	s.cacheMu.RUnlock()
 	if loaded {
 		return nil
 	}
 	s.cacheMu.Lock()
 	defer s.cacheMu.Unlock()
-	if s.cacheLoaded {
+	if s.cacheLoaded && s.cacheIndexedAt == currentIndexedAt {
 		return nil
 	}
+	// Invalidate stale cache before rebuild.
+	s.cacheLoaded = false
+	s.cacheIDs = nil
+	s.cacheVecs = nil
+	s.cacheNorms = nil
 	rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
 	if err != nil {
 		return err
@@ -973,6 +993,7 @@ func (s *Store) ensureCache(ctx context.Context) error {
 	s.cacheIDs = ids
 	s.cacheVecs = vecs
 	s.cacheNorms = norms
+	s.cacheIndexedAt = currentIndexedAt
 	s.cacheLoaded = true
 	return nil
 }

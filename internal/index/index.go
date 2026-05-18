@@ -148,7 +148,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		}
 		// Mtime fast-path: file hasn't changed since the last successful
 		// index → just bump last_seen_at on its existing chunks.
-		if !lastIndexed.IsZero() && !info.ModTime().After(lastIndexed) {
+		// Skipped when -summarize is set: we need to read the file to
+		// discover which chunks still lack a summary and generate them.
+		// The SHA-based summary cache prevents re-generating existing ones.
+		if !ix.Options.Summarize && !lastIndexed.IsZero() && !info.ModTime().After(lastIndexed) {
 			rows, terr := ix.Store.TouchPath(ctx, rel, startTime)
 			if terr == nil && rows > 0 {
 				seen += int(rows)

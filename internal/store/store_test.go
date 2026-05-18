@@ -197,6 +197,63 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	}
 }
 
+// TestCrossProcessCacheInvalidation simulates what happens when a long-lived
+// Store (e.g. the MCP server) has its cache built, then a separate process
+// runs `mcsearch index` and adds new chunks. The Store must detect the
+// changed last_indexed_at and rebuild its cache before the next Search so
+// the new chunks appear in results.
+func TestCrossProcessCacheInvalidation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+	now := time.Now()
+
+	// Writer: represents the `mcsearch index` process.
+	writer, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	if err := writer.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", ContentSHA: "h1", Content: "func A(){}", Vec: []float32{1, 0, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.SetLastIndexedAt(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reader: represents the long-running MCP server.
+	reader, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	// Warm the reader's cache.
+	hits, _ := reader.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
+	if len(hits) != 1 {
+		t.Fatalf("baseline: got %d hits, want 1", len(hits))
+	}
+
+	// Writer adds a new chunk and advances last_indexed_at — simulates a
+	// second `mcsearch index` run completing while the MCP server is live.
+	now2 := now.Add(time.Second)
+	if err := writer.UpsertMany(ctx, []PendingChunk{
+		{Path: "b.go", ContentSHA: "h2", Content: "func B(){}", Vec: []float32{0, 1, 0, 0}},
+	}, now2); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.SetLastIndexedAt(ctx, now2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Reader searches again — must detect staleness, rebuild cache, and
+	// return both chunks.
+	hits, _ = reader.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
+	if len(hits) != 2 {
+		t.Errorf("after cross-process upsert: got %d hits, want 2; cache not invalidated", len(hits))
+	}
+}
+
 func pathOrNone(hits []Hit) string {
 	if len(hits) == 0 {
 		return "<none>"
