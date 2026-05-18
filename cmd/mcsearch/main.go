@@ -126,7 +126,6 @@ env:
   MCSEARCH_CHAT_URL           default http://127.0.0.1:8081
   MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
   MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
-  MCSEARCH_ASK_MODEL          override the chat model for ask_codebase only (e.g. an instruct-tuned model); empty = use MCSEARCH_CHAT_MODEL
   MCSEARCH_RERANK_URL         unset by default; set to enable reranking
   MCSEARCH_RERANK_STYLE       "cohere" (default) or "chat" (decoder-style, e.g. Qwen3-Reranker-4B via vLLM)
   MCSEARCH_RERANK_MODEL       default BAAI/bge-reranker-v2-m3
