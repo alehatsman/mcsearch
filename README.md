@@ -281,6 +281,20 @@ that weren't in the project. `MCSEARCH_ASK_MODEL` optionally points
 `ask_codebase` at a separate instruct-tuned model — coder-tuned models
 resist citation-only prompts and still try to emit code.
 
+**Caveat on model behavior.** The system prompts described here
+(citations-first template, no fenced code, banned hedge phrases)
+demand strict instruction adherence. Mid-size local chat models
+(qwen2.5-coder:32b, qwen2.5:14b-instruct, others in the same class)
+follow them inconsistently — they retrieve the right chunks but then
+emit fenced code blocks, invent function names that weren't in
+CONTEXT, or skip the CITATIONS section. For ground-truth answers,
+prefer `semantic_search` (no model in the loop, returns real chunks
+with real `path:line`) or `summarize_path` (single file slice fed
+directly, no retrieval competition). Treat `ask_codebase` /
+`generate_code` output as a suggestion that needs verifying against
+the returned `context` chunks. Stronger local models or a hosted
+endpoint (Claude, GPT-4) close this gap.
+
 From the terminal, only the code-generation half is wired up:
 `mcsearch generate <path> "<prompt>"` runs the same hybrid retrieval as
 `query`, then prepends the top-k chunks to the prompt as a `CONTEXT`
