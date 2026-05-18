@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -194,6 +195,37 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	hits, _ = st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if len(hits) != 0 {
 		t.Errorf("after PruneUnseen all, got %d hits, want 0", len(hits))
+	}
+}
+
+// TestEnsureCacheLargeIndex is a regression for the slice-bounds panic
+// ensureCache used to hit on any index with >1024 chunks. The old
+// implementation preallocated `vecs` with cap=1024*dim and grew it via
+// `vecs[:base+dim]`, which panics once base exceeds the cap. The
+// fixed path pre-sizes via SELECT COUNT(*) and uses append.
+func TestEnsureCacheLargeIndex(t *testing.T) {
+	st, ctx := newStore(t)
+	const n = 1100 // > 1024 (the broken cap)
+	pending := make([]PendingChunk, n)
+	for i := range n {
+		pending[i] = PendingChunk{
+			Path:       fmt.Sprintf("pkg/f%d.go", i),
+			ContentSHA: fmt.Sprintf("h%d", i),
+			Content:    fmt.Sprintf("func F%d(){}", i),
+			Vec:        []float32{float32(i + 1), 0, 0, 0},
+		}
+	}
+	if err := st.UpsertMany(ctx, pending, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// Search forces ensureCache. Pre-fix this would panic with
+	// `slice bounds out of range [:N*dim] with capacity 1024*dim`.
+	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected hits from large-index search")
 	}
 }
 

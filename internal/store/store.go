@@ -1163,17 +1163,25 @@ func (s *Store) ensureCache(ctx context.Context) error {
 	s.cacheIDs = nil
 	s.cacheVecs = nil
 	s.cacheNorms = nil
+	// Pre-size all three slices to the actual chunk count so the load
+	// path never reallocates. Cheap (one COUNT(*) round-trip) and
+	// avoids the slice-bounds panic the old `vecs[:base+dim]` re-slice
+	// hit on any index with >1024 chunks (the old hardcoded cap).
+	var rowCount int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&rowCount); err != nil {
+		return err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	ids := make([]int64, 0, 1024)
-	norms := make([]float32, 0, 1024)
+	ids := make([]int64, 0, rowCount)
+	norms := make([]float32, 0, rowCount)
 	dim := int(s.dim.Load())
 	var vecs []float32
 	if dim > 0 {
-		vecs = make([]float32, 0, 1024*dim)
+		vecs = make([]float32, 0, rowCount*dim)
 	}
 	for rows.Next() {
 		var id int64
@@ -1187,17 +1195,17 @@ func (s *Store) ensureCache(ctx context.Context) error {
 		n := len(blob) / 4
 		if dim == 0 {
 			dim = n
-			vecs = make([]float32, 0, 1024*dim)
+			vecs = make([]float32, 0, rowCount*dim)
 		} else if n != dim {
 			return fmt.Errorf("vec dim mismatch in cache: got %d, want %d", n, dim)
 		}
 		// Decode directly into vecs; skip zero-norm vectors (they can't score).
 		base := len(vecs)
-		vecs = vecs[:base+dim]
 		var sq float32
 		for i := range dim {
-			vecs[base+i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-			sq += vecs[base+i] * vecs[base+i]
+			f := math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+			vecs = append(vecs, f)
+			sq += f * f
 		}
 		if sq == 0 {
 			vecs = vecs[:base] // discard zero-norm row
