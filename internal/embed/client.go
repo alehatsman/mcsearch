@@ -37,7 +37,7 @@ func New(baseURL, model string, batch int, timeout time.Duration) *Client {
 		timeout = 60 * time.Second
 	}
 	return &Client{
-		BaseURL: strings.TrimRight(baseURL, "/"),
+		BaseURL: strings.TrimSuffix(baseURL, "/"),
 		Model:   model,
 		Batch:   batch,
 		HTTP:    &http.Client{Timeout: timeout},

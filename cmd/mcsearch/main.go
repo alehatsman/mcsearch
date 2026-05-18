@@ -188,6 +188,15 @@ func storeOpts() store.Options {
 	return opts
 }
 
+func parseDuration(envVar, raw string, def time.Duration) time.Duration {
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s=%q is not a Go duration; using %s\n", envVar, raw, def)
+		return def
+	}
+	return d
+}
+
 // maxHitsPerFile reads MCSEARCH_MAX_HITS_PER_FILE from the environment.
 // Zero means no per-file cap (default). Positive values enforce result
 // diversity — useful when a single heavily-matched file would otherwise
@@ -225,24 +234,14 @@ func newEmbedClient() *embed.Client {
 		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_BATCH=%q is not a positive integer; using 32\n", rawBatch)
 		batch = 32
 	}
-	rawTimeout := envOr("MCSEARCH_EMBED_TIMEOUT", "60s")
-	timeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_TIMEOUT=%q is not a Go duration; using 60s\n", rawTimeout)
-		timeout = 60 * time.Second
-	}
+	timeout := parseDuration("MCSEARCH_EMBED_TIMEOUT", envOr("MCSEARCH_EMBED_TIMEOUT", "60s"), 60*time.Second)
 	return embed.New(url, model, batch, timeout)
 }
 
 func newChatClient() *chat.Client {
 	url := envOr("MCSEARCH_CHAT_URL", "http://127.0.0.1:8081")
 	model := envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
-	rawTimeout := envOr("MCSEARCH_CHAT_TIMEOUT", "120s")
-	timeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_CHAT_TIMEOUT=%q is not a Go duration; using 120s\n", rawTimeout)
-		timeout = 120 * time.Second
-	}
+	timeout := parseDuration("MCSEARCH_CHAT_TIMEOUT", envOr("MCSEARCH_CHAT_TIMEOUT", "120s"), 120*time.Second)
 	return chat.New(url, model, timeout)
 }
 
@@ -267,12 +266,7 @@ func newRerankClient() rerank.HealthChecker {
 		return nil
 	}
 	model := envOr("MCSEARCH_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
-	rawTimeout := envOr("MCSEARCH_RERANK_TIMEOUT", "5s")
-	timeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_TIMEOUT=%q is not a Go duration; using 5s\n", rawTimeout)
-		timeout = 5 * time.Second
-	}
+	timeout := parseDuration("MCSEARCH_RERANK_TIMEOUT", envOr("MCSEARCH_RERANK_TIMEOUT", "5s"), 5*time.Second)
 	if os.Getenv("MCSEARCH_RERANK_STYLE") == "chat" {
 		rawConc := envOr("MCSEARCH_RERANK_CONCURRENCY", "4")
 		concurrency, cerr := strconv.Atoi(rawConc)
@@ -295,12 +289,7 @@ func newCompressClient() *chat.Client {
 		return nil
 	}
 	model := envOr("MCSEARCH_COMPRESS_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
-	rawTimeout := envOr("MCSEARCH_COMPRESS_TIMEOUT", "30s")
-	timeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_COMPRESS_TIMEOUT=%q is not a Go duration; using 30s\n", rawTimeout)
-		timeout = 30 * time.Second
-	}
+	timeout := parseDuration("MCSEARCH_COMPRESS_TIMEOUT", envOr("MCSEARCH_COMPRESS_TIMEOUT", "30s"), 30*time.Second)
 	return chat.New(url, model, timeout)
 }
 
@@ -313,12 +302,7 @@ func newDraftClient() *chat.Client {
 		return nil
 	}
 	model := envOr("MCSEARCH_DRAFT_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
-	rawTimeout := envOr("MCSEARCH_DRAFT_TIMEOUT", "120s")
-	timeout, err := time.ParseDuration(rawTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_DRAFT_TIMEOUT=%q is not a Go duration; using 120s\n", rawTimeout)
-		timeout = 120 * time.Second
-	}
+	timeout := parseDuration("MCSEARCH_DRAFT_TIMEOUT", envOr("MCSEARCH_DRAFT_TIMEOUT", "120s"), 120*time.Second)
 	return chat.New(url, model, timeout)
 }
 
@@ -426,7 +410,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 		return err
 	}
 	if _, err := os.Stat(p.DBPath); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("no index for %s — run `mcsearch index %s` first", p.Root, p.Root)
 		}
 		return err
@@ -569,7 +553,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	var hits []store.Hit
 	if !*noRAG {
 		if _, err := os.Stat(p.DBPath); err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("no index for %s — run `mcsearch index %s` first, or pass --no-rag to skip retrieval", p.Root, p.Root)
 			}
 			return err
@@ -674,7 +658,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 			return err
 		}
 		if _, err := os.Stat(p.DBPath); err != nil {
-			if os.IsNotExist(err) {
+			if errors.Is(err, os.ErrNotExist) {
 				fmt.Printf("\n%s\n  not indexed — run: mcsearch index %s\n", p.Root, p.Root)
 				return nil
 			}
@@ -705,7 +689,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 	// All-project summary
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			fmt.Printf("\nindex dir: %s\nno projects indexed yet\n", base)
 			return nil
 		}
@@ -837,7 +821,7 @@ func cmdNuke(_ context.Context, args []string) error {
 		return err
 	}
 	if _, err := os.Stat(p.CacheDir); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			fmt.Printf("nothing to remove: no index for %s\n", p.Root)
 			return nil
 		}
@@ -917,7 +901,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 		if err := os.RemoveAll(p.CacheDir); err != nil {
 			return err
 		}
-	} else if !os.IsNotExist(err) {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := p.EnsureCacheDir(); err != nil {
@@ -955,7 +939,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 func knownProjectRoots(ctx context.Context, base string) ([]string, error) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -1068,7 +1052,7 @@ func cmdClone(_ context.Context, args []string) error {
 		return fmt.Errorf("src and dst resolve to the same project root (%s); nothing to clone", src.Root)
 	}
 	if _, err := os.Stat(src.DBPath); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("src has no index at %s — run `mcsearch index %s` first", src.DBPath, src.Root)
 		}
 		return err

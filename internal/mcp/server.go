@@ -88,7 +88,7 @@ func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchIn
 	out.Project = p.Root
 
 	if _, err := os.Stat(p.DBPath); err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			out.Status = "no-index"
 			out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first, then retry. Fall back to grep / Glob in the meantime.", p.Root, p.Root)
 			return nil, out, nil
@@ -207,7 +207,7 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	if err != nil {
 		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
 	}
-	if _, err := os.Stat(p.DBPath); os.IsNotExist(err) {
+	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, FindSymbolOutput{Status: "no-index", Project: p.Root,
 			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
 	}
@@ -274,7 +274,7 @@ func (s *Server) related(ctx context.Context, _ *sdk.CallToolRequest, in Related
 	if err != nil {
 		return nil, RelatedOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
 	}
-	if _, err := os.Stat(p.DBPath); os.IsNotExist(err) {
+	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, RelatedOutput{Status: "no-index", Project: p.Root,
 			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
 	}
@@ -379,7 +379,7 @@ func (s *Server) summarize(ctx context.Context, _ *sdk.CallToolRequest, in Summa
 	}
 	realTarget, err := filepath.EvalSymlinks(target)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("file does not exist: %s", target)}, nil
 		}
 		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("resolve path: %v", err)}, nil

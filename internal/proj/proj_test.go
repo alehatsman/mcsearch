@@ -1,6 +1,7 @@
 package proj
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -83,7 +84,7 @@ func TestEnsureCacheDir(t *testing.T) {
 	cache := t.TempDir()
 	dir := t.TempDir()
 	p, _ := Resolve(dir, cache)
-	if _, err := os.Stat(p.CacheDir); !os.IsNotExist(err) {
+	if _, err := os.Stat(p.CacheDir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("CacheDir should not exist before EnsureCacheDir: %v", err)
 	}
 	if err := p.EnsureCacheDir(); err != nil {

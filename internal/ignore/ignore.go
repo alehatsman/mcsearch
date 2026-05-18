@@ -12,11 +12,11 @@
 //     full gitignore semantics apply (anchoring, negation, `**`,
 //     dir-only patterns, later-pattern-wins). The sub-layers, in
 //     declaration order:
-//       a. DefaultPatterns — hard-coded: vendor dirs, build outputs,
-//          secret-shaped filenames, license-family files.
-//       b. .gitignore at the project root (root file only; nested
-//          .gitignore files are intentionally not read).
-//       c. .mcsearch-ignore at the project root (same syntax).
+//     a. DefaultPatterns — hard-coded: vendor dirs, build outputs,
+//     secret-shaped filenames, license-family files.
+//     b. .gitignore at the project root (root file only; nested
+//     .gitignore files are intentionally not read).
+//     c. .mcsearch-ignore at the project root (same syntax).
 //
 //  3. LooksBinary — NUL-byte heuristic for binaries that slipped
 //     through the allow-list (e.g. a `.yml` that's actually a packed
@@ -35,6 +35,7 @@ package ignore
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -197,7 +198,7 @@ func New(root string) (*Matcher, error) {
 func readLines(path string) ([]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err

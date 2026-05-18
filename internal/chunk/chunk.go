@@ -40,6 +40,14 @@ const WindowLines = 40
 // WindowOverlap lines repeat between consecutive line windows.
 const WindowOverlap = 10
 
+// Kind values for Chunk.Kind.
+const (
+	KindWindow       = "window"
+	KindOrphan       = "orphan"
+	KindFileSummary  = "file_summary"
+	KindChunkSummary = "chunk_summary"
+)
+
 // Chunk is one retrievable slice of one file.
 type Chunk struct {
 	Path      string // relative to project root
@@ -385,7 +393,7 @@ func orphanRange(relPath string, src []byte, start, end int) []Chunk {
 	wins := windowOver(lines, firstLine)
 	for i := range wins {
 		wins[i].Path = relPath
-		wins[i].Kind = "orphan"
+		wins[i].Kind = KindOrphan
 	}
 	return wins
 }
@@ -444,7 +452,7 @@ func windowChunks(relPath string, src []byte) []Chunk {
 	wins := windowOver(lines, 1)
 	for i := range wins {
 		wins[i].Path = relPath
-		wins[i].Kind = "window"
+		wins[i].Kind = KindWindow
 	}
 	return wins
 }
@@ -548,7 +556,7 @@ func (c Chunk) EmbedText() string {
 	b.WriteString("// path: ")
 	b.WriteString(c.Path)
 	b.WriteByte('\n')
-	if c.Kind != "" && c.Kind != "window" {
+	if c.Kind != "" && c.Kind != KindWindow {
 		b.WriteString("// kind: ")
 		b.WriteString(c.Kind)
 		b.WriteByte('\n')

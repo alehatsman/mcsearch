@@ -231,7 +231,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 						rel: rel,
 						chunk: chunk.Chunk{
 							Path:      rel,
-							Kind:      "file_summary",
+							Kind:      chunk.KindFileSummary,
 							StartLine: 1,
 							EndLine:   lineCount(data),
 							Content:   summary,
@@ -252,7 +252,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < chunkSummaryMinLines {
 					continue
 				}
-				sumSHA := chunkSHA("chunk_summary:" + c.Content)
+				sumSHA := chunkSHA(chunk.KindChunkSummary + ":" + c.Content)
 				if existing[sumSHA] {
 					if err := ix.Store.TouchSeen(ctx, rel, sumSHA, "", startTime); err != nil {
 						return err
@@ -272,7 +272,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					rel: rel,
 					chunk: chunk.Chunk{
 						Path:      rel,
-						Kind:      "chunk_summary",
+						Kind:      chunk.KindChunkSummary,
 						StartLine: c.StartLine,
 						EndLine:   c.EndLine,
 						Content:   summary,
@@ -374,7 +374,7 @@ func chunkSHA(content string) string {
 // prose summary.
 func isStructural(kind string) bool {
 	switch kind {
-	case "window", "orphan", "file_summary", "chunk_summary":
+	case chunk.KindWindow, chunk.KindOrphan, chunk.KindFileSummary, chunk.KindChunkSummary:
 		return false
 	default:
 		return true

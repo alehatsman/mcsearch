@@ -62,7 +62,7 @@ func NewChat(baseURL, model string, concurrency int, timeout time.Duration) *Cha
 		timeout = 30 * time.Second
 	}
 	return &ChatReranker{
-		BaseURL:     strings.TrimRight(baseURL, "/"),
+		BaseURL:     strings.TrimSuffix(baseURL, "/"),
 		Model:       model,
 		Instruct:    defaultInstruct,
 		Concurrency: concurrency,
@@ -162,12 +162,12 @@ func (c *ChatReranker) scoreOne(ctx context.Context, query, doc string) (float32
 			{Role: "user", Content: userPrompt},
 			{Role: "assistant", Content: "<think>\n\n</think>\n\n"},
 		},
-		"max_tokens":              1,
-		"temperature":             0,
-		"logprobs":                true,
-		"top_logprobs":            10,
-		"continue_final_message":  true,
-		"add_generation_prompt":   false,
+		"max_tokens":             1,
+		"temperature":            0,
+		"logprobs":               true,
+		"top_logprobs":           10,
+		"continue_final_message": true,
+		"add_generation_prompt":  false,
 	}
 
 	body, err := json.Marshal(reqMap)
@@ -198,8 +198,8 @@ func (c *ChatReranker) scoreOne(ctx context.Context, query, doc string) (float32
 			} `json:"message"`
 			Logprobs *struct {
 				Content []struct {
-					Token       string        `json:"token"`
-					Logprob     float64       `json:"logprob"`
+					Token       string         `json:"token"`
+					Logprob     float64        `json:"logprob"`
 					TopLogprobs []logprobToken `json:"top_logprobs"`
 				} `json:"content"`
 			} `json:"logprobs"`

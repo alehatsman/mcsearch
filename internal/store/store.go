@@ -20,12 +20,19 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/rerank"
 	_ "modernc.org/sqlite" // register sqlite driver
+)
+
+const (
+	metaDim           = "dim"
+	metaLastIndexedAt = "last_indexed_at"
+	metaProjectRoot   = "project_root"
 )
 
 // Options influence the runtime behaviour of an opened Store.
@@ -115,7 +122,7 @@ func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 		return nil, err
 	}
 	// Recover the recorded vector dimension, if any.
-	row := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='dim'`)
+	row := db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaDim+`'`)
 	var v string
 	switch err := row.Scan(&v); {
 	case errors.Is(err, sql.ErrNoRows):
@@ -124,8 +131,7 @@ func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, err
 	default:
-		var dim int
-		fmt.Sscanf(v, "%d", &dim)
+		dim, _ := strconv.Atoi(v)
 		s.dim = dim
 	}
 	return s, nil
@@ -235,11 +241,10 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	if err := row.Scan(&st.Chunks, &st.Files); err != nil {
 		return st, err
 	}
-	row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='last_indexed_at'`)
+	row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaLastIndexedAt+`'`)
 	var v string
 	if err := row.Scan(&v); err == nil {
-		var ts int64
-		fmt.Sscanf(v, "%d", &ts)
+		ts, _ := strconv.ParseInt(v, 10, 64)
 		if ts > 0 {
 			st.LastIndex = time.Unix(0, ts)
 		}
@@ -251,9 +256,9 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 // successful (full or incremental) re-index.
 func (s *Store) SetLastIndexedAt(ctx context.Context, t time.Time) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta(key,value) VALUES('last_indexed_at', ?)
+		`INSERT INTO meta(key,value) VALUES('`+metaLastIndexedAt+`', ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-		fmt.Sprintf("%d", t.UnixNano()))
+		strconv.FormatInt(t.UnixNano(), 10))
 	return err
 }
 
@@ -262,7 +267,7 @@ func (s *Store) SetLastIndexedAt(ctx context.Context, t time.Time) error {
 // cache dirs and has to recover each project's original on-disk root.
 func (s *Store) SetProjectRoot(ctx context.Context, root string) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta(key,value) VALUES('project_root', ?)
+		`INSERT INTO meta(key,value) VALUES('`+metaProjectRoot+`', ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, root)
 	return err
 }
@@ -272,7 +277,7 @@ func (s *Store) SetProjectRoot(ctx context.Context, root string) error {
 // pre-migration case for indexes built before this metadata existed.
 func (s *Store) ProjectRoot(ctx context.Context) (string, error) {
 	var v string
-	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='project_root'`)
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaProjectRoot+`'`)
 	if err := row.Scan(&v); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", nil
@@ -324,9 +329,9 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	if s.dim == 0 {
 		s.dim = len(rows[0].Vec)
 		if _, err := s.db.ExecContext(ctx,
-			`INSERT INTO meta(key,value) VALUES('dim', ?)
+			`INSERT INTO meta(key,value) VALUES('`+metaDim+`', ?)
 			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			fmt.Sprintf("%d", s.dim)); err != nil {
+			strconv.Itoa(s.dim)); err != nil {
 			return err
 		}
 	}
@@ -659,6 +664,13 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 	return s.fetchHits(ctx, fused, semCosine, bm25Score, nil, nil)
 }
 
+// inPlaceholders returns a comma-separated list of n SQL "?" bind vars,
+// e.g. inPlaceholders(3) == "?,?,?".
+func inPlaceholders(n int) string {
+	s := strings.Repeat("?,", n)
+	return s[:len(s)-1]
+}
+
 // rerank fetches `Content` for the fused pool, sends (query, docs) to
 // the reranker, maps the returned indices back to chunk IDs, and
 // returns the top-k slice together with a per-id rerank score map.
@@ -670,10 +682,8 @@ func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k 
 	for i, sc := range fused {
 		idArgs[i] = sc.id
 	}
-	placeholders := strings.Repeat("?,", len(idArgs))
-	placeholders = placeholders[:len(placeholders)-1]
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content FROM chunks WHERE id IN (`+placeholders+`)`,
+		`SELECT id, content FROM chunks WHERE id IN (`+inPlaceholders(len(idArgs))+`)`,
 		idArgs...)
 	if err != nil {
 		return nil, nil, err
@@ -897,10 +907,8 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 	for i, sc := range ranked {
 		idArgs[i] = sc.id
 	}
-	placeholders := strings.Repeat("?,", len(idArgs))
-	placeholders = placeholders[:len(placeholders)-1]
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path, kind, name, start_line, end_line, content FROM chunks WHERE id IN (`+placeholders+`)`,
+		`SELECT id, path, kind, name, start_line, end_line, content FROM chunks WHERE id IN (`+inPlaceholders(len(idArgs))+`)`,
 		idArgs...)
 	if err != nil {
 		return nil, err
@@ -1050,12 +1058,11 @@ func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k
 // invalidate before rebuilding, so long-lived MCP server processes always
 // serve fresh results without a restart.
 func (s *Store) ensureCache(ctx context.Context) error {
-	// Read last_indexed_at from meta to detect out-of-process mutations.
 	var currentIndexedAt int64
-	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='last_indexed_at'`)
+	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaLastIndexedAt+`'`)
 	var raw string
 	if err := row.Scan(&raw); err == nil {
-		fmt.Sscanf(raw, "%d", &currentIndexedAt)
+		currentIndexedAt, _ = strconv.ParseInt(raw, 10, 64)
 	}
 
 	s.cacheMu.RLock()

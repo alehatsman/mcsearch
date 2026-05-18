@@ -5,6 +5,7 @@ package proj
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,7 +29,7 @@ func Resolve(path, baseCacheDir string) (*Project, error) {
 	}
 	real, err := filepath.EvalSymlinks(abs)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			return nil, fmt.Errorf("path does not exist: %s", abs)
 		}
 		return nil, fmt.Errorf("resolve %s: %w", abs, err)
