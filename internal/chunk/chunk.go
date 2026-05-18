@@ -10,6 +10,7 @@
 package chunk
 
 import (
+	"bytes"
 	"context"
 	"path/filepath"
 	"sort"
@@ -418,6 +419,21 @@ func orphanRange(relPath string, src []byte, start, end int) []Chunk {
 	return wins
 }
 
+func hasCommentPrefix(b []byte) bool {
+	if len(b) == 0 {
+		return false
+	}
+	switch b[0] {
+	case '/':
+		return len(b) >= 2 && (b[1] == '/' || b[1] == '*')
+	case '#', '*':
+		return true
+	case '-':
+		return len(b) >= 2 && b[1] == '-'
+	}
+	return false
+}
+
 // backfillComments walks backward from start to absorb a contiguous
 // block of leading line comments (`//`, `#`, `--`) or block-comment
 // remnants (`/*`, `*`) immediately above the declaration. Limited to
@@ -442,12 +458,8 @@ func backfillComments(src []byte, start int) int {
 			lineStart--
 		}
 		// src[lineStart:pos-1] is the previous line's content (no newline).
-		trimmed := strings.TrimLeft(string(src[lineStart:pos-1]), " \t")
-		if strings.HasPrefix(trimmed, "//") ||
-			strings.HasPrefix(trimmed, "#") ||
-			strings.HasPrefix(trimmed, "/*") ||
-			strings.HasPrefix(trimmed, "*") ||
-			strings.HasPrefix(trimmed, "--") {
+		trimmed := bytes.TrimLeft(src[lineStart:pos-1], " \t")
+		if hasCommentPrefix(trimmed) {
 			pos = lineStart
 			lines++
 			continue
@@ -464,7 +476,7 @@ func lineOf(src []byte, byteOffset int) int {
 	if byteOffset > len(src) {
 		byteOffset = len(src)
 	}
-	return 1 + strings.Count(string(src[:byteOffset]), "\n")
+	return 1 + bytes.Count(src[:byteOffset], []byte{'\n'})
 }
 
 func windowChunks(relPath string, src []byte) []Chunk {

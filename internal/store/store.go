@@ -866,8 +866,9 @@ func (s *Store) scoreBM25(ctx context.Context, queryText string, limit int) ([]s
 // while AND would too often return zero hits on natural-language
 // queries like "function that validates a token".
 func buildFTSQuery(q string) string {
-	var toks []string
-	for _, f := range strings.Fields(q) {
+	fields := strings.Fields(q)
+	toks := make([]string, 0, len(fields))
+	for _, f := range fields {
 		// Strip surrounding punctuation so "validateToken." behaves
 		// like "validateToken". Keep internal alphanumerics + `_`.
 		var b strings.Builder
@@ -1085,9 +1086,12 @@ func (s *Store) ensureCache(ctx context.Context) error {
 	}
 	defer rows.Close()
 	ids := make([]int64, 0, 1024)
-	var vecs []float32
 	norms := make([]float32, 0, 1024)
 	dim := int(s.dim.Load())
+	var vecs []float32
+	if dim > 0 {
+		vecs = make([]float32, 0, 1024*dim)
+	}
 	for rows.Next() {
 		var id int64
 		var blob []byte
@@ -1100,21 +1104,23 @@ func (s *Store) ensureCache(ctx context.Context) error {
 		n := len(blob) / 4
 		if dim == 0 {
 			dim = n
+			vecs = make([]float32, 0, 1024*dim)
 		} else if n != dim {
 			return fmt.Errorf("vec dim mismatch in cache: got %d, want %d", n, dim)
 		}
-		// Decode in place; skip zero-norm vectors (they can't score).
-		row := make([]float32, dim)
+		// Decode directly into vecs; skip zero-norm vectors (they can't score).
+		base := len(vecs)
+		vecs = vecs[:base+dim]
 		var sq float32
 		for i := range dim {
-			row[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-			sq += row[i] * row[i]
+			vecs[base+i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
+			sq += vecs[base+i] * vecs[base+i]
 		}
 		if sq == 0 {
+			vecs = vecs[:base] // discard zero-norm row
 			continue
 		}
 		ids = append(ids, id)
-		vecs = append(vecs, row...)
 		norms = append(norms, float32(math.Sqrt(float64(sq))))
 	}
 	if err := rows.Err(); err != nil {

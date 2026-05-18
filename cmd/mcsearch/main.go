@@ -1096,6 +1096,10 @@ func cmdClone(_ context.Context, args []string) error {
 }
 
 func copyFile(srcPath, dstPath string) error {
+	// Hard-link is instant when src and dst are on the same filesystem.
+	if err := os.Link(srcPath, dstPath); err == nil {
+		return nil
+	}
 	in, err := os.Open(srcPath)
 	if err != nil {
 		return err
