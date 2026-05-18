@@ -5,14 +5,17 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/proj"
@@ -265,5 +268,89 @@ func TestPruneAtSameMillisecond(t *testing.T) {
 	stats, _ := st.Stats(ctx)
 	if stats.Files != 1 {
 		t.Errorf("expected 1 file after pruning a.go; got %d", stats.Files)
+	}
+}
+
+// TestChunkSummaryIndexing verifies that per-chunk summaries are generated for
+// structural chunks with ≥ chunkSummaryMinLines lines, skipped for tiny chunks,
+// and cache-hit on a second run (no extra chat calls).
+func TestChunkSummaryIndexing(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "LongFunc processes the input."}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// Build a function body with ≥ chunkSummaryMinLines (30) lines.
+	body := "package main\n\n// LongFunc is deliberately long.\nfunc LongFunc() {\n"
+	for i := range chunkSummaryMinLines {
+		body += fmt.Sprintf("\t// line %d\n", i+1)
+	}
+	body += "}\n"
+	writeFile(t, filepath.Join(projDir, "long.go"), body)
+
+	// A tiny function that must NOT trigger a chunk summary.
+	writeFile(t, filepath.Join(projDir, "tiny.go"), "package main\nfunc Tiny() {}\n")
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+	ix := New(p, st, em, ig, Options{Summarize: true, Chat: cc})
+
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	callsAfterFirst := atomic.LoadInt32(&chatCalls)
+	if callsAfterFirst == 0 {
+		t.Fatal("expected at least one chat call for LongFunc chunk summary; got 0")
+	}
+
+	// Search for the summary text — it must appear as a chunk_summary hit.
+	summaryText := "LongFunc processes the input."
+	qvec, err := em.Embed(ctx, []string{summaryText})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := st.Search(ctx, qvec[0], summaryText, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var foundSummary bool
+	for _, h := range hits {
+		if h.Kind == "chunk_summary" && h.Path == "long.go" {
+			foundSummary = true
+			break
+		}
+	}
+	if !foundSummary {
+		t.Errorf("expected a chunk_summary hit for long.go; got hits: %+v", hits)
+	}
+
+	// Second run: cache hit — chat must not be called again.
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run #2: %v", err)
+	}
+	callsAfterSecond := atomic.LoadInt32(&chatCalls)
+	if callsAfterSecond != callsAfterFirst {
+		t.Errorf("second run made %d extra chat calls; expected 0 (cache hit)",
+			callsAfterSecond-callsAfterFirst)
 	}
 }

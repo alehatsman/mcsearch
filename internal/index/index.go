@@ -27,6 +27,11 @@ import (
 // hardware; whole-repo overviews belong in ask_codebase, not here.
 const summarizeCap = 64 * 1024
 
+// chunkSummaryMinLines: skip per-chunk summaries for tiny chunks (< this
+// many lines) — they're too short to need prose distillation and the
+// full source text is better context than a summary.
+const chunkSummaryMinLines = 30
+
 // Options controls one index run.
 type Options struct {
 	MaxFileSize int64        // skip files larger than this (bytes); 0 = 1 MB default
@@ -234,6 +239,46 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				}
 			}
 		}
+		// Per-chunk summary, opt-in. Only structural chunks (functions,
+		// methods, classes) with ≥ chunkSummaryMinLines lines get summaries;
+		// tiny helpers, windows, and orphans aren't worth the round-trip.
+		// SHA is keyed on the chunk source text so cache invalidation is
+		// automatic when the function body changes.
+		if ix.Options.Summarize && ix.Options.Chat != nil {
+			for _, c := range chunks {
+				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < chunkSummaryMinLines {
+					continue
+				}
+				sumSHA := chunkSHA("chunk_summary:" + c.Content)
+				if existing[sumSHA] {
+					if err := ix.Store.TouchSeen(ctx, rel, sumSHA, startTime); err != nil {
+						return err
+					}
+					seen++
+					continue
+				}
+				summary, err := summarizeChunk(ctx, ix.Options.Chat, rel, c)
+				if err != nil {
+					ix.Options.Logger.Warn("chunk summarize failed", "path", rel, "start", c.StartLine, "err", err)
+					continue
+				}
+				if strings.TrimSpace(summary) == "" {
+					continue
+				}
+				toEmbed = append(toEmbed, pending{
+					rel: rel,
+					chunk: chunk.Chunk{
+						Path:      rel,
+						Kind:      "chunk_summary",
+						StartLine: c.StartLine,
+						EndLine:   c.EndLine,
+						Content:   summary,
+					},
+					sha: sumSHA,
+				})
+				seen++
+			}
+		}
 		// Old rows for this file whose SHA disappeared get pruned at the
 		// end via PruneUnseen — they never had last_seen_at bumped on this
 		// run.
@@ -317,6 +362,40 @@ type pending struct {
 func chunkSHA(content string) string {
 	h := sha1.Sum([]byte(content))
 	return hex.EncodeToString(h[:])
+}
+
+// isStructural returns true for chunk kinds that represent a named code
+// entity (function, method, class, type, impl block, etc.). Returns false
+// for window/orphan/summary pseudo-kinds that don't warrant their own
+// prose summary.
+func isStructural(kind string) bool {
+	switch kind {
+	case "window", "orphan", "file_summary", "chunk_summary":
+		return false
+	default:
+		return true
+	}
+}
+
+// summarizeChunk asks the chat endpoint for a 1–2 sentence description of
+// a single function, method, or class. Returns the summary text or an error.
+// Caller logs and skips on error so one bad chunk doesn't break a whole run.
+func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Chunk) (string, error) {
+	const system = "You are a code summarizer. Given a single function, method, or class, " +
+		"write 1–2 sentences describing what it does. " +
+		"Lead with the identifier name. " +
+		"State its purpose, key parameters, and return value or notable side effects. " +
+		"Use present tense. No prose padding, no restating the prompt, no code blocks."
+	user := fmt.Sprintf("FILE: %s (lines %d–%d, kind: %s)\n\n```\n%s\n```",
+		rel, c.StartLine, c.EndLine, c.Kind, c.Content)
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, chat.Options{MaxTokens: 150})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
 }
 
 // summarizeFile asks the chat endpoint for a tight, retrieval-friendly
