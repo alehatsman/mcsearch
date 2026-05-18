@@ -206,6 +206,25 @@ Vectors are stored as packed `float32` BLOBs. A second virtual table,
 external-content style, kept in sync with `chunks` via AFTER triggers
 so it costs nothing extra at upsert time.
 
+### Incremental re-index
+
+`mcsearch index` is safe to run repeatedly. Three fast-paths keep it cheap:
+
+| Fast-path | Condition | Cost |
+|---|---|---|
+| **Mtime** | File mtime ≤ last index run | One `UPDATE last_seen_at` per file — no read, no parse, no embed |
+| **SHA** | File changed but chunk content unchanged | Re-parse + SHA, then `UPDATE last_seen_at, name` — no embed call |
+| **Full** | New or changed chunk | Parse + embed + upsert |
+
+The SHA fast-path also **backfills the `name` column** on unchanged chunks,
+so upgrading to a binary with identifier extraction (used by `find_symbol`)
+doesn't require a full `reindex` — the next ordinary `index` run populates
+names for free as each file is walked.
+
+If you add a new embedding model (different vector dimension), use
+`mcsearch reindex <path>` to drop and re-embed from scratch; mixed
+dimensions within one index are rejected at upsert time.
+
 ### Hybrid search (semantic + BM25 via RRF)
 
 Every `Search` runs two rankers and fuses them via Reciprocal Rank
