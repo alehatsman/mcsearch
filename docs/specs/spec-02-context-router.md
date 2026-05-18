@@ -1,9 +1,10 @@
 # Spec 02: Unified Context Router (`mcsearch_context`)
 
-**Status:** ✅ Implemented (v1, 2026-05-18). Graph lanes (`callers`,
-`callees`, `package_topology`) currently degrade to a semantic +
-symbol fallback with an `avoid` line flagging the limitation; the
-full graph integration lands when spec-03 (graph extraction) does.
+**Status:** ✅ Implemented (v1, 2026-05-18). Graph layer 1 (issue #4
+phase 1, commit 765af69) is now wired in. Supported intents that
+exercise the graph: `symbol_lookup`, `editing_context`, `architecture`,
+`package_topology`. `callers` and `callees` still degrade — they need
+`calls` edges which layer 1 does not emit.
 **Effort:** S–M
 **Value:** Adoption. Agents reach for `grep`/`Read` by default and
 ignore the existing MCP tools unless explicitly instructed. The router
@@ -131,19 +132,23 @@ Spans of a matched qualified symbol mask out sub-token matches so
 
 ## Lane composition per intent
 
-| Intent             | Symbol lane            | Semantic lane | Graph (deferred) |
-|--------------------|------------------------|---------------|------------------|
-| `behavior_search`  | runs if id detected    | runs          | —                |
-| `symbol_lookup`    | runs                   | runs          | —                |
-| `callers`          | runs                   | runs          | **needed**       |
-| `callees`          | runs                   | runs          | **needed**       |
-| `architecture`     | runs if id detected    | runs (k+50%)  | —                |
-| `package_topology` | runs if id detected    | runs          | **needed**       |
-| `editing_context`  | runs if id detected    | runs          | —                |
+| Intent             | Symbol lane            | Semantic lane | Graph lane (layer 1) |
+|--------------------|------------------------|---------------|----------------------|
+| `behavior_search`  | runs if id detected    | runs          | —                    |
+| `symbol_lookup`    | runs                   | runs          | siblings via `has_method`/`has_field`/`embeds` |
+| `callers`          | runs                   | runs          | **needs `calls` edges (deferred)** |
+| `callees`          | runs                   | runs          | **needs `calls` edges (deferred)** |
+| `architecture`     | runs if id detected    | runs          | package + top-level type/function rollup |
+| `package_topology` | runs if id detected    | runs          | `imports` edges between pkgs in neighborhood |
+| `editing_context`  | runs if id detected    | runs          | enclosing-type sibling neighborhood |
 
-Graph-deferred intents still return useful results from the symbol +
-semantic lanes; the `avoid` line tells the agent the graph view isn't
-fully wired yet so it doesn't trust the symbols list as exhaustive.
+The graph lane is best-effort: it loads when graph data is present
+(`mcsearch graph index <project>` has been run), populates
+`ContextOutput.Graph` for the supported intents, and is skipped
+otherwise. The `avoid` line tells the agent whether to nudge the user
+toward `mcsearch graph index`. `callers`/`callees` always warn because
+layer 1 doesn't emit `calls` edges regardless of whether the graph is
+indexed.
 
 ---
 
@@ -189,10 +194,11 @@ Strong claim when we have strong signal:
 
 | Failure mode               | Behavior                                          |
 |----------------------------|---------------------------------------------------|
-| `embed.ErrUnreachable`     | Symbol lane still runs. If it produced hits, return `ok` with hint. If not, `embedding-service-unreachable` with `endpoint`. |
+| `embed.ErrUnreachable`     | Symbol + graph lanes still run. If either produced hits, return `ok` with hint. If not, `embedding-service-unreachable` with `endpoint`. |
 | No `ChatClient`            | Router never depends on chat. Summarize-style follow-ups are encouraged via `next_action` prose; agent decides. |
-| Stale index (>24h)         | `stale: true`, refresh hint, still returns results. |
-| No index                   | `status: "no-index"`, hint references `mcsearch index`. |
+| Stale chunk index (>24h)   | `stale: true`, refresh hint, still returns results. |
+| No chunk index             | `status: "no-index"`, hint references `mcsearch index`. |
+| No graph indexed           | Graph lane skipped; supported intents get an `avoid` line nudging the user toward `mcsearch graph index`. |
 
 ---
 
@@ -215,33 +221,46 @@ Strong claim when we have strong signal:
 
 - `internal/mcp/context.go` — handler, intent classifier, identifier
   detection, lane runners, fusion, prose builders.
+- `internal/mcp/context_graph.go` — in-memory graph view loader and
+  per-intent graph enrichment.
 - `internal/mcp/context_test.go` — table-driven tests for intent,
   identifier extraction, suggested_reads selection, prose builders,
-  and end-to-end with the fake embed server.
+  and end-to-end with the fake embed server (including a graph-seeded
+  symbol_lookup case).
 - `cmd/mcsearch/main.go::cmdContext` — CLI mirror.
 - `docs/claude-md-snippet.md` — CLAUDE.md drop-in.
 
 ---
 
-## Open questions for spec-03 (graph)
+## Graph integration
 
-- **`graphExpander` interface** — what does the router pass and
-  receive? Tentative:
+Today's wiring (commit on this branch):
 
-  ```go
-  type graphExpander interface {
-      Expand(ctx context.Context, anchors []SymbolHit, intent string, k int) (*GraphResult, error)
-  }
-  ```
+- `internal/mcp/context_graph.go::loadGraphView` pulls every
+  `graph_nodes` / `graph_edges` row via `store.GraphAllNodes` /
+  `GraphAllEdges` and indexes them in memory by ID, name, qualified
+  name, package, file path, and edge src/dst/kind. One load per
+  request — at the current scale (~800 nodes for this repo, a few
+  hundred KB) this is cheaper than building targeted SQL queries
+  per call.
+- `enrichGraph` dispatches on intent, walks edges, and populates
+  `ContextOutput.Graph` with the relevant `{nodes, edges}` subset.
 
-  Returning a `*GraphResult` directly so the router can drop it into
-  the output unchanged.
+## Open questions for the next graph layer
 
-- **Cache discipline** — graph queries against a 100k-symbol repo will
-  want either an in-memory cache or a `store_graph` schema; same
-  trade-off as the embed vector cache.
+- **Targeted SQL queries** — once node count outgrows a single load
+  (10k+ symbols), `store_graph.go` needs `NodesByName`, `NodesByPackage`,
+  `EdgesBySrc`, `EdgesByDst` index-backed methods. The in-memory view
+  becomes a fallback for small repos only.
 
-- **Cross-lane scoring** — once we have callers/callees, the
-  `suggested_reads` bias should consider "this symbol is in the
-  caller's neighborhood" as another agreement signal, not just
-  "appears in both lanes."
+- **`calls` edges** — required to ungate `callers` / `callees`
+  intents. Once they exist `enrichGraph` adds a case for them and
+  `graphDeferredIntents` shrinks to empty.
+
+- **Cross-lane scoring** — `suggested_reads` already biases toward
+  semantic + symbol agreement; with call edges it should add
+  "symbol is in caller neighborhood" as a third agreement signal.
+
+- **Cache discipline** — when targeted queries land, the in-memory
+  view can be removed or kept as an opt-in cache. No `mtime`-keyed
+  invalidation needed yet because we load fresh per request.

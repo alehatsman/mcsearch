@@ -48,6 +48,12 @@ line you can follow verbatim.
   back to Grep / Glob / ripgrep for this request.
 - `stale: true` → results may be ~1 day behind HEAD; flag this if the
   fix depends on very recent code.
+- `avoid` mentions "Run `mcsearch graph index`" → the project has no
+  structural graph yet; symbol/architecture intents work but won't
+  surface sibling methods, package imports, etc. Suggest indexing
+  once.
+- `avoid` mentions "`calls` edges are not yet extracted" → call-graph
+  queries (callers/callees) fall back to grep on the symbol name.
 
 **When NOT to call mcsearch_context:**
 - You already have an exact file path and need to read it — use `Read`.

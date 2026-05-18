@@ -5,6 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/alehatsman/mcsearch/internal/graph"
+	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/mcsearch/internal/store"
 )
 
 // ─── resolveIntent ────────────────────────────────────────────────────────
@@ -142,7 +147,7 @@ func TestBuildNextAction(t *testing.T) {
 		{IntentEditingContext, reads, syms, "before editing"},
 		{IntentBehaviorSearch, reads, syms, "ground your answer"},
 		{IntentArchitecture, reads, syms, "structural overview"},
-		{IntentCallers, nil, syms, "Graph layer not available"},
+		{IntentCallers, nil, syms, "Call-graph edges are not yet extracted"},
 		{IntentSymbolLookup, nil, nil, "Rephrase"},
 	}
 	for _, tc := range cases {
@@ -160,20 +165,25 @@ func TestBuildAvoid(t *testing.T) {
 	syms := []SymbolHit{{QualifiedName: "Foo", Path: "a.go"}}
 
 	cases := []struct {
-		intent string
-		sem    []SemHit
-		syms   []SymbolHit
-		want   string
+		name         string
+		intent       string
+		sem          []SemHit
+		syms         []SymbolHit
+		graphIndexed bool
+		want         string
 	}{
-		{IntentCallers, sem, syms, "graph extraction is not yet wired"},
-		{IntentBehaviorSearch, sem, syms, "Do not grep for the identifier"},
-		{IntentBehaviorSearch, nil, syms, "Do not grep for the identifier"},
-		{IntentBehaviorSearch, sem, nil, "Do not read entire files"},
-		{IntentBehaviorSearch, nil, nil, ""},
+		{"callers always warns", IntentCallers, sem, syms, true, "`calls` edges are not yet extracted"},
+		{"callers without graph still warns", IntentCallers, sem, syms, false, "`calls` edges are not yet extracted"},
+		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `mcsearch graph index"},
+		{"symbol_lookup with graph: don't grep", IntentSymbolLookup, sem, syms, true, "Do not grep"},
+		{"behavior + both lanes", IntentBehaviorSearch, sem, syms, true, "Do not grep for the identifier"},
+		{"behavior + symbols only", IntentBehaviorSearch, nil, syms, true, "Do not grep for the identifier"},
+		{"behavior + semantic only", IntentBehaviorSearch, sem, nil, true, "Do not read entire files"},
+		{"behavior + nothing", IntentBehaviorSearch, nil, nil, true, ""},
 	}
 	for _, tc := range cases {
-		t.Run(tc.intent, func(t *testing.T) {
-			got := buildAvoid(tc.intent, tc.sem, tc.syms)
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildAvoid(tc.intent, tc.sem, tc.syms, tc.graphIndexed)
 			if tc.want == "" {
 				if got != "" {
 					t.Errorf("want empty, got %q", got)
@@ -260,8 +270,11 @@ func TestContextRouterSymbolLookup(t *testing.T) {
 	if !strings.Contains(out.NextAction, "Read") {
 		t.Errorf("next_action should be a Read directive: %q", out.NextAction)
 	}
-	if !strings.Contains(out.Avoid, "Do not grep") {
-		t.Errorf("avoid should mention not grepping: %q", out.Avoid)
+	// Without a graph indexed, avoid nudges toward `mcsearch graph index`.
+	// With graph indexed it would say "Do not grep". Either is acceptable
+	// here; the symbol_lookup path is exercised either way.
+	if !strings.Contains(out.Avoid, "Do not grep") && !strings.Contains(out.Avoid, "mcsearch graph index") {
+		t.Errorf("avoid should mention either don't-grep or graph-index nudge: %q", out.Avoid)
 	}
 }
 
@@ -285,8 +298,8 @@ func TestContextRouterCallersGraphDeferred(t *testing.T) {
 	if out.Intent != IntentCallers {
 		t.Errorf("intent=%s, want callers", out.Intent)
 	}
-	if !strings.Contains(out.Avoid, "graph extraction is not yet wired") {
-		t.Errorf("avoid should flag graph-deferred status: %q", out.Avoid)
+	if !strings.Contains(out.Avoid, "`calls` edges are not yet extracted") {
+		t.Errorf("avoid should flag calls-edges deferred status: %q", out.Avoid)
 	}
 }
 
@@ -318,6 +331,94 @@ func TestContextRouterEmptyQuestion(t *testing.T) {
 	}
 	if out.Status != "error" {
 		t.Errorf("status=%s, want error", out.Status)
+	}
+}
+
+// seedGraph writes a synthetic graph for `root` directly via the
+// store's upsert methods. Avoids invoking ExtractGo (which needs a
+// real go.mod + GOPATH-resolvable imports) so we can test the router's
+// graph integration on a one-file fixture.
+func seedGraph(t *testing.T, ctx context.Context, root, cacheDir string) {
+	t.Helper()
+	p, err := proj.Resolve(root, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, p.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	now := time.Now()
+	typeID := "m::p::type::Store"
+	methodID := "m::p::method::(*Store).Search"
+	siblingID := "m::p::method::(*Store).Open"
+	nodes := []store.GraphNodeRow{
+		{ID: typeID, Kind: string(graph.NodeType), Name: "Store", QualifiedName: "Store",
+			PackagePath: "p", FilePath: "main.go", StartLine: 1, EndLine: 5,
+			MetadataJSON: []byte("{}"), ContentHash: "n1"},
+		{ID: methodID, Kind: string(graph.NodeMethod), Name: "Search", QualifiedName: "(*Store).Search",
+			PackagePath: "p", FilePath: "main.go", StartLine: 10, EndLine: 20,
+			MetadataJSON: []byte("{}"), ContentHash: "n2"},
+		{ID: siblingID, Kind: string(graph.NodeMethod), Name: "Open", QualifiedName: "(*Store).Open",
+			PackagePath: "p", FilePath: "main.go", StartLine: 30, EndLine: 40,
+			MetadataJSON: []byte("{}"), ContentHash: "n3"},
+	}
+	if err := st.GraphUpsertNodes(ctx, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	edges := []store.GraphEdgeRow{
+		{ID: "e1", Kind: string(graph.EdgeHasMethod), SrcID: typeID, DstID: methodID,
+			FilePath: "main.go", StartLine: 10, EndLine: 20,
+			MetadataJSON: []byte("{}"), ContentHash: "h1"},
+		{ID: "e2", Kind: string(graph.EdgeHasMethod), SrcID: typeID, DstID: siblingID,
+			FilePath: "main.go", StartLine: 30, EndLine: 40,
+			MetadataJSON: []byte("{}"), ContentHash: "h2"},
+	}
+	if err := st.GraphUpsertEdges(ctx, edges, now); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestContextRouterGraphSymbolLookup(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\ntype Store struct{}\nfunc (s *Store) Search() {}\nfunc (s *Store) Open() {}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	ctx := context.Background()
+	seedGraph(t, ctx, root, cacheDir)
+
+	s := newServer(srv.URL, cacheDir)
+	_, out, err := s.ContextRouter(ctx, ContextInput{
+		Question: "Search",
+		Project:  root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status=%s hint=%s", out.Status, out.Hint)
+	}
+	if out.Graph == nil || len(out.Graph.Nodes) == 0 {
+		t.Fatalf("graph.nodes should be populated; got %+v", out.Graph)
+	}
+
+	var names []string
+	for _, n := range out.Graph.Nodes {
+		names = append(names, n.QualifiedName)
+	}
+	joined := strings.Join(names, ",")
+	for _, want := range []string{"Store", "(*Store).Search", "(*Store).Open"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("graph.nodes should include %q; got %s", want, joined)
+		}
+	}
+	if !strings.Contains(out.Avoid, "Do not grep") {
+		t.Errorf("avoid should say don't grep when graph is indexed: %q", out.Avoid)
 	}
 }
 

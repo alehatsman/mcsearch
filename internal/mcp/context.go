@@ -51,12 +51,15 @@ var validIntents = map[string]struct{}{
 	IntentPackageTopology: {}, IntentEditingContext: {},
 }
 
-// graphDeferredIntents tags intents whose primary leg requires the
-// graph layer that hasn't landed yet. The router still produces
-// useful results via semantic fallback, but `avoid` will mention the
-// limitation so the agent doesn't expect call-graph precision.
+// graphDeferredIntents tags intents whose primary leg requires graph
+// edges the layer 1 extractor doesn't yet emit. Layer 1 ships
+// contains/imports/has_method/has_field/embeds — enough for
+// symbol_lookup, editing_context, architecture, package_topology.
+// callers/callees still need `calls` edges (deferred to a follow-up
+// layer per internal/graph). The router emits an `avoid` line so the
+// agent doesn't trust the symbols list as exhaustive for those.
 var graphDeferredIntents = map[string]struct{}{
-	IntentCallers: {}, IntentCallees: {}, IntentPackageTopology: {},
+	IntentCallers: {}, IntentCallees: {},
 }
 
 // Identifier detection patterns. Conservative — false positives are
@@ -200,7 +203,12 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	}
 
 	// Always emit the graph field (issue requires structural presence).
+	// enrichGraph may replace it with a populated view per intent.
 	out.Graph = &GraphResult{Nodes: []GraphNode{}, Edges: []GraphEdge{}}
+
+	// Load the graph view once per request. Nil view = no graph
+	// indexed; intents that need it will note this in `avoid`.
+	graphView, _ := loadGraphView(ctx, st)
 
 	// Symbol lane — exact identifier lookups. Cheap, no embed required.
 	// Runs whenever the question contains identifier-shaped tokens, even
@@ -229,9 +237,10 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		return nil, out, nil
 	}
 
+	enrichGraph(&out, intent, graphView, out.SemanticHits, out.Symbols)
 	out.SuggestedReads = pickSuggestedReads(intent, out.SemanticHits, out.Symbols, symbolPaths)
 	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols)
-	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols)
+	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil)
 	out.Status = "ok"
 	if embedFailed && out.Hint == "" {
 		out.Hint = "embed offline; results from symbol lane only."
@@ -524,7 +533,7 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit) 
 			if intent == IntentCallees {
 				rel = "callees"
 			}
-			return fmt.Sprintf("Graph layer not available yet — start from %s (%s) and grep for %s.",
+			return fmt.Sprintf("Call-graph edges are not yet extracted — start from %s (%s) and grep for %s.",
 				symbols[0].Path, symbols[0].QualifiedName, rel)
 		}
 	case IntentArchitecture, IntentPackageTopology:
@@ -550,11 +559,17 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit) 
 	return ""
 }
 
-// buildAvoid emits a "what not to do" hint. Strong claims when we have
-// strong signals (exact symbol found → don't grep); softer otherwise.
-func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit) string {
+// buildAvoid emits a "what not to do" hint. Strong claims when we
+// have strong signals (exact symbol found → don't grep); softer
+// otherwise. `graphIndexed` is true when the project has a graph
+// available — `callers`/`callees` still warn because layer 1 doesn't
+// emit `calls` edges, regardless.
+func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndexed bool) string {
 	if _, deferred := graphDeferredIntents[intent]; deferred {
-		return "Do not assume the symbols list is exhaustive — graph extraction is not yet wired in, so call-graph precision is limited."
+		return "Do not trust the symbols list as exhaustive — `calls` edges are not yet extracted, so caller/callee coverage is best-effort. Verify with grep on the symbol name."
+	}
+	if !graphIndexed && graphSupportsIntent(intent) {
+		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch graph index <project>` for richer structural context."
 	}
 	if len(symbols) > 0 && len(semHits) > 0 {
 		return "Do not grep for the identifier; it is already located. Read the suggested ranges instead of opening whole files."
