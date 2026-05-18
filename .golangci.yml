@@ -1,0 +1,96 @@
+version: "2"
+
+run:
+  timeout: 5m
+  tests: false
+
+linters:
+  # Enable bug-catching linters; disable style-pedantry ones.
+  enable:
+    - gosec
+    - errcheck
+    - staticcheck
+    - govet
+    - ineffassign
+    - unused
+    - misspell
+    - unconvert
+    - bodyclose
+    - revive
+    - cyclop
+  disable:
+    - errname
+    - exhaustive
+    - wrapcheck
+    - goconst
+    - gocyclo     # superseded by cyclop; arch-snapshot uses gocyclo standalone for the soft-cap ratchet
+    - gocritic    # mostly style; review process handles ifElseChain / typeSwitchVar etc.
+    - unparam     # flags interface contracts that always return nil err as "problems"
+    - dupl        # over-eager; task dupl gives a better targeted report
+    - prealloc    # micro-optimisation noise; profile-driven not lint-driven
+
+  settings:
+    gosec:
+      severity: "medium"
+      confidence: "medium"
+      excludes:
+        - G104  # errors unhandled
+        - G115  # integer overflow conversion
+        - G204  # subprocess launched with variable
+        - G301  # bad dir perms
+        - G302  # file perms — config/lockfile use 0644 by design
+        - G304  # path from variable — every config-reading codepath
+        - G306  # bad write perms
+
+    cyclop:
+      max-complexity: 35
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: false
+
+    revive:
+      enable-all-rules: false
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: if-return
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+
+    staticcheck:
+      # Keep SA* (real-bug checks); drop QF/ST/S style suggestions.
+      checks: ["all", "-QF*", "-ST1005", "-ST1020", "-S1008", "-S1017", "-S1034"]
+
+  exclusions:
+    rules:
+      # fmt.Fprintf/Fprintln/Fprint to stdout/stderr in cmd/ — best-effort
+      # writes to terminal output; ignoring the error is idiomatic Go CLI code.
+      - path: cmd/
+        linters: [errcheck]
+        text: "Error return value of `fmt\\.F"
+
+      # cyclop: main.go dispatch is intentionally monolithic.
+      - path: cmd/mcsearch/main\.go
+        linters: [cyclop]
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

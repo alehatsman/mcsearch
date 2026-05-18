@@ -1,0 +1,307 @@
+# go-task entry point for mcsearch — https://taskfile.dev
+#
+# Quick reference:
+#   task                  # list available tasks
+#   task install-tools    # install every static-analysis tool the project needs
+#   task ci               # full pre-push gate: build + test + lint + vuln + arch + budget + dupl
+#   task ci:fast          # fast pre-commit gate: vet + fmt (staged) + ai-lint (staged)
+#   task ai-lint          # AI-smell sweep on staged Go files
+#   task build / test / lint / scan
+version: '3'
+
+vars:
+  PKG: ./...
+  BIN: mcsearch
+
+tasks:
+
+  # ---------------------------------------------------------------------------
+  # Default — `task` with no args prints the task list.
+  # ---------------------------------------------------------------------------
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list-all
+    silent: true
+
+  # ---------------------------------------------------------------------------
+  # Tool installation. Idempotent: re-running picks up newer versions.
+  # ---------------------------------------------------------------------------
+  install-tools:
+    desc: Install every static-analysis tool the project depends on
+    cmds:
+      - echo "→ Installing golangci-lint..."
+      - go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest
+      - echo "→ Installing govulncheck..."
+      - go install golang.org/x/vuln/cmd/govulncheck@latest
+      - echo "→ Installing gocyclo..."
+      - go install github.com/fzipp/gocyclo/cmd/gocyclo@latest
+      - echo "→ Installing goda..."
+      - go install github.com/loov/goda@latest
+      - echo "→ Installing dupl..."
+      - go install github.com/mibk/dupl@latest
+      - echo ""
+      - echo "✓ Tools installed. Verify with 'task check-tools'."
+
+  check-tools:
+    desc: Report which static-analysis tools are installed
+    cmds:
+      - |
+        missing=0
+        for tool in golangci-lint govulncheck gocyclo goda dupl; do
+          if command -v "$tool" >/dev/null 2>&1 || [ -x "$(go env GOPATH)/bin/$tool" ]; then
+            printf "  ✓ %s\n" "$tool"
+          else
+            printf "  ✗ %s — MISSING\n" "$tool"
+            missing=$((missing + 1))
+          fi
+        done
+        if [ "$missing" -gt 0 ]; then
+          echo ""
+          echo "$missing tool(s) missing. Run: task install-tools"
+          exit 1
+        fi
+    silent: true
+
+  # ---------------------------------------------------------------------------
+  # Build / install / clean
+  # ---------------------------------------------------------------------------
+  build:
+    desc: Build the mcsearch binary
+    cmds:
+      - go mod download
+      - go build -trimpath -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+
+  install:
+    desc: Build and install mcsearch to ~/.local/bin (atomic rename)
+    vars:
+      INSTALL_PATH: '{{.INSTALL_PATH | default (printf "%s/.local/bin" .HOME)}}'
+    cmds:
+      - task: build
+      - mkdir -p {{.INSTALL_PATH}}
+      - cp {{.BIN}} {{.INSTALL_PATH}}/{{.BIN}}.new
+      - mv -f {{.INSTALL_PATH}}/{{.BIN}}.new {{.INSTALL_PATH}}/{{.BIN}}
+      - echo "✓ Installed {{.INSTALL_PATH}}/{{.BIN}}"
+
+  clean:
+    desc: Remove the built binary
+    cmds:
+      - rm -f {{.BIN}}
+      - echo "✓ Cleaned"
+
+  # ---------------------------------------------------------------------------
+  # Test / format / vet
+  # ---------------------------------------------------------------------------
+  test:
+    desc: Run go test ./...
+    cmds:
+      - go test {{.PKG}}
+
+  test-race:
+    desc: Run go test -race ./...
+    cmds:
+      - go test -race {{.PKG}}
+
+  fmt:
+    desc: Format all Go files with gofmt
+    cmds:
+      - gofmt -w .
+
+  vet:
+    desc: Run go vet ./...
+    cmds:
+      - go vet {{.PKG}}
+
+  # ---------------------------------------------------------------------------
+  # Lint + security + vulnerability scans
+  # ---------------------------------------------------------------------------
+  lint:
+    desc: golangci-lint (includes gosec, staticcheck, cyclop, revive, …)
+    cmds:
+      - golangci-lint run {{.PKG}}
+
+  vuln:
+    desc: govulncheck — scan for known vulnerabilities in dependencies
+    cmds:
+      - govulncheck {{.PKG}}
+
+  scan:
+    desc: Security + vulnerability scan (lint + vuln)
+    deps: [lint, vuln]
+
+  # ---------------------------------------------------------------------------
+  # Architecture / analysis reports
+  # ---------------------------------------------------------------------------
+  arch-snapshot:
+    desc: Regenerate docs-working/ARCH_SNAPSHOT.md (gitignored; local read-only)
+    cmds:
+      - bash ./scripts/arch-snapshot.sh
+
+  budget-status:
+    desc: Show current state of code-quality soft caps (gocyclo + god files)
+    cmds:
+      - bash ./scripts/budget-status.sh
+
+  dupl:
+    desc: 'Code-duplication report (production only). Override threshold with T= (default 100)'
+    vars:
+      T: '{{.T | default "100"}}'
+    cmds:
+      - |
+        dupl -threshold {{.T}} -plumbing . 2>&1 | grep -v "_test.go" | python3 -c '
+        import sys
+        pairs = set()
+        for line in sys.stdin:
+            parts = line.strip().split(": duplicate of ")
+            if len(parts) != 2: continue
+            pairs.add(tuple(sorted(parts)))
+        def n(rng):
+            lo, hi = rng.split(":")[-1].split("-"); return int(hi) - int(lo) + 1
+        ranked = sorted(pairs, key=lambda p: -n(p[0]))
+        print(f"{len(ranked)} production clone pair(s) at threshold {{.T}}")
+        for a, b in ranked:
+            print(f"  {n(a):>3}L  {a}  <-->  {b}")
+        '
+    silent: true
+
+  # ---------------------------------------------------------------------------
+  # AI-smell sweep
+  # ---------------------------------------------------------------------------
+  ai-lint:
+    desc: 'AI-smell sweep on staged Go files (stub panics, agent TODOs, prompt artifacts)'
+    cmds:
+      - bash ./scripts/ai-lint.sh
+
+  ai-lint-all:
+    desc: 'AI-smell sweep on every tracked Go file'
+    cmds:
+      - bash ./scripts/ai-lint.sh --all
+
+  # ---------------------------------------------------------------------------
+  # Fast gate — pre-commit. Cheap checks only (<5s on warm cache).
+  # ---------------------------------------------------------------------------
+  ci:fast:
+    desc: 'Fast pre-commit gate: vet + gofmt (staged) + ai-lint (staged)'
+    cmds:
+      - task: ci-fast:vet
+      - task: ci-fast:fmt
+      - task: ci-fast:ai-lint
+      - echo ""
+      - echo "✓ Fast checks green — full 'task ci' gate runs on push."
+
+  ci-fast:vet:
+    internal: true
+    cmds:
+      - 'echo "[1/3] go vet"'
+      - go vet {{.PKG}}
+
+  ci-fast:fmt:
+    internal: true
+    cmds:
+      - 'echo "[2/3] gofmt (staged Go files)"'
+      - |
+        staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go' || true)
+        if [ -z "$staged" ]; then echo "  (no staged Go files)"; exit 0; fi
+        bad=$(echo "$staged" | xargs gofmt -l 2>/dev/null || true)
+        if [ -n "$bad" ]; then
+          echo "  ✗ gofmt would change:" >&2
+          echo "$bad" | sed 's/^/    /' >&2
+          echo "  fix with: gofmt -w <files>" >&2
+          exit 1
+        fi
+        echo "  ✓ all staged files formatted"
+
+  ci-fast:ai-lint:
+    internal: true
+    cmds:
+      - 'echo "[3/3] ai-lint (staged Go files)"'
+      - bash ./scripts/ai-lint.sh
+
+  # ---------------------------------------------------------------------------
+  # Full CI gate — pre-push. First failure stops the pipeline.
+  # ---------------------------------------------------------------------------
+  ci:
+    desc: 'Full pre-push gate: build + test + lint + vuln + arch + budget + dupl'
+    cmds:
+      - task: ci:build
+      - task: ci:test
+      - task: ci:lint
+      - task: ci:vuln
+      - task: ci:arch
+      - task: ci:budget
+      - task: ci:dupl
+      - echo ""
+      - echo "✓ All checks green — safe to push."
+
+  ci:build:
+    internal: true
+    cmds:
+      - 'echo "[1/7] build"'
+      - go build -trimpath -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+
+  ci:test:
+    internal: true
+    cmds:
+      - 'echo "[2/7] test"'
+      - go test {{.PKG}}
+
+  ci:lint:
+    internal: true
+    cmds:
+      - 'echo "[3/7] golangci-lint"'
+      - golangci-lint run {{.PKG}}
+
+  ci:vuln:
+    internal: true
+    cmds:
+      - 'echo "[4/7] govulncheck"'
+      - govulncheck {{.PKG}}
+
+  ci:arch:
+    internal: true
+    cmds:
+      - 'echo "[5/7] arch-snapshot"'
+      - bash ./scripts/arch-snapshot.sh >/dev/null
+      - |
+        f=docs-working/ARCH_SNAPSHOT.md
+        if [ ! -f "$f" ]; then echo "  (snapshot file missing — skipping summary)"; exit 0; fi
+        echo "  Top packages by LOC:"
+        awk '/^\| `/{print "    " $0}' "$f" | head -5
+        god=$(awk '/^## God files/,/^## [^G]/' "$f" | grep -cE '^[[:space:]]*[0-9]+ ' || true)
+        echo "  God files (>500 LOC, non-test): $god"
+        echo "  Top cyclomatic hotspots:"
+        awk '/^## Cyclomatic hotspots/,/^## [^C]/' "$f" | grep -E '^[[:space:]]*[0-9]+ ' | head -3 | sed 's/^/    /'
+
+  ci:budget:
+    internal: true
+    cmds:
+      - 'echo "[6/7] soft-cap budget"'
+      - bash ./scripts/budget-status.sh | sed 's/^/  /'
+
+  ci:dupl:
+    internal: true
+    silent: true
+    cmds:
+      - 'echo "[7/7] dupl (production-code duplication report)"'
+      - |
+        if ! command -v dupl >/dev/null 2>&1 && ! [ -x "$(go env GOPATH)/bin/dupl" ]; then
+          echo "  dupl not installed — run 'task install-tools'. Skipping."
+          exit 0
+        fi
+        dupl -threshold 100 -plumbing . 2>&1 | grep -v "_test.go" | python3 -c '
+        import sys
+        pairs = set()
+        for line in sys.stdin:
+            parts = line.strip().split(": duplicate of ")
+            if len(parts) == 2:
+                pairs.add(tuple(sorted(parts)))
+        def n(rng):
+            lo, hi = rng.split(":")[-1].split("-"); return int(hi) - int(lo) + 1
+        ranked = sorted(pairs, key=lambda p: -n(p[0]))
+        if not ranked:
+            print("  no production duplication at threshold 100.")
+        else:
+            print(f"  {len(ranked)} production clone pair(s) at threshold 100 (informational):")
+            for a, b in ranked:
+                print(f"    {n(a):>3}L  {a}  <-->  {b}")
+        '
