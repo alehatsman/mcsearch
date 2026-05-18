@@ -464,7 +464,11 @@ func cmdQuery(ctx context.Context, args []string) error {
 		return enc.Encode(hitsToJSON(hits))
 	case "", "text":
 		for i, h := range hits {
-			header := fmt.Sprintf("─── #%d %s:%d-%d  (%s)", i+1, h.Path, h.StartLine, h.EndLine, h.Kind)
+			loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
+			if h.Name != "" {
+				loc = h.Name + "  " + loc
+			}
+			header := fmt.Sprintf("─── #%d %s  (%s)", i+1, loc, h.Kind)
 			if *explain {
 				scores := fmt.Sprintf("sem=%.4f", h.Score)
 				if h.BM25Score > 0 {
@@ -651,19 +655,19 @@ func cmdStatus(ctx context.Context, args []string) error {
 	em := newEmbedClient()
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	if err := em.Health(checkCtx); err != nil {
-		fmt.Printf("embed endpoint: %s   UNREACHABLE (%v)\n", em.BaseURL, err)
+	embedOK := em.Health(checkCtx) == nil
+	if embedOK {
+		fmt.Printf("embed  %s  %s  ok\n", em.BaseURL, em.Model)
 	} else {
-		fmt.Printf("embed endpoint: %s   ok\n", em.BaseURL)
+		fmt.Printf("embed  %s  %s  UNREACHABLE\n", em.BaseURL, em.Model)
 	}
-	fmt.Printf("model: %s\n", em.Model)
-	fmt.Printf("mcsearch version: %s\n", mcp.Version)
+	fmt.Printf("mcsearch %s\n", mcp.Version)
 
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("index dir: %s\n", base)
+
 	if len(rest) == 1 {
 		// Per-project status
 		p, err := proj.Resolve(rest[0], base)
@@ -672,7 +676,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 		}
 		if _, err := os.Stat(p.DBPath); err != nil {
 			if os.IsNotExist(err) {
-				fmt.Printf("project: %s\n  no index — run `mcsearch index %s`\n", p.Root, p.Root)
+				fmt.Printf("\n%s\n  not indexed — run: mcsearch index %s\n", p.Root, p.Root)
 				return nil
 			}
 			return err
@@ -686,20 +690,39 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Printf("project: %s\n", p.Root)
-		fmt.Printf("  chunks: %d  files: %d  dim: %d  last_indexed: %s\n",
-			stats.Chunks, stats.Files, stats.Dim, formatTime(stats.LastIndex))
+		fmt.Printf("\n%s\n", p.Root)
+		fmt.Printf("  %d chunks  %d files  dim=%d\n", stats.Chunks, stats.Files, stats.Dim)
+		if stats.LastIndex.IsZero() {
+			fmt.Println("  last indexed: unknown (run mcsearch index to refresh)")
+		} else if time.Since(stats.LastIndex) > 24*time.Hour {
+			fmt.Printf("  last indexed: %s  ⚠ stale — run: mcsearch index %s\n",
+				relativeTime(stats.LastIndex), p.Root)
+		} else {
+			fmt.Printf("  last indexed: %s\n", relativeTime(stats.LastIndex))
+		}
 		return nil
 	}
-	// All-project summary by scanning index dir
+
+	// All-project summary
 	entries, err := os.ReadDir(base)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Println("no projects indexed yet")
+			fmt.Printf("\nindex dir: %s\nno projects indexed yet\n", base)
 			return nil
 		}
 		return err
 	}
+
+	type row struct {
+		root    string
+		chunks  int
+		files   int
+		last    time.Time
+		corrupt bool
+		empty   bool
+	}
+	var rows []row
+	var empties int
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
@@ -708,28 +731,92 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if _, err := os.Stat(dbPath); err != nil {
 			continue
 		}
-		short := e.Name()
-		if len(short) > 12 {
-			short = short[:12]
-		}
-		st, err := openStore(ctx, dbPath)
+		st, err := store.Open(ctx, dbPath)
 		if err != nil {
-			fmt.Printf("  %s  CORRUPT (%v)\n", short, err)
+			rows = append(rows, row{root: e.Name()[:min(12, len(e.Name()))], corrupt: true})
 			continue
 		}
 		stats, _ := st.Stats(ctx)
+		root, _ := st.ProjectRoot(ctx)
 		st.Close()
-		fmt.Printf("  %s  chunks=%d files=%d dim=%d  last=%s\n",
-			short, stats.Chunks, stats.Files, stats.Dim, formatTime(stats.LastIndex))
+		if stats.Chunks == 0 {
+			empties++
+			continue
+		}
+		if root == "" {
+			root = "? (run mcsearch index <path> to tag)"
+		}
+		rows = append(rows, row{
+			root:   root,
+			chunks: stats.Chunks,
+			files:  stats.Files,
+			last:   stats.LastIndex,
+		})
+	}
+
+	if len(rows) == 0 && empties == 0 {
+		fmt.Printf("\nindex dir: %s\nno projects indexed yet\n", base)
+		return nil
+	}
+
+	// Compute width of the path column for alignment.
+	maxRoot := 0
+	for _, r := range rows {
+		if len(r.root) > maxRoot {
+			maxRoot = len(r.root)
+		}
+	}
+	if maxRoot > 60 {
+		maxRoot = 60
+	}
+
+	fmt.Println()
+	for _, r := range rows {
+		if r.corrupt {
+			fmt.Printf("  %-*s  CORRUPT\n", maxRoot, r.root)
+			continue
+		}
+		var when string
+		switch {
+		case r.last.IsZero():
+			when = "no timestamp"
+		case time.Since(r.last) > 24*time.Hour:
+			when = "⚠ " + relativeTime(r.last)
+		default:
+			when = relativeTime(r.last)
+		}
+		fmt.Printf("  %-*s  %5d chunks  %4d files  %s\n",
+			maxRoot, r.root, r.chunks, r.files, when)
+	}
+	if empties > 0 {
+		noun := "index"
+		if empties != 1 {
+			noun = "indexes"
+		}
+		fmt.Printf("  (%d empty %s skipped)\n", empties, noun)
 	}
 	return nil
 }
 
-func formatTime(t time.Time) string {
+// relativeTime formats a timestamp as a human-friendly relative string
+// ("just now", "5m ago", "2h ago", "3d ago", or a date for old entries).
+func relativeTime(t time.Time) string {
 	if t.IsZero() {
 		return "never"
 	}
-	return t.Format(time.RFC3339)
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	default:
+		return t.Format("2006-01-02")
+	}
 }
 
 // ─── nuke ──────────────────────────────────────────────────────────────────
