@@ -65,6 +65,8 @@ func main() {
 		err = cmdGenerate(ctx, args)
 	case "status":
 		err = cmdStatus(ctx, args)
+	case "env":
+		err = cmdEnv(ctx, args)
 	case "nuke":
 		err = cmdNuke(ctx, args)
 	case "reindex":
@@ -118,6 +120,9 @@ func usage() {
   mcsearch generate <path> <prompt> generate code grounded in the project's
                                     index (RAG: top-k chunks → chat endpoint)
   mcsearch status [<path>]          show endpoint health and project stats
+  mcsearch env                      print effective env-var config with sources
+                                    (--all to include tuning knobs, --doc for
+                                    descriptions, --format=text|json)
   mcsearch nuke   <path>            delete the on-disk index for a project
   mcsearch reindex <path>           drop and re-embed a project from scratch
   mcsearch reindex --all --yes      drop and re-embed every known project
@@ -136,30 +141,11 @@ func usage() {
                                     (--output=<dir> defaults to <path>/.mcsearch/graph)
 
 env:
-  MCSEARCH_EMBED_URL          default http://127.0.0.1:8082
-  MCSEARCH_EMBED_MODEL        default Qwen/Qwen3-Embedding-4B
-  MCSEARCH_EMBED_BATCH        default 32
-  MCSEARCH_EMBED_TIMEOUT      default 60s (Go duration)
-  MCSEARCH_CHAT_URL           default http://127.0.0.1:8081
-  MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
-  MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
-  MCSEARCH_RERANK_URL         unset by default; set to enable reranking
-  MCSEARCH_RERANK_STYLE       "cohere" (default) or "chat" (decoder-style, e.g. Qwen3-Reranker-4B via vLLM)
-  MCSEARCH_RERANK_MODEL       default BAAI/bge-reranker-v2-m3
-  MCSEARCH_RERANK_POOL        default 40 (candidates before rerank; clamped to 1..100)
-  MCSEARCH_RERANK_TIMEOUT     default 5s (Go duration)
-  MCSEARCH_RERANK_CONCURRENCY default 4 (concurrent scoring goroutines, chat style only)
-  MCSEARCH_DISABLE_RERANK     set to 1 to short-circuit rerank even if URL is set
-  MCSEARCH_COMPRESS_URL       unset by default; set to enable context compression for ask/generate
-  MCSEARCH_COMPRESS_MODEL     default: value of MCSEARCH_CHAT_MODEL
-  MCSEARCH_COMPRESS_TIMEOUT   default 30s (Go duration)
-  MCSEARCH_DRAFT_URL          unset by default; set to enable speculative local draft for generate_code
-  MCSEARCH_DRAFT_MODEL        default: value of MCSEARCH_CHAT_MODEL
-  MCSEARCH_DRAFT_TIMEOUT      default 120s (Go duration)
-  MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
-  MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
-  MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg
-  MCSEARCH_MAX_HITS_PER_FILE  max hits per file in search results (0 = no cap)
+  Run `+"`mcsearch env`"+` for the effective configuration. The 5 vars that
+  matter for 80% of setups: MCSEARCH_EMBED_URL, MCSEARCH_EMBED_MODEL,
+  MCSEARCH_INDEX_DIR, MCSEARCH_CHAT_URL, MCSEARCH_CHAT_MODEL.
+  Tuning knobs (timeouts, batch sizes, optional rerank/compress/draft
+  endpoints) — see docs/tuning.md or run `+"`mcsearch env --all --doc`"+`.
 
 flags:
   mcsearch query --rerank=off <path> "..."     skip rerank for this call

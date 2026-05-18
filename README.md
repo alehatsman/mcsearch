@@ -240,27 +240,21 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 
 ## Environment
 
-| Variable                  | Default                            | Meaning                                       |
-| ------------------------- | ---------------------------------- | --------------------------------------------- |
-| `MCSEARCH_EMBED_URL`      | `http://127.0.0.1:8082`            | OpenAI-compatible `/v1/embeddings` base URL.  |
-| `MCSEARCH_EMBED_MODEL`    | `Qwen/Qwen3-Embedding-4B`          | Model name forwarded as `model` field.        |
-| `MCSEARCH_INDEX_DIR`      | `~/.cache/mcsearch`                | Where per-project index files live.           |
-| `MCSEARCH_EMBED_TIMEOUT`  | `60s`                              | HTTP timeout for each embedding request.      |
-| `MCSEARCH_EMBED_BATCH`    | `32`                               | Max chunks per `/v1/embeddings` call.         |
-| `MCSEARCH_DISABLE_VEC_CACHE` | unset                           | Set to `1` to skip the in-RAM vector cache and use the per-row SQL hot path (slower; bounded RAM for very large indexes). |
-| `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
-| `MCSEARCH_MAX_HITS_PER_FILE` | unset (no cap)                  | Set to a positive integer to cap how many search hits come from a single file (promotes result diversity). |
-| `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
-| `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
-| `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
-| `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
-| `MCSEARCH_RERANK_URL`         | unset                              | Base URL of a rerank server. Unset = rerank disabled. |
-| `MCSEARCH_RERANK_STYLE`       | `cohere`                           | Reranker backend: `cohere` (Cohere-shape `/rerank` — TEI, Infinity, vLLM cross-encoder) or `chat` (decoder-style via `/v1/chat/completions` + logprobs — for Qwen3-Reranker-4B on vLLM). |
-| `MCSEARCH_RERANK_MODEL`       | `qwen3-reranker:4b`                | Model name forwarded to the reranker. |
-| `MCSEARCH_RERANK_POOL`        | `40`                               | Fused candidates fed to the reranker. Clamped to `[1, 100]`. Larger = better recall, slower call. |
-| `MCSEARCH_RERANK_TIMEOUT`     | `5s`                               | HTTP timeout for each rerank request. |
-| `MCSEARCH_RERANK_CONCURRENCY` | `4`                                | Parallel scoring calls for the `chat` reranker style. Higher values reduce wall-clock latency on a dedicated GPU (try 8–16 on a 5090). Ignored for `cohere` style. |
-| `MCSEARCH_DISABLE_RERANK`     | unset                              | Set to `1` to short-circuit rerank even when `MCSEARCH_RERANK_URL` is set. For A/B comparison. |
+The five vars most setups touch:
+
+| Variable               | Default                          | Meaning                                                            |
+| ---------------------- | -------------------------------- | ------------------------------------------------------------------ |
+| `MCSEARCH_EMBED_URL`   | `http://127.0.0.1:8082`          | OpenAI-compatible `/v1/embeddings` base URL.                       |
+| `MCSEARCH_EMBED_MODEL` | `Qwen/Qwen3-Embedding-4B`        | Model name forwarded as `model`.                                   |
+| `MCSEARCH_INDEX_DIR`   | `~/.cache/mcsearch`              | Where per-project index files live.                                |
+| `MCSEARCH_CHAT_URL`    | `http://127.0.0.1:8081`          | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate` / `summarize_path`). |
+| `MCSEARCH_CHAT_MODEL`  | `Qwen/Qwen2.5-Coder-7B-Instruct` | Model for the chat leg.                                            |
+
+Run `mcsearch env` to print the effective configuration with sources
+(`env` / `default` / `unset` / `disabled`). Append `--all` to include
+the tuning knobs (batch sizes, HTTP timeouts, rerank/compress/draft
+endpoints, cache toggles) — see [docs/tuning.md](docs/tuning.md) for
+when to touch each one.
 
 ## Storage
 
