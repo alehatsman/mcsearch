@@ -77,17 +77,15 @@ local RTX 5090 via ollama (`ollama pull qwen3-embedding:4b`, then point
 
 ```console
 $ mcsearch status
-embed endpoint: http://127.0.0.1:11434   ok
-model: qwen3-embedding:4b
-mcsearch version: dev
-index dir: /home/aleh/.cache/mcsearch
+embed  http://127.0.0.1:11434  qwen3-embedding:4b  ok
+mcsearch dev
 
 $ mcsearch index ./
 ✓ indexed /home/aleh/projects/mcsearch
-  chunks: 221  files: 21  dim: 2560
+  chunks: 455  files: 32  dim: 2560
 ```
 
-221 chunks across 21 Go files, ~6.6 s on a 5090 (a no-change re-run
+455 chunks across 32 Go files, ~8 s on a 5090 (a no-change re-run
 finishes in ~80 ms thanks to the mtime fast-path).
 
 Now ask in natural language; each query returns the chunk whose meaning
@@ -95,7 +93,7 @@ matches, regardless of whether the words line up:
 
 ```console
 $ mcsearch query -k 1 ./ "where do we debounce filesystem events"
-─── #1 internal/watch/watch.go:128-137  (method_declaration)  score=0.4793
+─── #1 markDirty  internal/watch/watch.go:60-71  (method_declaration)  score=0.5102
 // markDirty resets the debounce timer; on expiry it runs an index pass.
 func (w *Watcher) markDirty() {
     w.mu.Lock()
@@ -124,19 +122,18 @@ var secretPatterns = []*regexp.Regexp{
 
 ```console
 $ mcsearch query -k 1 ./ "function that computes cosine similarity"
-─── #1 internal/store/store.go:328-417  (method_declaration)  score=0.4146
-// Search returns the top-k chunks by cosine similarity to query.
-//
-// Hot path scores against the in-RAM vector cache (a single flat
-// []float32 slab plus precomputed |v| norms) and then issues exactly
-// one SELECT to fetch path/kind/line/content for the top-k IDs.
-// …
-func (s *Store) Search(ctx context.Context, query []float32, k int) ([]Hit, error) {
+─── #1 Search  internal/store/store.go:532-540  (method_declaration)  score=0.5024
+// Search returns the top-k chunks ranked by hybrid scoring with optional
+// per-file diversity via Options.MaxHitsPerFile.
+func (s *Store) Search(ctx context.Context, queryVec []float32, queryText string, k int) ([]Hit, error) {
+    hits, err := s.searchRaw(ctx, queryVec, queryText, k)
+    …
+}
 ```
 
 ```console
 $ mcsearch query -k 1 ./ "single-flight guard so a second flush waits for the first"
-─── #1 internal/watch/watch_test.go:122-176  (function_declaration)  score=0.4890
+─── #1 TestWatchSingleFlight  internal/watch/watch_test.go:122-176  (function_declaration)  score=0.4890
 // TestWatchSingleFlight verifies that bursts of events while a re-index
 // is in flight do not spawn a second concurrent indexer (which would
 // race on the SQLite writer lock and surface "database is locked"
@@ -199,8 +196,8 @@ One SQLite file per project at
 `$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`. Schema:
 
 ```
-meta(key, value)                                                            -- dim, last_indexed_at
-chunks(id, path, kind, start_line, end_line, content_sha1, content,
+meta(key, value)                                                            -- dim, last_indexed_at, project_root
+chunks(id, path, kind, name, start_line, end_line, content_sha1, content,
        vec BLOB, last_seen_at)                                              -- UNIQUE(path, content_sha1)
 ```
 
@@ -324,14 +321,17 @@ worktree's index from a sibling — chunks are keyed by
 trees rides along for free. Captured live against this repo:
 
 ```console
-$ # main checkout already indexed: 221 chunks.
+$ # main checkout already indexed: 455 chunks.
 $ git worktree add /tmp/mcsearch-feature -B feature/foo
 Preparing worktree (new branch 'feature/foo')
-HEAD is now at bca65ea docs: README demo section with real captured output
+HEAD is now at 24f6497 ux: improve status and query CLI output
 
 $ mcsearch status /tmp/mcsearch-feature
-project: /tmp/mcsearch-feature
-  no index — run `mcsearch index /tmp/mcsearch-feature`
+embed  http://127.0.0.1:11434  qwen3-embedding:4b  ok
+mcsearch dev
+
+/tmp/mcsearch-feature
+  not indexed — run: mcsearch index /tmp/mcsearch-feature
 
 $ mcsearch clone . /tmp/mcsearch-feature
 ✓ cloned /home/aleh/projects/mcsearch → /tmp/mcsearch-feature
@@ -340,8 +340,12 @@ $ mcsearch clone . /tmp/mcsearch-feature
         chunks are re-embedded).
 
 $ mcsearch status /tmp/mcsearch-feature
-project: /tmp/mcsearch-feature
-  chunks: 221  files: 21  dim: 2560  last_indexed: 2026-05-16T18:47:58+02:00
+embed  http://127.0.0.1:11434  qwen3-embedding:4b  ok
+mcsearch dev
+
+/tmp/mcsearch-feature
+  455 chunks  32 files  dim=2560
+  last indexed: just now
 ```
 
 The clone is a `cp` of one SQLite file — ~5 ms in practice. Diverge the
@@ -350,17 +354,17 @@ worktree, then run `mcsearch index` to reconcile:
 ```console
 $ echo 'const FeatureXFlag = true' >> /tmp/mcsearch-feature/internal/index/index.go
 $ mcsearch index -v /tmp/mcsearch-feature
-INFO msg="pruned stale chunks (files removed since last index)" count=5
-INFO msg=indexed chunks_seen=226 files_fast_path=0 embedded=10 pruned=5 skipped=0
+INFO msg="embedding chunks" count=12
+INFO msg=indexed chunks_seen=467 files_fast_path=31 embedded=12 pruned=0 skipped=0
 ✓ indexed /tmp/mcsearch-feature
-  chunks: 226  files: 21  dim: 2560
+  chunks: 467  files: 32  dim: 2560
 ```
 
-`embedded=10` is the new chunks for the one file that changed (a few
-window chunks shift when the file grows). The other 20 files were
-content-sha matched against the cloned index and reused without an
-embedding call — that's the whole point. On a real branch with a few
-edits this turns a multi-minute first index into seconds.
+`embedded=12` is the new chunks for the one file that changed (a few
+window chunks shift when the file grows). The other 31 files were
+skipped via the mtime fast-path without re-reading them — that's the whole
+point. On a real branch with a few edits this turns a multi-minute first
+index into seconds.
 
 The two indexes remain independent after the clone; subsequent
 `mcsearch index` / `mcsearch watch` on each path only touches that

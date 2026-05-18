@@ -19,3 +19,6 @@ coverage.txt
 
 # OS
 .DS_Store
+
+# arch-snapshot output (local read-only, regenerated on demand)
+/docs-working/
