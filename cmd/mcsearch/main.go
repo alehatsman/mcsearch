@@ -132,6 +132,12 @@ env:
   MCSEARCH_RERANK_POOL        default 40 (candidates before rerank; clamped to 1..100)
   MCSEARCH_RERANK_TIMEOUT     default 5s (Go duration)
   MCSEARCH_DISABLE_RERANK     set to 1 to short-circuit rerank even if URL is set
+  MCSEARCH_COMPRESS_URL       unset by default; set to enable context compression for ask/generate
+  MCSEARCH_COMPRESS_MODEL     default: value of MCSEARCH_CHAT_MODEL
+  MCSEARCH_COMPRESS_TIMEOUT   default 30s (Go duration)
+  MCSEARCH_DRAFT_URL          unset by default; set to enable speculative local draft for generate_code
+  MCSEARCH_DRAFT_MODEL        default: value of MCSEARCH_CHAT_MODEL
+  MCSEARCH_DRAFT_TIMEOUT      default 120s (Go duration)
   MCSEARCH_INDEX_DIR          default ~/.cache/mcsearch
   MCSEARCH_DISABLE_VEC_CACHE  set to 1 to skip the in-RAM vector cache
   MCSEARCH_DISABLE_BM25       set to 1 to disable the lexical (BM25) leg
@@ -239,6 +245,43 @@ func newRerankClient() *rerank.Client {
 		timeout = 5 * time.Second
 	}
 	return rerank.New(url, model, timeout)
+}
+
+// newCompressClient returns a chat client aimed at a fast local model
+// that distils retrieved chunks before they enter the chat model's
+// context window. Returns nil when MCSEARCH_COMPRESS_URL is unset,
+// disabling the compression stage (today's default behaviour).
+func newCompressClient() *chat.Client {
+	url := os.Getenv("MCSEARCH_COMPRESS_URL")
+	if url == "" {
+		return nil
+	}
+	model := envOr("MCSEARCH_COMPRESS_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
+	rawTimeout := envOr("MCSEARCH_COMPRESS_TIMEOUT", "30s")
+	timeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_COMPRESS_TIMEOUT=%q is not a Go duration; using 30s\n", rawTimeout)
+		timeout = 30 * time.Second
+	}
+	return chat.New(url, model, timeout)
+}
+
+// newDraftClient returns a chat client for the speculative local draft
+// stage of generate_code. Returns nil when MCSEARCH_DRAFT_URL is unset,
+// leaving generate_code on the standard single-model RAG path.
+func newDraftClient() *chat.Client {
+	url := os.Getenv("MCSEARCH_DRAFT_URL")
+	if url == "" {
+		return nil
+	}
+	model := envOr("MCSEARCH_DRAFT_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
+	rawTimeout := envOr("MCSEARCH_DRAFT_TIMEOUT", "120s")
+	timeout, err := time.ParseDuration(rawTimeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_DRAFT_TIMEOUT=%q is not a Go duration; using 120s\n", rawTimeout)
+		timeout = 120 * time.Second
+	}
+	return chat.New(url, model, timeout)
 }
 
 // rerankPool reads the candidate-pool cap from the environment.
@@ -959,12 +1002,14 @@ func cmdMCP(ctx context.Context, args []string) error {
 		opts.Reranker = rerankClient
 	}
 	srv := &mcp.Server{
-		EmbedClient:  newEmbedClient(),
-		ChatClient:   newChatClient(),
-		RerankClient: rerankClient,
-		IndexDir:     base,
-		StoreOpts:    opts,
-		AskChatModel: os.Getenv("MCSEARCH_ASK_MODEL"),
+		EmbedClient:    newEmbedClient(),
+		ChatClient:     newChatClient(),
+		RerankClient:   rerankClient,
+		CompressClient: newCompressClient(),
+		DraftClient:    newDraftClient(),
+		IndexDir:       base,
+		StoreOpts:      opts,
+		AskChatModel:   os.Getenv("MCSEARCH_ASK_MODEL"),
 	}
 	return srv.RunStdio(ctx)
 }

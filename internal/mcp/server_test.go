@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/index"
@@ -393,6 +394,278 @@ func TestStatusOmitsRerankWhenUnwired(t *testing.T) {
 		t.Errorf("rerank fields should be zero when RerankClient is nil; got endpoint=%q model=%q reachable=%v",
 			out.RerankEndpoint, out.RerankModel, out.RerankReachable)
 	}
+}
+
+// fakeChat returns a test server that always responds with the given body
+// as the assistant completion content.
+func fakeChat(t *testing.T, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": body}, "finish_reason": "stop"},
+			},
+			"model": "fake-chat",
+		})
+	}))
+}
+
+// fakeCapturingChat is like fakeChat but also sends every user-role message
+// content it receives into the returned channel (buffered 16). Useful for
+// asserting which context text was injected into the chat request.
+func fakeCapturingChat(t *testing.T, body string) (*httptest.Server, <-chan string) {
+	t.Helper()
+	ch := make(chan string, 16)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		for _, m := range req.Messages {
+			if m.Role == "user" {
+				ch <- m.Content
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": body}, "finish_reason": "stop"},
+			},
+			"model": "fake-chat",
+		})
+	}))
+	return srv, ch
+}
+
+func TestCompressClientUsesDistilledContext(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	compressSrv := fakeChat(t, "Greet is defined at main.go:3. Returns a greeting string.")
+	defer compressSrv.Close()
+
+	chatSrv, userMsgCh := fakeCapturingChat(t, "the answer")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Greet(name string) string { return \"hi \" + name }\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient:    embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:     chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		CompressClient: chat.New(compressSrv.URL, "fake-compress", 10*time.Second),
+		IndexDir:       cacheDir,
+	}
+
+	_, out, err := s.ask(context.Background(), nil, AskInput{
+		Prompt: "what does Greet do?", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q, want ok (hint: %q)", out.Status, out.Hint)
+	}
+	select {
+	case userMsg := <-userMsgCh:
+		if !strings.Contains(userMsg, "DISTILLED CONTEXT") {
+			t.Errorf("chat received raw context instead of distilled; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
+		}
+		if strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
+			t.Error("chat received raw formatContext header — compression did not replace it")
+		}
+	default:
+		t.Fatal("chat server received no request")
+	}
+}
+
+func TestCompressClientFallsBackOnFailure(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	chatSrv, userMsgCh := fakeCapturingChat(t, "answer")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Bye() {}\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient: embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:  chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		// Dead endpoint → compressHits will error, falling back to raw context.
+		CompressClient: chat.New("http://127.0.0.1:1", "dead", 200*time.Millisecond),
+		IndexDir:       cacheDir,
+	}
+
+	_, out, err := s.ask(context.Background(), nil, AskInput{
+		Prompt: "what is Bye?", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("compress fallback failed: status = %q, hint: %q", out.Status, out.Hint)
+	}
+	select {
+	case userMsg := <-userMsgCh:
+		if !strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
+			t.Errorf("expected raw context fallback; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
+		}
+	default:
+		t.Fatal("chat server received no request on compress fallback")
+	}
+}
+
+func TestDraftClientPopulatesDraft(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	const draftContent = "```go\nfunc Foo() {} // draft\n```"
+	const finalContent = "```go\nfunc Foo() {} // refined\n```"
+
+	draftSrv := fakeChat(t, draftContent)
+	defer draftSrv.Close()
+	chatSrv := fakeChat(t, finalContent)
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "foo.go"), "package main\n\nfunc Foo() {}\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient: embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:  chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		DraftClient: chat.New(draftSrv.URL, "fake-draft", 10*time.Second),
+		IndexDir:    cacheDir,
+	}
+
+	_, out, err := s.generate(context.Background(), nil, GenerateInput{
+		Prompt: "write a Foo variant", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q, want ok (hint: %q)", out.Status, out.Hint)
+	}
+	if out.Draft != draftContent {
+		t.Errorf("Draft = %q, want %q", out.Draft, draftContent)
+	}
+	if out.Content != finalContent {
+		t.Errorf("Content = %q, want %q", out.Content, finalContent)
+	}
+	if out.DraftModel == "" {
+		t.Error("DraftModel should be set when draft succeeds")
+	}
+}
+
+func TestDraftClientFallsBackOnFailure(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	chatSrv := fakeChat(t, "direct answer")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "bar.go"), "package main\n\nfunc Bar() {}\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient: embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:  chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		DraftClient: chat.New("http://127.0.0.1:1", "dead", 200*time.Millisecond),
+		IndexDir:    cacheDir,
+	}
+
+	_, out, err := s.generate(context.Background(), nil, GenerateInput{
+		Prompt: "write a Bar variant", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("draft fallback failed: status = %q, hint: %q", out.Status, out.Hint)
+	}
+	if out.Draft != "" {
+		t.Errorf("Draft should be empty on draft failure; got %q", out.Draft)
+	}
+	if out.Content != "direct answer" {
+		t.Errorf("Content = %q, want %q", out.Content, "direct answer")
+	}
+}
+
+func TestStatusReportsCompressAndDraftEndpoints(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	compressSrv := fakeChat(t, "summary")
+	defer compressSrv.Close()
+	draftSrv := fakeChat(t, "draft code")
+	defer draftSrv.Close()
+
+	s := &Server{
+		EmbedClient:    embed.New(embedSrv.URL, "fake-embed", 16, 5*time.Second),
+		CompressClient: chat.New(compressSrv.URL, "fake-compress", 5*time.Second),
+		DraftClient:    chat.New(draftSrv.URL, "fake-draft", 5*time.Second),
+		IndexDir:       t.TempDir(),
+	}
+	_, out, _ := s.status(context.Background(), nil, StatusInput{})
+
+	if out.CompressEndpoint != compressSrv.URL {
+		t.Errorf("CompressEndpoint = %q, want %q", out.CompressEndpoint, compressSrv.URL)
+	}
+	if out.CompressModel != "fake-compress" {
+		t.Errorf("CompressModel = %q, want fake-compress", out.CompressModel)
+	}
+	if !out.CompressReachable {
+		t.Error("CompressReachable = false, want true")
+	}
+	if out.DraftEndpoint != draftSrv.URL {
+		t.Errorf("DraftEndpoint = %q, want %q", out.DraftEndpoint, draftSrv.URL)
+	}
+	if out.DraftModel != "fake-draft" {
+		t.Errorf("DraftModel = %q, want fake-draft", out.DraftModel)
+	}
+	if !out.DraftReachable {
+		t.Error("DraftReachable = false, want true")
+	}
+}
+
+func TestStatusOmitsCompressAndDraftWhenUnwired(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	s := newServer(srv.URL, t.TempDir())
+
+	_, out, _ := s.status(context.Background(), nil, StatusInput{})
+	if out.CompressEndpoint != "" || out.CompressModel != "" || out.CompressReachable {
+		t.Errorf("compress fields should be zero when CompressClient is nil; got endpoint=%q model=%q reachable=%v",
+			out.CompressEndpoint, out.CompressModel, out.CompressReachable)
+	}
+	if out.DraftEndpoint != "" || out.DraftModel != "" || out.DraftReachable {
+		t.Errorf("draft fields should be zero when DraftClient is nil; got endpoint=%q model=%q reachable=%v",
+			out.DraftEndpoint, out.DraftModel, out.DraftReachable)
+	}
+}
+
+// clamp returns n if n < max, else max. Used in test error messages to
+// truncate long strings without importing min from math.
+func clamp(max, n int) int {
+	if n < max {
+		return n
+	}
+	return max
 }
 
 func itoa(i int) string {

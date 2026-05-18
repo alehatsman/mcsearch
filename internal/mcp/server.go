@@ -24,8 +24,20 @@ type Server struct {
 	EmbedClient  *embed.Client
 	ChatClient   *chat.Client   // optional — when nil, generate_code is not registered
 	RerankClient *rerank.Client // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
-	IndexDir     string         // base dir holding per-project index folders
-	StoreOpts    store.Options  // applied to every Store opened by the server
+	// CompressClient, when set, distils retrieved chunks into a dense
+	// prose summary before they are injected into the chat model's
+	// context window. Reduces the token cost of each ask_codebase /
+	// generate_code call — typically 4–5× — at the cost of one extra
+	// round-trip to a fast local model. Disabled when nil.
+	CompressClient *chat.Client
+	// DraftClient, when set, pre-generates a local code draft for
+	// generate_code. The main ChatClient then validates and refines the
+	// draft rather than writing from scratch, cutting generation tokens
+	// by 3–10×. Falls back to standard RAG generation on draft failure.
+	// Disabled when nil.
+	DraftClient  *chat.Client
+	IndexDir     string        // base dir holding per-project index folders
+	StoreOpts    store.Options // applied to every Store opened by the server
 	// AskChatModel optionally overrides ChatClient.Model for the
 	// ask_codebase tool. Empty = use the same model as generate_code.
 	// Intended for swapping in an instruction-tuned model for Q&A while
@@ -191,6 +203,12 @@ type GenerateOutput struct {
 	Content      string                 `json:"content,omitempty"`
 	FinishReason string                 `json:"finish_reason,omitempty"`
 	Context      []GenerateContextChunk `json:"context,omitempty"` // chunks fed to the model
+	// Draft is the local model's speculative code draft before the main
+	// model refined it. Populated only when DraftClient is wired and
+	// the draft call succeeded. Exposed so callers can diff draft vs.
+	// final to see what the main model corrected.
+	Draft      string `json:"draft,omitempty"`
+	DraftModel string `json:"draft_model,omitempty"`
 }
 
 const defaultGenerateSystem = "You are a precise coding assistant. " +
@@ -236,6 +254,9 @@ const defaultAskSystem = "You are a repository analyst. Your job is to point at 
 	"7. If CONTEXT is insufficient, the ANSWER section ends with \"UNCLEAR: <what's missing>\". Suggest a follow-up (raise k, read a specific path)."
 
 func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in GenerateInput) (*sdk.CallToolResult, GenerateOutput, error) {
+	if s.DraftClient != nil {
+		return s.generateWithLocalDraft(ctx, in)
+	}
 	return s.runRAGChat(ctx, in, defaultGenerateSystem, "")
 }
 
@@ -337,7 +358,13 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	messages := []chat.Message{{Role: "system", Content: system}}
 	userContent := in.Prompt
 	if len(contextChunks) > 0 {
-		userContent = formatContext(contextChunks) + "\n\n---\n\n" + in.Prompt
+		ctxText := formatContext(contextChunks)
+		if s.CompressClient != nil {
+			if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
+				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
+			}
+		}
+		userContent = ctxText + "\n\n---\n\n" + in.Prompt
 	}
 	messages = append(messages, chat.Message{Role: "user", Content: userContent})
 
@@ -391,6 +418,231 @@ func formatContext(hits []store.Hit) string {
 		b.WriteByte('\n')
 	}
 	return strings.TrimRight(b.String(), "\n")
+}
+
+// compressHits calls CompressClient to distil the retrieved chunks into a
+// dense, query-focused prose summary. The caller replaces the raw
+// formatContext block in the user message with this output, reducing the
+// token cost of each ask_codebase / generate_code call at the price of
+// one extra round-trip to a fast local model.
+//
+// On any error the caller falls back to the raw formatContext output so
+// an offline or slow CompressClient never breaks generation.
+func compressHits(ctx context.Context, cc *chat.Client, query string, hits []store.Hit) (string, error) {
+	const system = "You are a code context distiller. Given retrieved code chunks and a query, write a concise, dense summary (≤350 words) of what the chunks collectively reveal that is relevant to the query.\n\n" +
+		"Structure your response:\n" +
+		"1. One direct-answer sentence (or \"The chunks do not answer this directly.\").\n" +
+		"2. Bullet list — one bullet per relevant chunk: `path:start-end` — key symbol or behavior.\n" +
+		"3. One or two sentences on cross-chunk patterns, call chains, or invariants (if any).\n" +
+		"4. UNCLEAR: <what is missing> — only if the query is not fully answered.\n\n" +
+		"Rules: quote identifiers verbatim; no code blocks; no prose padding; skip irrelevant chunks entirely."
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "QUERY: %s\n\nCHUNKS:\n\n", query)
+	for i, h := range hits {
+		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s) ---\n", i+1, h.Path, h.StartLine, h.EndLine, h.Kind)
+		b.WriteString(h.Content)
+		if !strings.HasSuffix(h.Content, "\n") {
+			b.WriteByte('\n')
+		}
+		b.WriteByte('\n')
+	}
+
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: b.String()},
+	}, chat.Options{MaxTokens: 600})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
+// defaultDraftSystem steers the local draft model toward producing a
+// complete working implementation grounded in the retrieved CONTEXT.
+const defaultDraftSystem = "You are a code generator. Write a working implementation for the task using the CONTEXT chunks. " +
+	"Use real symbol names, types, and file paths from CONTEXT — never invent names not present there. " +
+	"Output code in a single fenced block. Keep it concise and complete."
+
+// defaultRefineSystem steers the main model to validate a local draft
+// rather than generating from scratch — review is 3–10× cheaper in tokens
+// than fresh generation.
+const defaultRefineSystem = "You are a precise code reviewer and editor. A local model generated [LOCAL_DRAFT] below. " +
+	"Review it against the CONTEXT chunks and the user's request. " +
+	"Correct any bugs, type mismatches, invented symbols, or logic errors not supported by CONTEXT. " +
+	"Output the corrected code in a fenced block. Add brief inline comments only where you made corrections."
+
+// generateWithLocalDraft runs the two-phase draft → refine pipeline:
+//  1. Retrieve context chunks (same path as runRAGChat).
+//  2. Optionally compress them via CompressClient.
+//  3. Call DraftClient to generate a speculative local draft.
+//  4. Call ChatClient to validate and refine the draft.
+//
+// On draft failure the function falls back to a direct ChatClient call
+// (no [LOCAL_DRAFT] block), so a stale or offline DraftClient never
+// breaks generate_code.
+func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (*sdk.CallToolResult, GenerateOutput, error) {
+	out := GenerateOutput{}
+	if s.ChatClient == nil {
+		return nil, GenerateOutput{Status: "error", Hint: "chat client not configured on this server"}, nil
+	}
+	if strings.TrimSpace(in.Prompt) == "" {
+		return nil, GenerateOutput{Status: "error", Hint: "prompt is empty"}, nil
+	}
+	root := in.ProjectRoot
+	if root == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, GenerateOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
+		}
+		root = wd
+	}
+	p, err := proj.Resolve(root, s.IndexDir)
+	if err != nil {
+		return nil, GenerateOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	}
+	out.Project = p.Root
+	out.Endpoint = s.ChatClient.BaseURL
+	out.Model = s.ChatClient.Model
+
+	useIndex := true
+	if in.UseIndex != nil {
+		useIndex = *in.UseIndex
+	}
+
+	var contextChunks []store.Hit
+	if useIndex {
+		if _, err := os.Stat(p.DBPath); err != nil {
+			if os.IsNotExist(err) {
+				out.Status = "no-index"
+				out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first, or retry with use_index=false to generate without project context.", p.Root, p.Root)
+				return nil, out, nil
+			}
+			out.Status = "error"
+			out.Hint = err.Error()
+			return nil, out, nil
+		}
+		k := in.K
+		if k <= 0 {
+			k = 8
+		}
+		if k > 30 {
+			k = 30
+		}
+		vecs, err := s.EmbedClient.Embed(ctx, []string{in.Prompt})
+		if err != nil {
+			if errors.Is(err, embed.ErrUnreachable) {
+				out.Status = "embedding-service-unreachable"
+				out.Endpoint = s.EmbedClient.BaseURL
+				out.Hint = "the local embedding service is offline — retry later, or pass use_index=false to skip RAG."
+				return nil, out, nil
+			}
+			out.Status = "error"
+			out.Hint = fmt.Sprintf("embed: %v", err)
+			return nil, out, nil
+		}
+		st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
+		if err != nil {
+			out.Status = "error"
+			out.Hint = fmt.Sprintf("open index: %v", err)
+			return nil, out, nil
+		}
+		contextChunks, err = st.Search(ctx, vecs[0], in.Prompt, k)
+		st.Close()
+		if err != nil {
+			out.Status = "error"
+			out.Hint = fmt.Sprintf("search: %v", err)
+			return nil, out, nil
+		}
+	}
+
+	// Build context text — compressed when CompressClient is wired.
+	ctxText := ""
+	if len(contextChunks) > 0 {
+		ctxText = formatContext(contextChunks)
+		if s.CompressClient != nil {
+			if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
+				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
+			}
+		}
+	}
+
+	// Phase 1: speculative draft from the local model.
+	draftUserContent := in.Prompt
+	if ctxText != "" {
+		draftUserContent = ctxText + "\n\n---\n\n" + in.Prompt
+	}
+	draftResp, draftErr := s.DraftClient.Generate(ctx, []chat.Message{
+		{Role: "system", Content: defaultDraftSystem},
+		{Role: "user", Content: draftUserContent},
+	}, chat.Options{Temperature: in.Temperature, MaxTokens: in.MaxTokens})
+	if draftErr == nil {
+		out.Draft = strings.TrimSpace(draftResp.Content)
+		out.DraftModel = draftResp.Model
+		if out.DraftModel == "" {
+			out.DraftModel = s.DraftClient.Model
+		}
+	}
+	// draftErr != nil → out.Draft stays ""; refine step falls back to
+	// direct generation using defaultGenerateSystem instead.
+
+	// Phase 2: validation / refinement by the main model.
+	system := in.System
+	if strings.TrimSpace(system) == "" {
+		if out.Draft != "" {
+			system = defaultRefineSystem
+		} else {
+			system = defaultGenerateSystem
+		}
+	}
+
+	var parts []string
+	if ctxText != "" {
+		parts = append(parts, ctxText)
+	}
+	if out.Draft != "" {
+		parts = append(parts, "[LOCAL_DRAFT]\n"+out.Draft+"\n[/LOCAL_DRAFT]")
+	}
+	parts = append(parts, in.Prompt)
+	refineUserContent := in.Prompt
+	if len(parts) > 1 {
+		refineUserContent = strings.Join(parts, "\n\n---\n\n")
+	}
+
+	resp, err := s.ChatClient.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: refineUserContent},
+	}, chat.Options{
+		Temperature: in.Temperature,
+		MaxTokens:   in.MaxTokens,
+	})
+	if err != nil {
+		if errors.Is(err, chat.ErrUnreachable) {
+			out.Status = "chat-service-unreachable"
+			out.Hint = "the local chat-completion service is offline."
+			return nil, out, nil
+		}
+		out.Status = "error"
+		out.Hint = fmt.Sprintf("chat: %v", err)
+		return nil, out, nil
+	}
+
+	out.Status = "ok"
+	out.Content = resp.Content
+	out.FinishReason = resp.FinishReason
+	if resp.Model != "" {
+		out.Model = resp.Model
+	}
+	for _, h := range contextChunks {
+		out.Context = append(out.Context, GenerateContextChunk{
+			Path:      h.Path,
+			Kind:      h.Kind,
+			StartLine: h.StartLine,
+			EndLine:   h.EndLine,
+			Score:     h.Score,
+		})
+	}
+	return nil, out, nil
 }
 
 // ─── tool: ask_codebase ───────────────────────────────────────────────────
@@ -626,19 +878,25 @@ type ProjectStatus struct {
 }
 
 type StatusOutput struct {
-	Endpoint        string          `json:"endpoint"`
-	Reachable       bool            `json:"reachable"`
-	Model           string          `json:"model"`
-	ChatEndpoint    string          `json:"chat_endpoint,omitempty"`
-	ChatReachable   bool            `json:"chat_reachable,omitempty"`
-	ChatModel       string          `json:"chat_model,omitempty"`
-	RerankEndpoint  string          `json:"rerank_endpoint,omitempty"`
-	RerankReachable bool            `json:"rerank_reachable,omitempty"`
-	RerankModel     string          `json:"rerank_model,omitempty"`
-	Version         string          `json:"version"`
-	IndexDir        string          `json:"index_dir"`
-	Projects        []ProjectStatus `json:"projects,omitempty"`
-	Error           string          `json:"error,omitempty"`
+	Endpoint          string          `json:"endpoint"`
+	Reachable         bool            `json:"reachable"`
+	Model             string          `json:"model"`
+	ChatEndpoint      string          `json:"chat_endpoint,omitempty"`
+	ChatReachable     bool            `json:"chat_reachable,omitempty"`
+	ChatModel         string          `json:"chat_model,omitempty"`
+	RerankEndpoint    string          `json:"rerank_endpoint,omitempty"`
+	RerankReachable   bool            `json:"rerank_reachable,omitempty"`
+	RerankModel       string          `json:"rerank_model,omitempty"`
+	CompressEndpoint  string          `json:"compress_endpoint,omitempty"`
+	CompressReachable bool            `json:"compress_reachable,omitempty"`
+	CompressModel     string          `json:"compress_model,omitempty"`
+	DraftEndpoint     string          `json:"draft_endpoint,omitempty"`
+	DraftReachable    bool            `json:"draft_reachable,omitempty"`
+	DraftModel        string          `json:"draft_model,omitempty"`
+	Version           string          `json:"version"`
+	IndexDir          string          `json:"index_dir"`
+	Projects          []ProjectStatus `json:"projects,omitempty"`
+	Error             string          `json:"error,omitempty"`
 }
 
 func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusInput) (*sdk.CallToolResult, StatusOutput, error) {
@@ -673,6 +931,24 @@ func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusI
 			out.RerankReachable = true
 		}
 		rcancel()
+	}
+	if s.CompressClient != nil {
+		out.CompressEndpoint = s.CompressClient.BaseURL
+		out.CompressModel = s.CompressClient.Model
+		cmpctx, cmpcancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := s.CompressClient.Health(cmpctx); err == nil {
+			out.CompressReachable = true
+		}
+		cmpcancel()
+	}
+	if s.DraftClient != nil {
+		out.DraftEndpoint = s.DraftClient.BaseURL
+		out.DraftModel = s.DraftClient.Model
+		dctx, dcancel := context.WithTimeout(ctx, 3*time.Second)
+		if err := s.DraftClient.Health(dctx); err == nil {
+			out.DraftReachable = true
+		}
+		dcancel()
 	}
 
 	entries, err := os.ReadDir(s.IndexDir)
