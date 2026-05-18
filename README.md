@@ -1,14 +1,16 @@
 # mcsearch
 
-Claude's built-in tools (`grep`, `Read`, `Glob`) work well on small projects.
-On a large codebase they get slow, keyword-only, and context-hungry — you
-spend tokens reading files just to orient, and "how does auth work?" finds
-nothing because those words don't appear in the source.
+mcsearch — a local code-search MCP server for Claude (and a CLI).
 
-mcsearch fixes that. It pre-indexes your project into a local SQLite vector
-store and exposes the index to Claude as an MCP server, so the agent can ask
-conceptual questions and get back the exact function, type, or doc block that
-answers them — without reading every file first.
+It pre-indexes a project into a SQLite vector store and exposes it to Claude over MCP, so the agent can ask conceptual
+   questions ("where is filesystem event debouncing handled?") and get back the exact function/type/doc block — instead
+  of grepping and reading files to orient.
+
+  How it works:
+  - Tree-sitter parses source into named chunks (functions, methods, types).
+  - Each chunk is embedded via a self-hosted /v1/embeddings endpoint (ollama / vLLM / TEI, local or SSH-tunneled).
+  Source never leaves your machine.
+  - Retrieval fuses cosine similarity + BM25 via RRF, with optional cross-encoder rerank.
 
 ```console
 $ mcsearch query ./ "where is filesystem event debouncing handled"
