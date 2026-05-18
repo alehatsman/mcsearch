@@ -1,25 +1,41 @@
 # mcsearch
 
-Local code-intelligence MCP server for Claude Code. Indexes a project
-on disk, embeds chunks against a self-hosted OpenAI-compatible
-`/v1/embeddings` endpoint (vLLM, TEI, or ollama — local GPU or
-SSH-tunneled to a remote host), and exposes a small toolkit so the agent
-can retrieve, reason about, and generate code grounded in real symbols
-and paths from your project:
+Claude's built-in tools (`grep`, `Read`, `Glob`) work well on small projects.
+On a large codebase they get slow, keyword-only, and context-hungry — you
+spend tokens reading files just to orient, and "how does auth work?" finds
+nothing because those words don't appear in the source.
 
-- `semantic_search` — hybrid retrieval (cosine + BM25 + optional cross-encoder rerank). Supports `exclude` path-prefix filter and `k` up to 30.
-- `find_symbol` — exact identifier lookup by name (SQL, no embedding). Fast zero-latency lookups for known symbol names.
-- `related_chunks` — vector neighbours of a known chunk at `path:start_line`. Finds semantically related code without a query string.
-- `summarize_path` — one-shot file-or-range gist; no retrieval, just sends the slice to the chat model.
-- `mcsearch_status` — endpoint health (embed / chat / rerank) and the list of indexed projects.
+mcsearch fixes that. It pre-indexes your project into a local SQLite vector
+store and exposes the index to Claude as an MCP server, so the agent can ask
+conceptual questions and get back the exact function, type, or doc block that
+answers them — without reading every file first.
 
-`semantic_search`, `find_symbol`, `related_chunks`, and `mcsearch_status` are always available. `summarize_path`
-registers only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
-server. See the [MCP tools](#mcp-tools) section at the end for the full
-input/output contract.
+```console
+$ mcsearch query ./ "where is filesystem event debouncing handled"
+─── #1 markDirty  internal/watch/watch.go:60-71  (method_declaration)
+// markDirty resets the debounce timer; on expiry it runs an index pass.
+func (w *Watcher) markDirty() { … }
+```
 
-Source code never leaves the calling machine — only chunk text crosses
-the wire to the embedding / chat endpoints, which you control.
+**How it works:** tree-sitter parses your source into named chunks
+(functions, methods, types, classes). Each chunk is embedded via a
+self-hosted `/v1/embeddings` endpoint you control — a local GPU running
+ollama, vLLM, or TEI; or an SSH-tunneled remote. At query time, cosine
+similarity and BM25 are fused via RRF, then optionally reranked by a
+cross-encoder. Source code never leaves your machine.
+
+**MCP tools exposed to Claude:**
+
+- `semantic_search` — ask in natural language; returns ranked chunks. Hybrid cosine + BM25 + optional rerank. Supports `exclude` path filter and `k` up to 30.
+- `find_symbol` — exact identifier lookup by name (SQL, no embedding). Use when you already know the function or type name.
+- `related_chunks` — vector neighbours of a known chunk at `path:start_line`. Explore the neighbourhood of a function without a query string.
+- `summarize_path` — one-shot file-or-range gist sent directly to the chat model. No retrieval.
+- `mcsearch_status` — endpoint health (embed / chat / rerank) and indexed project list.
+
+`semantic_search`, `find_symbol`, `related_chunks`, and `mcsearch_status` are
+always available. `summarize_path` registers only when `MCSEARCH_CHAT_URL`
+points at a live `/v1/chat/completions` server. See [MCP tools](#mcp-tools)
+for the full input/output contract.
 
 ## Install
 
