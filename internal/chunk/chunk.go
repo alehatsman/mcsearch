@@ -48,6 +48,26 @@ const (
 	KindChunkSummary = "chunk_summary"
 )
 
+// LineCount returns the number of lines in data. A trailing newline is
+// treated as a line terminator, not the start of an empty line, so a
+// typical POSIX file ending in '\n' reports the same count as an editor
+// would show.
+func LineCount(data []byte) int {
+	if len(data) == 0 {
+		return 0
+	}
+	n := 1
+	for _, b := range data {
+		if b == '\n' {
+			n++
+		}
+	}
+	if data[len(data)-1] == '\n' {
+		n--
+	}
+	return n
+}
+
 // Chunk is one retrievable slice of one file.
 type Chunk struct {
 	Path      string // relative to project root

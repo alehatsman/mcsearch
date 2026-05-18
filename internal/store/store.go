@@ -586,7 +586,7 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 		if len(semScores) > k {
 			semScores = semScores[:k]
 		}
-		return s.fetchHits(ctx, semScores, nil, nil, nil, nil)
+		return s.fetchHits(ctx, semScores, scoreContext{})
 	}
 
 	// Pull more candidates per leg than the final k so fusion has
@@ -650,7 +650,7 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 		reranked, rerankScore, err := s.rerank(ctx, queryText, fused, k)
 		switch {
 		case err == nil:
-			return s.fetchHits(ctx, reranked, semCosine, bm25Score, rrf, rerankScore)
+			return s.fetchHits(ctx, reranked, scoreContext{semCosine: semCosine, bm25Score: bm25Score, rrfScore: rrf, rerankScore: rerankScore})
 		case errors.Is(err, rerank.ErrUnreachable):
 			// fall through to non-reranked path
 		default:
@@ -661,7 +661,7 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 	if len(fused) > k {
 		fused = fused[:k]
 	}
-	return s.fetchHits(ctx, fused, semCosine, bm25Score, nil, nil)
+	return s.fetchHits(ctx, fused, scoreContext{semCosine: semCosine, bm25Score: bm25Score})
 }
 
 // inPlaceholders returns a comma-separated list of n SQL "?" bind vars,
@@ -888,24 +888,28 @@ func buildFTSQuery(q string) string {
 	return strings.Join(toks, " OR ")
 }
 
-// fetchHits issues one SELECT to get content for the supplied
-// (ordered) scored IDs, then returns them as Hits with their scores
-// joined back in.
-//
-//   - semCosine / bm25Score: nil for semantic-only mode.
-//   - rrfScore: non-nil only on the reranked path, where `ranked[i].score`
-//     carries the rerank score instead of the RRF score. When nil and
-//     semCosine is non-nil, fetchHits falls back to using ranked[i].score
-//     as the RRF score (today's pre-rerank hybrid behaviour).
-//   - rerankScore: non-nil only on the reranked path; populates
-//     Hit.RerankScore.
-func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25Score, rrfScore, rerankScore map[int64]float32) ([]Hit, error) {
+// scoreContext carries the per-id score maps produced by the hybrid /
+// reranked search pipeline. All fields are optional (nil = not available).
+type scoreContext struct {
+	semCosine   map[int64]float32 // raw cosine scores from the semantic leg
+	bm25Score   map[int64]float32 // BM25 scores from the FTS leg
+	rrfScore    map[int64]float32 // RRF fusion scores (non-nil only on reranked path)
+	rerankScore map[int64]float32 // cross-encoder scores (non-nil only on reranked path)
+}
+
+// fetchHits issues one SELECT to get content for the ranked IDs, then
+// assembles Hit values with scores from sc.
+//   - sc.semCosine / sc.bm25Score: nil in semantic-only mode.
+//   - sc.rrfScore: non-nil on the reranked path; ranked[i].score is the
+//     rerank score in that case, so RRFScore must come from the map.
+//   - sc.rerankScore: non-nil on the reranked path; populates Hit.RerankScore.
+func (s *Store) fetchHits(ctx context.Context, ranked []scored, sc scoreContext) ([]Hit, error) {
 	if len(ranked) == 0 {
 		return nil, nil
 	}
 	idArgs := make([]any, len(ranked))
-	for i, sc := range ranked {
-		idArgs[i] = sc.id
+	for i, r := range ranked {
+		idArgs[i] = r.id
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, path, kind, name, start_line, end_line, content FROM chunks WHERE id IN (`+inPlaceholders(len(idArgs))+`)`,
@@ -927,33 +931,26 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, semCosine, bm25S
 		return nil, err
 	}
 	out := make([]Hit, 0, len(ranked))
-	for _, sc := range ranked {
-		h, ok := byID[sc.id]
+	for _, r := range ranked {
+		h, ok := byID[r.id]
 		if !ok {
 			continue
 		}
-		// Score is always the cosine (what humans read). RRFScore /
-		// BM25Score / RerankScore are filled in when hybrid (and
-		// possibly reranked) mode produced them.
-		if semCosine != nil {
-			if c, ok := semCosine[sc.id]; ok {
-				h.Score = c
-			}
-			if rrfScore != nil {
-				// Reranked path: ranked[i].score is the rerank score, so
-				// RRFScore must come from the explicit map.
-				h.RRFScore = rrfScore[sc.id]
+		if sc.semCosine != nil {
+			h.Score = sc.semCosine[r.id]
+			if sc.rrfScore != nil {
+				h.RRFScore = sc.rrfScore[r.id]
 			} else {
-				h.RRFScore = sc.score
+				h.RRFScore = r.score
 			}
 		} else {
-			h.Score = sc.score
+			h.Score = r.score
 		}
-		if bm25Score != nil {
-			h.BM25Score = bm25Score[sc.id]
+		if sc.bm25Score != nil {
+			h.BM25Score = sc.bm25Score[r.id]
 		}
-		if rerankScore != nil {
-			h.RerankScore = rerankScore[sc.id]
+		if sc.rerankScore != nil {
+			h.RerankScore = sc.rerankScore[r.id]
 		}
 		out = append(out, h)
 	}
@@ -1045,7 +1042,7 @@ func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k
 	if len(scores) > k {
 		scores = scores[:k]
 	}
-	return s.fetchHits(ctx, scores, nil, nil, nil, nil)
+	return s.fetchHits(ctx, scores, scoreContext{})
 }
 
 // ensureCache lazily loads (id, vec) for every chunk into a flat

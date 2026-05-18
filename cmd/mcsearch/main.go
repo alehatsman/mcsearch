@@ -279,31 +279,27 @@ func newRerankClient() rerank.HealthChecker {
 	return rerank.New(url, model, timeout)
 }
 
-// newCompressClient returns a chat client aimed at a fast local model
-// that distils retrieved chunks before they enter the chat model's
-// context window. Returns nil when MCSEARCH_COMPRESS_URL is unset,
-// disabling the compression stage (today's default behaviour).
-func newCompressClient() *chat.Client {
-	url := os.Getenv("MCSEARCH_COMPRESS_URL")
+// chatClientFromEnv creates a *chat.Client from environment variables.
+// Returns nil if urlEnv is unset (opt-in feature). modelFallback is used
+// when modelEnv is also unset.
+func chatClientFromEnv(urlEnv, modelEnv, timeoutEnv, modelFallback string, defTimeout time.Duration) *chat.Client {
+	url := os.Getenv(urlEnv)
 	if url == "" {
 		return nil
 	}
-	model := envOr("MCSEARCH_COMPRESS_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
-	timeout := parseDuration("MCSEARCH_COMPRESS_TIMEOUT", envOr("MCSEARCH_COMPRESS_TIMEOUT", "30s"), 30*time.Second)
+	model := envOr(modelEnv, modelFallback)
+	timeout := parseDuration(timeoutEnv, envOr(timeoutEnv, defTimeout.String()), defTimeout)
 	return chat.New(url, model, timeout)
 }
 
-// newDraftClient returns a chat client for the speculative local draft
-// stage of generate_code. Returns nil when MCSEARCH_DRAFT_URL is unset,
-// leaving generate_code on the standard single-model RAG path.
+func newCompressClient() *chat.Client {
+	return chatClientFromEnv("MCSEARCH_COMPRESS_URL", "MCSEARCH_COMPRESS_MODEL", "MCSEARCH_COMPRESS_TIMEOUT",
+		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 30*time.Second)
+}
+
 func newDraftClient() *chat.Client {
-	url := os.Getenv("MCSEARCH_DRAFT_URL")
-	if url == "" {
-		return nil
-	}
-	model := envOr("MCSEARCH_DRAFT_MODEL", envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"))
-	timeout := parseDuration("MCSEARCH_DRAFT_TIMEOUT", envOr("MCSEARCH_DRAFT_TIMEOUT", "120s"), 120*time.Second)
-	return chat.New(url, model, timeout)
+	return chatClientFromEnv("MCSEARCH_DRAFT_URL", "MCSEARCH_DRAFT_MODEL", "MCSEARCH_DRAFT_TIMEOUT",
+		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
 }
 
 // rerankPool reads the candidate-pool cap from the environment.

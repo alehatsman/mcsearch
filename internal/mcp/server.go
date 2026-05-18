@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/chat"
+	"github.com/alehatsman/mcsearch/internal/chunk"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/proj"
 	"github.com/alehatsman/mcsearch/internal/rerank"
@@ -68,22 +69,33 @@ type SearchOutput struct {
 	Hits     []SearchHit `json:"hits,omitempty"`
 }
 
-func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchInput) (*sdk.CallToolResult, SearchOutput, error) {
-	out := SearchOutput{}
-	if strings.TrimSpace(in.Query) == "" {
-		return nil, SearchOutput{Status: "error", Hint: "query is empty — pass a natural-language description or code fragment"}, nil
-	}
-	root := in.ProjectRoot
+// resolveProject canonicalizes projectRoot (falling back to cwd) and
+// resolves it to a Project. On failure it returns a non-empty hint that
+// callers can surface as a Status:"error" response.
+func (s *Server) resolveProject(projectRoot string) (*proj.Project, string) {
+	root := projectRoot
 	if root == "" {
 		wd, err := os.Getwd()
 		if err != nil {
-			return nil, SearchOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
+			return nil, "could not determine project root; pass project_root explicitly"
 		}
 		root = wd
 	}
 	p, err := proj.Resolve(root, s.IndexDir)
 	if err != nil {
-		return nil, SearchOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+		return nil, fmt.Sprintf("resolve project: %v", err)
+	}
+	return p, ""
+}
+
+func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchInput) (*sdk.CallToolResult, SearchOutput, error) {
+	out := SearchOutput{}
+	if strings.TrimSpace(in.Query) == "" {
+		return nil, SearchOutput{Status: "error", Hint: "query is empty — pass a natural-language description or code fragment"}, nil
+	}
+	p, hint := s.resolveProject(in.ProjectRoot)
+	if hint != "" {
+		return nil, SearchOutput{Status: "error", Hint: hint}, nil
 	}
 	out.Project = p.Root
 
@@ -111,7 +123,7 @@ func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchIn
 	if err != nil {
 		if errors.Is(err, embed.ErrUnreachable) {
 			out.Status = "embedding-service-unreachable"
-			out.Endpoint = em.BaseURL
+			out.Endpoint = em.Endpoint()
 			out.Hint = "the local embedding service is offline — fall back to grep / Glob / ripgrep for this query."
 			return nil, out, nil
 		}
@@ -195,17 +207,9 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	if strings.TrimSpace(in.Name) == "" {
 		return nil, FindSymbolOutput{Status: "error", Hint: "name is empty"}, nil
 	}
-	root := in.ProjectRoot
-	if root == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, FindSymbolOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
-		}
-		root = wd
-	}
-	p, err := proj.Resolve(root, s.IndexDir)
-	if err != nil {
-		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	p, hint := s.resolveProject(in.ProjectRoot)
+	if hint != "" {
+		return nil, FindSymbolOutput{Status: "error", Hint: hint}, nil
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, FindSymbolOutput{Status: "no-index", Project: p.Root,
@@ -262,17 +266,9 @@ func (s *Server) related(ctx context.Context, _ *sdk.CallToolRequest, in Related
 	if in.StartLine <= 0 {
 		return nil, RelatedOutput{Status: "error", Hint: "start_line must be ≥ 1"}, nil
 	}
-	root := in.ProjectRoot
-	if root == "" {
-		wd, err := os.Getwd()
-		if err != nil {
-			return nil, RelatedOutput{Status: "error", Hint: "could not determine project root; pass project_root explicitly"}, nil
-		}
-		root = wd
-	}
-	p, err := proj.Resolve(root, s.IndexDir)
-	if err != nil {
-		return nil, RelatedOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
+	p, hint := s.resolveProject(in.ProjectRoot)
+	if hint != "" {
+		return nil, RelatedOutput{Status: "error", Hint: hint}, nil
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, RelatedOutput{Status: "no-index", Project: p.Root,
@@ -367,8 +363,8 @@ func (s *Server) summarize(ctx context.Context, _ *sdk.CallToolRequest, in Summa
 		return nil, SummarizeOutput{Status: "error", Hint: fmt.Sprintf("resolve project: %v", err)}, nil
 	}
 	out.Project = p.Root
-	out.Endpoint = s.ChatClient.BaseURL
-	out.Model = s.ChatClient.Model
+	out.Endpoint = s.ChatClient.Endpoint()
+	out.Model = s.ChatClient.ModelName()
 
 	// Resolve path under the project root. Reject anything that
 	// escapes it (so an MCP caller can't read /etc/passwd by passing
@@ -449,7 +445,7 @@ func (s *Server) summarize(ctx context.Context, _ *sdk.CallToolRequest, in Summa
 // actual file extents so the caller can echo back what was used.
 func sliceLines(data []byte, start, end int) ([]byte, int, int) {
 	if start <= 0 && end <= 0 {
-		return data, 1, countLines(data)
+		return data, 1, chunk.LineCount(data)
 	}
 	if start <= 0 {
 		start = 1
@@ -484,23 +480,6 @@ func sliceLines(data []byte, start, end int) ([]byte, int, int) {
 		end = line
 	}
 	return data[startByte:endByte], start, end
-}
-
-func countLines(data []byte) int {
-	if len(data) == 0 {
-		return 0
-	}
-	n := 1
-	for _, b := range data {
-		if b == '\n' {
-			n++
-		}
-	}
-	// A trailing newline doesn't add a "next" line for the user.
-	if data[len(data)-1] == '\n' {
-		n--
-	}
-	return n
 }
 
 func buildSummarizeSystem(focus string) string {
@@ -552,8 +531,8 @@ type StatusOutput struct {
 
 func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInput) (*sdk.CallToolResult, StatusOutput, error) {
 	out := StatusOutput{
-		Endpoint: s.EmbedClient.BaseURL,
-		Model:    s.EmbedClient.Model,
+		Endpoint: s.EmbedClient.Endpoint(),
+		Model:    s.EmbedClient.ModelName(),
 		Version:  Version,
 		IndexDir: s.IndexDir,
 	}
@@ -566,8 +545,8 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 		out.Reachable = true
 	}
 	if s.ChatClient != nil {
-		out.ChatEndpoint = s.ChatClient.BaseURL
-		out.ChatModel = s.ChatClient.Model
+		out.ChatEndpoint = s.ChatClient.Endpoint()
+		out.ChatModel = s.ChatClient.ModelName()
 		cctx, ccancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := s.ChatClient.Health(cctx); err == nil {
 			out.ChatReachable = true
@@ -584,8 +563,8 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 		rcancel()
 	}
 	if s.CompressClient != nil {
-		out.CompressEndpoint = s.CompressClient.BaseURL
-		out.CompressModel = s.CompressClient.Model
+		out.CompressEndpoint = s.CompressClient.Endpoint()
+		out.CompressModel = s.CompressClient.ModelName()
 		cmpctx, cmpcancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := s.CompressClient.Health(cmpctx); err == nil {
 			out.CompressReachable = true
@@ -593,8 +572,8 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 		cmpcancel()
 	}
 	if s.DraftClient != nil {
-		out.DraftEndpoint = s.DraftClient.BaseURL
-		out.DraftModel = s.DraftClient.Model
+		out.DraftEndpoint = s.DraftClient.Endpoint()
+		out.DraftModel = s.DraftClient.ModelName()
 		dctx, dcancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := s.DraftClient.Health(dctx); err == nil {
 			out.DraftReachable = true

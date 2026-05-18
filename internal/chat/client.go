@@ -41,6 +41,9 @@ func New(baseURL, model string, timeout time.Duration) *Client {
 	}
 }
 
+func (c *Client) Endpoint() string  { return c.BaseURL }
+func (c *Client) ModelName() string { return c.Model }
+
 type Message struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`

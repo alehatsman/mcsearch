@@ -233,7 +233,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 							Path:      rel,
 							Kind:      chunk.KindFileSummary,
 							StartLine: 1,
-							EndLine:   lineCount(data),
+							EndLine:   chunk.LineCount(data),
 							Content:   summary,
 						},
 						sha: fileSHA,
@@ -419,24 +419,4 @@ func summarizeFile(ctx context.Context, cc *chat.Client, rel string, data []byte
 		return "", err
 	}
 	return resp.Content, nil
-}
-
-// lineCount returns the number of lines in data, counting a trailing
-// newline as the terminator of the previous line rather than the start
-// of an empty one (so file_summary EndLine matches what an editor
-// would show for a typical POSIX file).
-func lineCount(data []byte) int {
-	if len(data) == 0 {
-		return 0
-	}
-	n := 1
-	for _, b := range data {
-		if b == '\n' {
-			n++
-		}
-	}
-	if data[len(data)-1] == '\n' {
-		n--
-	}
-	return n
 }

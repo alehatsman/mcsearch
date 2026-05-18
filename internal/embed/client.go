@@ -44,6 +44,9 @@ func New(baseURL, model string, batch int, timeout time.Duration) *Client {
 	}
 }
 
+func (c *Client) Endpoint() string  { return c.BaseURL }
+func (c *Client) ModelName() string { return c.Model }
+
 type embedRequest struct {
 	Model string   `json:"model"`
 	Input []string `json:"input"`
