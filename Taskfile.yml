@@ -73,7 +73,7 @@ tasks:
       - go build -trimpath -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
 
   install:
-    desc: Build and install mcsearch to ~/.local/bin (atomic rename)
+    desc: Build, install mcsearch to ~/.local/bin, and restart any running instances
     vars:
       INSTALL_PATH: '{{.INSTALL_PATH | default (printf "%s/.local/bin" .HOME)}}'
     cmds:
@@ -82,6 +82,12 @@ tasks:
       - cp {{.BIN}} {{.INSTALL_PATH}}/{{.BIN}}.new
       - mv -f {{.INSTALL_PATH}}/{{.BIN}}.new {{.INSTALL_PATH}}/{{.BIN}}
       - echo "✓ Installed {{.INSTALL_PATH}}/{{.BIN}}"
+      - |
+        count=$(pgrep -x mcsearch | wc -l | tr -d ' ')
+        if [ "$count" -gt 0 ]; then
+          pkill -x mcsearch || true
+          echo "✓ Restarted $count mcsearch process(es) — MCP clients will reconnect automatically"
+        fi
 
   clean:
     desc: Remove the built binary
