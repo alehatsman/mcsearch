@@ -8,13 +8,11 @@ can retrieve, reason about, and generate code grounded in real symbols
 and paths from your project:
 
 - `semantic_search` — hybrid retrieval (cosine + BM25 + optional cross-encoder rerank) over the project index. Replaces fanning-out `grep` for natural-language queries.
-- `ask_codebase` — natural-language Q&A with citations that point back to real chunks. Replaces `Read`-and-synthesise for "how does X work?" / "where is Y handled?".
-- `generate_code` — same retrieval pipeline, routed through a self-hosted `/v1/chat/completions` endpoint so generation references real symbols, not invented ones.
 - `summarize_path` — one-shot file-or-range gist; no retrieval, just sends the slice to the chat model with a structured framing prompt.
 - `mcsearch_status` — endpoint health (embed / chat / rerank) and the list of indexed projects.
 
-The first and the last are always on. The chat-backed three register
-only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
+`semantic_search` and `mcsearch_status` are always available. `summarize_path`
+registers only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
 server. See the [MCP tools](#mcp-tools) section at the end for the full
 input/output contract.
 
@@ -52,6 +50,7 @@ mcsearch index <path>            # index a project (or re-index incrementally)
 mcsearch query <path> "..."      # query an indexed project from the terminal
                                  #   --rerank=off          skip rerank for this call
                                  #   --format=json         emit hits as JSON (rerank_score included)
+                                 #   --explain             show per-chunk score breakdown + stage timings
 mcsearch generate <path> "..."   # generate code grounded in the project's index
                                  # (RAG: top-k chunks → chat endpoint)
 mcsearch status [<path>]         # show indexed projects and endpoint health
@@ -181,7 +180,6 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
 | `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
-| `MCSEARCH_ASK_MODEL`      | unset                              | Override `MCSEARCH_CHAT_MODEL` for the `ask_codebase` tool only — useful when an instruct-tuned model follows the citation template more reliably than a coder-tuned one. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
 | `MCSEARCH_RERANK_URL`         | unset                              | Base URL of a rerank server. Unset = rerank disabled. |
@@ -255,86 +253,26 @@ search falls back to pre-rerank fused order with no error surfaced —
 reranker outages never break the search path.
 
 The reranker lives on `Store.Options`, so it applies to every
-`store.Search` caller — `semantic_search`, `generate_code`'s RAG,
-`ask_codebase`'s RAG, and the CLI `query`. `summarize_path` does not
-touch `Search` and is unaffected. Per-call opt-out is
-`mcsearch query --rerank=off`; process-wide off is
+`store.Search` caller — `semantic_search` and the CLI `query`.
+`summarize_path` does not touch `Search` and is unaffected. Per-call
+opt-out is `mcsearch query --rerank=off`; process-wide off is
 `MCSEARCH_DISABLE_RERANK=1`.
 
 Design and migration notes: see
 [`docs/specs/spec-01-rerank.md`](docs/specs/spec-01-rerank.md).
 
-### Code generation and Q&A (RAG + chat)
+### Code generation (CLI only)
 
-Two MCP tools share the same retrieval pipeline as `semantic_search`,
-but route the top-k chunks through a self-hosted `/v1/chat/completions`
-endpoint instead of returning them raw:
-
-- `generate_code` — tuned for code output. Steers the model toward
-  fenced code blocks and warns it to ground in CONTEXT.
-- `ask_codebase` — tuned for prose Q&A. Forces a `CITATIONS:` /
-  `ANSWER:` template where every claim carries a `[n]` tag back to a
-  real chunk, and bans code fences so the model can't smuggle invented
-  signatures past the format.
-
-Both return the chunks fed in as `context` alongside the generated
-text, so the caller can verify the model didn't hallucinate symbols
-that weren't in the project. `MCSEARCH_ASK_MODEL` optionally points
-`ask_codebase` at a separate instruct-tuned model — coder-tuned models
-resist citation-only prompts and still try to emit code.
-
-**Caveat on model behavior.** The system prompts described here
-(citations-first template, no fenced code, banned hedge phrases)
-demand strict instruction adherence. Mid-size local chat models
-(qwen2.5-coder:32b, qwen2.5:14b-instruct, others in the same class)
-follow them inconsistently — they retrieve the right chunks but then
-emit fenced code blocks, invent function names that weren't in
-CONTEXT, or skip the CITATIONS section. For ground-truth answers,
-prefer `semantic_search` (no model in the loop, returns real chunks
-with real `path:line`) or `summarize_path` (single file slice fed
-directly, no retrieval competition). Treat `ask_codebase` /
-`generate_code` output as a suggestion that needs verifying against
-the returned `context` chunks. Stronger local models or a hosted
-endpoint (Claude, GPT-4) close this gap.
-
-From the terminal, only the code-generation half is wired up:
 `mcsearch generate <path> "<prompt>"` runs the same hybrid retrieval as
-`query`, then prepends the top-k chunks to the prompt as a `CONTEXT`
-block and sends the result to the chat endpoint:
+`query`, then prepends the top-k chunks as a `CONTEXT` block and sends
+the result to the chat endpoint set via `MCSEARCH_CHAT_URL`. CLI flags
+`-k`, `--no-rag`, `--system`, `--temperature`, `--max-tokens`, and
+`--show-context` let you steer or bypass RAG from the terminal.
 
-```console
-$ mcsearch generate ./ "add a flag to skip the BM25 leg in cmdQuery"
-```
-
-The CLI flags (`-k`, `--no-rag`, `--system`, `--temperature`,
-`--max-tokens`, `--show-context`) let you steer or short-circuit RAG
-from the terminal. Over MCP the same capability surfaces as a
-`generate_code` tool, returning both the generated text and the chunks
-that were fed in as context — so Claude can verify the model didn't
-hallucinate names that weren't in the project:
-
-```json
-{
-  "status": "ok",
-  "project": "/home/aleh/projects/mcsearch",
-  "model": "Qwen/Qwen2.5-Coder-7B-Instruct",
-  "content": "```go\nif *noBM25 {\n    opts.DisableBM25 = true\n}\n```",
-  "finish_reason": "stop",
-  "context": [
-    { "path": "cmd/mcsearch/main.go", "start_line": 221, "end_line": 275, "kind": "function_declaration", "score": 0.51 },
-    { "path": "internal/store/store.go", "start_line": 328, "end_line": 417, "kind": "method_declaration", "score": 0.42 }
-  ]
-}
-```
-
-The `status` field follows the same convention as `semantic_search`:
-`ok` / `no-index` / `embedding-service-unreachable` /
-`chat-service-unreachable` / `error`, each with a `hint` so the caller
-can recover gracefully. Point `MCSEARCH_CHAT_URL` at any
-OpenAI-compatible `/v1/chat/completions` server — vLLM
-(`vllm serve … --task generate`), TEI's compat shim, or ollama (e.g.
-`ollama pull qwen2.5-coder:7b-instruct`, then
-`MCSEARCH_CHAT_URL=http://127.0.0.1:11434`).
+Note: mid-size local chat models (≤32B) tend to generate plausible
+code from training data rather than strictly from the retrieved CONTEXT.
+Use `semantic_search` for ground-truth chunk retrieval; treat generated
+output as a starting point to verify against the actual source.
 
 ### Vector cache
 
@@ -460,16 +398,13 @@ time with a warning.
 
 When running as `mcsearch mcp`, the server registers the following tools
 for the calling agent. `semantic_search` and `mcsearch_status` are always
-available; the three chat-backed tools register only when
-`MCSEARCH_CHAT_URL` is set and the chat client initialises cleanly.
+available; `summarize_path` registers only when `MCSEARCH_CHAT_URL` is set.
 
 | Tool | Always on? | What it does | Key inputs |
 | --- | --- | --- | --- |
 | `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval over the project's index. Returns the top-k chunks with `path`, `kind`, `start_line`, `end_line`, `score`, `bm25_score`, `rrf_score`, `rerank_score`, `content`. Prefer this over fanning out `grep` when the query is described in natural language. | `query`, `project_root?`, `k?` (default 8, max 30) |
 | `mcsearch_status` | yes | Reports embed / chat / rerank endpoint health and the list of indexed projects with chunk counts, dim, and `last_indexed`. Use it before chasing a "missing result" through the code — the index may be absent, stale, or the embedding endpoint may be down. | — |
-| `ask_codebase` | needs chat | Natural-language Q&A grounded in the index. Same retrieval pipeline as `generate_code` but tuned for prose answers: emits a `CITATIONS:` / `ANSWER:` block where every claim carries a `[n]` tag back to a real chunk. Use this instead of `Read`+synthesise for "how does X work?" / "where is Y handled?". | `prompt`, `project_root?`, `k?`, `use_index?` (default true), `system?`, `temperature?`, `max_tokens?` |
-| `generate_code` | needs chat | Code generation / edit / explanation. Same retrieval as `ask_codebase`, but the system prompt steers the model toward fenced code blocks. Returns both the generated `content` and the `context` chunks that were fed in, so callers can verify the model didn't invent symbols. | same as `ask_codebase` |
-| `summarize_path` | needs chat | One-shot file-or-range gist. No retrieval — reads the path directly and sends the slice to the chat model. Path must resolve inside `project_root`; slices larger than 64 KB are truncated (`truncated: true` in the response). Use `focus` to steer (`"public API surface"`, `"side effects"`, etc.). For whole-repo overviews use `ask_codebase` instead. | `path`, `project_root?`, `start_line?`, `end_line?`, `focus?`, `temperature?`, `max_tokens?` |
+| `summarize_path` | needs chat | One-shot file-or-range gist. No retrieval — reads the path directly and sends the slice to the chat model. Path must resolve inside `project_root`; slices larger than 64 KB are truncated (`truncated: true` in the response). Use `focus` to steer (`"public API surface"`, `"side effects"`, etc.). | `path`, `project_root?`, `start_line?`, `end_line?`, `focus?`, `temperature?`, `max_tokens?` |
 
 Every tool returns a structured `status` field — `ok` / `no-index` /
 `embedding-service-unreachable` / `chat-service-unreachable` / `error` —

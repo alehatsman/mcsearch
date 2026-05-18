@@ -211,10 +211,13 @@ type GenerateOutput struct {
 	DraftModel string `json:"draft_model,omitempty"`
 }
 
-const defaultGenerateSystem = "You are a precise coding assistant. " +
-	"When CONTEXT chunks from the user's project are provided, ground your answer in them — " +
-	"reference real symbols, paths, and conventions rather than inventing names. " +
-	"Output code in fenced blocks; keep prose minimal."
+const defaultGenerateSystem = "You are a code assistant. Your output MUST be grounded in the CONTEXT chunks provided.\n" +
+	"\n" +
+	"HARD RULES — any violation makes the output invalid:\n" +
+	"1. Every symbol, type, function, method, field, package name, and file path you write MUST appear verbatim in the CONTEXT chunks. If it is not in CONTEXT, do not write it.\n" +
+	"2. Do not invent wrapper functions, helper types, interfaces, or packages that are not in CONTEXT.\n" +
+	"3. If CONTEXT is insufficient to implement the request, output ONLY: \"INSUFFICIENT CONTEXT: <list what symbols or files are missing>\" — no speculative code.\n" +
+	"4. Output code in a single fenced block. No step-by-step guides, no version-control instructions."
 
 // defaultAskSystem steers the model toward answering questions about
 // the project rather than emitting code. The retrieval pipeline is
@@ -232,26 +235,25 @@ const defaultGenerateSystem = "You are a precise coding assistant. " +
 // models otherwise wrap invented signatures in real file paths. Reach
 // for an instruct-tuned model via MCSEARCH_ASK_MODEL if the coder
 // model keeps cheating on the format.
-const defaultAskSystem = "You are a repository analyst. Your job is to point at where code lives and describe what it does — not to reproduce it. Code blocks are banned in your output: no triple-backtick fences, no four-space indents.\n" +
+const defaultAskSystem = "You are a repository analyst. Answer ONLY from the CONTEXT chunks provided — not from training data or general knowledge.\n" +
 	"\n" +
-	"OUTPUT FORMAT — you MUST follow this exact two-section template:\n" +
+	"OUTPUT FORMAT — follow this exactly or the response is invalid:\n" +
 	"\n" +
 	"CITATIONS:\n" +
-	"[1] <path>:<start>-<end> — <one short clause describing what this chunk contains>\n" +
-	"[2] <path>:<start>-<end> — <one short clause describing what this chunk contains>\n" +
-	"... (one line per chunk you'll actually rely on; skip irrelevant chunks)\n" +
+	"[1] <path>:<start>-<end> — <one clause: what this chunk contains>\n" +
+	"[2] <path>:<start>-<end> — <one clause: what this chunk contains>\n" +
+	"(one line per chunk you rely on; skip irrelevant ones)\n" +
 	"\n" +
 	"ANSWER:\n" +
-	"<numbered list of steps or bullets answering the question. Every concrete claim ends with a [n] tag pointing back to a CITATIONS entry.>\n" +
+	"<prose answering the question; every concrete claim ends with a [n] tag citing a CITATIONS entry>\n" +
 	"\n" +
-	"RULES:\n" +
-	"1. CITATIONS comes first, always. If you write the ANSWER section before CITATIONS, the response is invalid.\n" +
-	"2. Every path/line in CITATIONS must come from the CONTEXT chunks below — copy them verbatim from the chunk headers. Never invent a path.\n" +
-	"3. Every claim in ANSWER must end with a `[n]` tag. Claims without a tag are guessing — drop them or move them to a separate \"UNCLEAR:\" line that names what CONTEXT is missing.\n" +
-	"4. Mention symbols inline with single backticks (`funcName`). No fenced code blocks; no paraphrased code snippets.\n" +
-	"5. Banned phrases — they signal guessing, not citing: \"hypothetical\", \"example\", \"for example\", \"for instance\", \"approximate\", \"simplified\", \"pseudo-code\", \"something like\", \"likely\", \"probably\", \"typically\". If you reach for one, replace it with a citation or drop the claim.\n" +
-	"6. When several chunks bear on the question — gates in a filter chain, stages in a pipeline, call sites of a function — enumerate ALL of them. Each gets its own CITATIONS entry and its own ANSWER bullet.\n" +
-	"7. If CONTEXT is insufficient, the ANSWER section ends with \"UNCLEAR: <what's missing>\". Suggest a follow-up (raise k, read a specific path)."
+	"HARD RULES:\n" +
+	"1. CITATIONS first, always. Writing ANSWER before CITATIONS = invalid.\n" +
+	"2. Every path:line in CITATIONS must be copied verbatim from a chunk header. Never invent a path.\n" +
+	"3. Every claim in ANSWER must end with [n]. A claim with no tag is guessing — delete it or move it to \"UNCLEAR:\".\n" +
+	"4. No fenced code blocks, no indented code. Inline backticks for symbol names only.\n" +
+	"5. If CONTEXT does not contain the answer, end ANSWER with: \"UNCLEAR: <what's missing>.\"\n" +
+	"6. Banned words/phrases (each signals guessing — replace with a citation or delete): 'hypothetically', 'for example', 'for instance', 'typically', 'usually', 'likely', 'probably', 'you might', 'one approach', 'something like', 'pseudo-code', 'simplified'."
 
 func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in GenerateInput) (*sdk.CallToolResult, GenerateOutput, error) {
 	if s.DraftClient != nil {
@@ -376,7 +378,7 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
 			}
 		}
-		userContent = ctxText + "\n\n---\n\n" + in.Prompt
+		userContent = ctxText + "\n\n---\nCONSTRAINT: Every symbol, type, function, import path, and file name you use in your response MUST appear verbatim in the CONTEXT above. Do not use any knowledge from outside these chunks.\n---\n\n" + in.Prompt
 	}
 	messages = append(messages, chat.Message{Role: "user", Content: userContent})
 
@@ -454,17 +456,21 @@ func compressHits(ctx context.Context, cc *chat.Client, query string, hits []sto
 
 // defaultDraftSystem steers the local draft model toward producing a
 // complete working implementation grounded in the retrieved CONTEXT.
-const defaultDraftSystem = "You are a code generator. Write a working implementation for the task using the CONTEXT chunks. " +
-	"Use real symbol names, types, and file paths from CONTEXT — never invent names not present there. " +
-	"Output code in a single fenced block. Keep it concise and complete."
+const defaultDraftSystem = "You are a code generator. Write an implementation using ONLY the CONTEXT chunks.\n" +
+	"RULES:\n" +
+	"1. Every symbol, type, function, import, and file path you write MUST appear verbatim in CONTEXT.\n" +
+	"2. Never invent a name, path, or type not shown in CONTEXT. If something is missing, write a TODO comment naming the missing symbol.\n" +
+	"3. Output a single fenced code block. No explanation."
 
 // defaultRefineSystem steers the main model to validate a local draft
 // rather than generating from scratch — review is 3–10× cheaper in tokens
 // than fresh generation.
-const defaultRefineSystem = "You are a precise code reviewer and editor. A local model generated [LOCAL_DRAFT] below. " +
-	"Review it against the CONTEXT chunks and the user's request. " +
-	"Correct any bugs, type mismatches, invented symbols, or logic errors not supported by CONTEXT. " +
-	"Output the corrected code in a fenced block. Add brief inline comments only where you made corrections."
+const defaultRefineSystem = "You are a code reviewer. A local model produced [LOCAL_DRAFT]. Review it against the CONTEXT chunks.\n" +
+	"RULES:\n" +
+	"1. Delete any symbol, type, function, or file path in [LOCAL_DRAFT] that does NOT appear verbatim in CONTEXT.\n" +
+	"2. Fix bugs, wrong signatures, and type mismatches using only what CONTEXT provides.\n" +
+	"3. Output the corrected code in a single fenced block.\n" +
+	"4. After the block, list any symbols you deleted because they were absent from CONTEXT."
 
 // generateWithLocalDraft runs the two-phase draft → refine pipeline:
 //  1. Retrieve context chunks (same path as runRAGChat).
@@ -516,7 +522,7 @@ func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (
 	// Phase 1: speculative draft from the local model.
 	draftUserContent := in.Prompt
 	if rawCtxText != "" {
-		draftUserContent = rawCtxText + "\n\n---\n\n" + in.Prompt
+		draftUserContent = rawCtxText + "\n\n---\nCONSTRAINT: Every symbol, type, function, import path, and file name you use MUST appear verbatim in the CONTEXT above. Do not use any knowledge from outside these chunks.\n---\n\n" + in.Prompt
 	}
 	draftResp, draftErr := s.DraftClient.Generate(ctx, []chat.Message{
 		{Role: "system", Content: defaultDraftSystem},
@@ -553,6 +559,7 @@ func (s *Server) generateWithLocalDraft(ctx context.Context, in GenerateInput) (
 	var parts []string
 	if refineCtxText != "" {
 		parts = append(parts, refineCtxText)
+		parts = append(parts, "CONSTRAINT: Every symbol, type, function, import path, and file name in your output MUST appear verbatim in the CONTEXT above. Delete anything not found there.")
 	}
 	if out.Draft != "" {
 		parts = append(parts, "[LOCAL_DRAFT]\n"+out.Draft+"\n[/LOCAL_DRAFT]")
@@ -958,30 +965,11 @@ func (s *Server) RunStdio(ctx context.Context) error {
 
 	if s.ChatClient != nil {
 		sdk.AddTool(srv, &sdk.Tool{
-			Name: "generate_code",
-			Description: "Generate code (or edit/explain it) grounded in the project's mcsearch index. " +
-				"By default, retrieves the top-k chunks semantically relevant to the prompt and feeds them as CONTEXT " +
-				"to a chat-completion model — so the output references real symbols and paths from the project. " +
-				"Pass use_index=false to skip retrieval. Returns the generated content plus the chunks fed as context. " +
-				"On error, returns a structured status: 'no-index', 'embedding-service-unreachable', " +
-				"'chat-service-unreachable', or 'ok'.",
-		}, s.generate)
-
-		sdk.AddTool(srv, &sdk.Tool{
-			Name: "ask_codebase",
-			Description: "Answer a natural-language question about the project, grounded in the mcsearch index. " +
-				"Same retrieval pipeline as generate_code but tuned for Q&A: cites paths and symbols, returns prose " +
-				"rather than code blocks. Use this instead of fanning out Read calls when the user wants to understand " +
-				"how something works ('how does indexing handle deletions?', 'where is config loaded?'). " +
-				"On error, returns the same structured statuses as generate_code.",
-		}, s.ask)
-
-		sdk.AddTool(srv, &sdk.Tool{
 			Name: "summarize_path",
 			Description: "Summarize a single file (or line range) into a tight factual digest the caller can read instead " +
 				"of the full file. No retrieval — sends the file slice directly to the chat model. Pass `focus` to steer " +
 				"(e.g. 'public API surface', 'side effects'). Path must resolve inside project_root. Files larger than " +
-				"64 KB are truncated; for bigger overviews use ask_codebase. " +
+				"64 KB are truncated. " +
 				"On error, returns a structured status: 'chat-service-unreachable' or 'error'.",
 		}, s.summarize)
 	}
