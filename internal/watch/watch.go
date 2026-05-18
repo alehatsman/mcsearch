@@ -37,7 +37,6 @@ type Watcher struct {
 	ig      *ignore.Matcher
 	root    string
 	opts    Options
-	ctx     context.Context // set by Run, used by flush
 
 	mu      sync.Mutex
 	dirty   bool // events have arrived since the last successful flush
@@ -58,7 +57,6 @@ func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watc
 // Run starts the watch loop and blocks until ctx is cancelled or an
 // unrecoverable error occurs.
 func (w *Watcher) Run(ctx context.Context) error {
-	w.ctx = ctx
 	fw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return err
@@ -74,7 +72,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 	// Initial re-index (covers anything that changed while the daemon was
 	// stopped).
-	w.markDirty()
+	w.markDirty(ctx)
 
 	for {
 		select {
@@ -84,7 +82,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 			if !ok {
 				return errors.New("fsnotify events channel closed")
 			}
-			w.handle(fw, ev)
+			w.handle(ctx, fw, ev)
 		case err, ok := <-fw.Errors:
 			if !ok {
 				return errors.New("fsnotify errors channel closed")
@@ -94,7 +92,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 	}
 }
 
-func (w *Watcher) handle(fw *fsnotify.Watcher, ev fsnotify.Event) {
+func (w *Watcher) handle(ctx context.Context, fw *fsnotify.Watcher, ev fsnotify.Event) {
 	rel, err := filepath.Rel(w.root, ev.Name)
 	if err != nil {
 		return
@@ -122,21 +120,21 @@ func (w *Watcher) handle(fw *fsnotify.Watcher, ev fsnotify.Event) {
 	if w.opts.Verbose {
 		w.opts.Logger.Info("fs event", "op", ev.Op.String(), "path", rel)
 	}
-	w.markDirty()
+	w.markDirty(ctx)
 }
 
 // markDirty resets the debounce timer; on expiry it runs an index pass.
-func (w *Watcher) markDirty() {
+func (w *Watcher) markDirty(ctx context.Context) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dirty = true
 	if w.timer != nil {
 		w.timer.Stop()
 	}
-	w.timer = time.AfterFunc(w.opts.Debounce, w.flush)
+	w.timer = time.AfterFunc(w.opts.Debounce, func() { w.flush(ctx) })
 }
 
-func (w *Watcher) flush() {
+func (w *Watcher) flush(ctx context.Context) {
 	w.mu.Lock()
 	if w.running {
 		// Another goroutine is already re-indexing. Leave dirty=true so
@@ -155,7 +153,7 @@ func (w *Watcher) flush() {
 
 	for {
 		start := time.Now()
-		err := w.indexer.Run(w.ctx)
+		err := w.indexer.Run(ctx)
 		if err != nil {
 			if !errors.Is(err, context.Canceled) {
 				w.opts.Logger.Error("re-index failed", "err", err)
@@ -168,7 +166,7 @@ func (w *Watcher) flush() {
 		// rather than spawning another one. This serializes work and
 		// guarantees no concurrent indexers.
 		w.mu.Lock()
-		if !w.dirty || w.ctx.Err() != nil {
+		if !w.dirty || ctx.Err() != nil {
 			w.running = false
 			w.mu.Unlock()
 			return

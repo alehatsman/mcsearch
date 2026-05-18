@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/rerank"
@@ -70,8 +71,8 @@ type Options struct {
 
 type Store struct {
 	db   *sql.DB
-	dim  int     // vector dimension; discovered on first upsert
-	opts Options // immutable after Open
+	dim  atomic.Int64 // vector dimension; set once on first upsert, read concurrently
+	opts Options      // immutable after Open
 
 	// Search-side vector cache. Lazily populated on first Search and
 	// invalidated by any mutating call (UpsertMany, DeletePath,
@@ -131,8 +132,8 @@ func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 		db.Close()
 		return nil, err
 	default:
-		dim, _ := strconv.Atoi(v)
-		s.dim = dim
+		dim, _ := strconv.ParseInt(v, 10, 64)
+		s.dim.Store(dim)
 	}
 	return s, nil
 }
@@ -236,7 +237,7 @@ type Stats struct {
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
-	st.Dim = s.dim
+	st.Dim = int(s.dim.Load())
 	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT path) FROM chunks`)
 	if err := row.Scan(&st.Chunks, &st.Files); err != nil {
 		return st, err
@@ -326,12 +327,12 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	if len(rows) == 0 {
 		return nil
 	}
-	if s.dim == 0 {
-		s.dim = len(rows[0].Vec)
+	if s.dim.Load() == 0 {
+		s.dim.Store(int64(len(rows[0].Vec)))
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO meta(key,value) VALUES('`+metaDim+`', ?)
 			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
-			strconv.Itoa(s.dim)); err != nil {
+			strconv.FormatInt(s.dim.Load(), 10)); err != nil {
 			return err
 		}
 	}
@@ -356,9 +357,9 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	}
 	defer stmt.Close()
 	for _, r := range rows {
-		if len(r.Vec) != s.dim {
+		if int64(len(r.Vec)) != s.dim.Load() {
 			_ = tx.Rollback()
-			return fmt.Errorf("vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)", s.dim, len(r.Vec))
+			return fmt.Errorf("vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)", s.dim.Load(), len(r.Vec))
 		}
 		if _, err := stmt.ExecContext(ctx,
 			r.Path, r.Kind, r.Name, r.StartLine, r.EndLine, r.ContentSHA, r.Content,
@@ -736,8 +737,8 @@ func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k 
 // queryVec. Returns one scored row per chunk (unsorted). Uses the
 // in-RAM cache when enabled, else streams from SQL.
 func (s *Store) scoreSemantic(ctx context.Context, queryVec []float32) ([]scored, error) {
-	if s.dim != 0 && len(queryVec) != s.dim {
-		return nil, fmt.Errorf("query dim %d != index dim %d", len(queryVec), s.dim)
+	if d := s.dim.Load(); d != 0 && int64(len(queryVec)) != d {
+		return nil, fmt.Errorf("query dim %d != index dim %d", len(queryVec), d)
 	}
 	qNorm := norm(queryVec)
 	if qNorm == 0 {
@@ -792,7 +793,7 @@ func (s *Store) scoreSemantic(ctx context.Context, queryVec []float32) ([]scored
 	ids := s.cacheIDs
 	vecs := s.cacheVecs
 	norms := s.cacheNorms
-	dim := s.dim
+	dim := int(s.dim.Load())
 	s.cacheMu.RUnlock()
 	if len(ids) == 0 || dim == 0 {
 		return nil, nil
@@ -1020,7 +1021,7 @@ func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k
 	ids := s.cacheIDs
 	vecs := s.cacheVecs
 	norms := s.cacheNorms
-	cDim := s.dim
+	cDim := int(s.dim.Load())
 	s.cacheMu.RUnlock()
 	qNorm := norm(queryVec)
 	if qNorm == 0 {
@@ -1086,7 +1087,7 @@ func (s *Store) ensureCache(ctx context.Context) error {
 	ids := make([]int64, 0, 1024)
 	var vecs []float32
 	norms := make([]float32, 0, 1024)
-	dim := s.dim
+	dim := int(s.dim.Load())
 	for rows.Next() {
 		var id int64
 		var blob []byte
@@ -1119,8 +1120,8 @@ func (s *Store) ensureCache(ctx context.Context) error {
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	if dim != 0 && s.dim == 0 {
-		s.dim = dim
+	if dim != 0 && s.dim.Load() == 0 {
+		s.dim.Store(int64(dim))
 	}
 	s.cacheIDs = ids
 	s.cacheVecs = vecs

@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -698,10 +699,12 @@ func cmdStatus(ctx context.Context, args []string) error {
 		files   int
 		last    time.Time
 		corrupt bool
+		empty   bool
 	}
-	var rows []row
-	var empties int
-	for _, e := range entries {
+	results := make([]row, len(entries))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for i, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
@@ -709,27 +712,45 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if _, err := os.Stat(dbPath); err != nil {
 			continue
 		}
-		st, err := store.Open(ctx, dbPath)
-		if err != nil {
-			rows = append(rows, row{root: e.Name()[:min(12, len(e.Name()))], corrupt: true})
-			continue
-		}
-		stats, _ := st.Stats(ctx)
-		root, _ := st.ProjectRoot(ctx)
-		st.Close()
-		if stats.Chunks == 0 {
+		wg.Add(1)
+		go func(idx int, name, path string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			st, err := store.Open(ctx, path)
+			if err != nil {
+				results[idx] = row{root: name[:min(12, len(name))], corrupt: true}
+				return
+			}
+			stats, _ := st.Stats(ctx)
+			root, _ := st.ProjectRoot(ctx)
+			st.Close()
+			if stats.Chunks == 0 {
+				results[idx] = row{empty: true}
+				return
+			}
+			if root == "" {
+				root = "? (run mcsearch index <path> to tag)"
+			}
+			results[idx] = row{
+				root:   root,
+				chunks: stats.Chunks,
+				files:  stats.Files,
+				last:   stats.LastIndex,
+			}
+		}(i, e.Name(), dbPath)
+	}
+	wg.Wait()
+
+	var rows []row
+	var empties int
+	for _, r := range results {
+		switch {
+		case r.empty:
 			empties++
-			continue
+		case r.root != "":
+			rows = append(rows, r)
 		}
-		if root == "" {
-			root = "? (run mcsearch index <path> to tag)"
-		}
-		rows = append(rows, row{
-			root:   root,
-			chunks: stats.Chunks,
-			files:  stats.Files,
-			last:   stats.LastIndex,
-		})
 	}
 
 	if len(rows) == 0 && empties == 0 {
