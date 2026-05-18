@@ -3,6 +3,8 @@ package main
 import (
 	"testing"
 	"time"
+
+	"github.com/alehatsman/mcsearch/internal/rerank"
 )
 
 func TestNewRerankClientNilWhenURLEmpty(t *testing.T) {
@@ -16,16 +18,35 @@ func TestNewRerankClientReturnsClientWhenURLSet(t *testing.T) {
 	t.Setenv("MCSEARCH_RERANK_URL", "http://127.0.0.1:9999")
 	t.Setenv("MCSEARCH_RERANK_MODEL", "custom-reranker")
 	t.Setenv("MCSEARCH_DISABLE_RERANK", "")
+	t.Setenv("MCSEARCH_RERANK_STYLE", "") // ensure Cohere-style client
 
 	c := newRerankClient()
 	if c == nil {
 		t.Fatal("newRerankClient() = nil, want non-nil when URL is set")
 	}
-	if c.BaseURL != "http://127.0.0.1:9999" {
-		t.Errorf("BaseURL = %q, want http://127.0.0.1:9999", c.BaseURL)
+	if c.Endpoint() != "http://127.0.0.1:9999" {
+		t.Errorf("Endpoint() = %q, want http://127.0.0.1:9999", c.Endpoint())
 	}
-	if c.Model != "custom-reranker" {
-		t.Errorf("Model = %q, want custom-reranker", c.Model)
+	if c.ModelName() != "custom-reranker" {
+		t.Errorf("ModelName() = %q, want custom-reranker", c.ModelName())
+	}
+}
+
+func TestNewRerankClientChatStyleWhenRequested(t *testing.T) {
+	t.Setenv("MCSEARCH_RERANK_URL", "http://127.0.0.1:9999")
+	t.Setenv("MCSEARCH_RERANK_MODEL", "Qwen/Qwen3-Reranker-4B")
+	t.Setenv("MCSEARCH_RERANK_STYLE", "chat")
+	t.Setenv("MCSEARCH_DISABLE_RERANK", "")
+
+	c := newRerankClient()
+	if c == nil {
+		t.Fatal("newRerankClient() = nil, want non-nil when URL is set")
+	}
+	if _, ok := c.(*rerank.ChatReranker); !ok {
+		t.Errorf("expected *rerank.ChatReranker, got %T", c)
+	}
+	if c.Endpoint() != "http://127.0.0.1:9999" {
+		t.Errorf("Endpoint() = %q, want http://127.0.0.1:9999", c.Endpoint())
 	}
 }
 
@@ -43,13 +64,18 @@ func TestNewRerankClientDefaultTimeout(t *testing.T) {
 	t.Setenv("MCSEARCH_RERANK_URL", "http://127.0.0.1:9999")
 	t.Setenv("MCSEARCH_RERANK_TIMEOUT", "")
 	t.Setenv("MCSEARCH_DISABLE_RERANK", "")
+	t.Setenv("MCSEARCH_RERANK_STYLE", "") // Cohere-style; access concrete type
 
 	c := newRerankClient()
 	if c == nil {
 		t.Fatal("expected non-nil client")
 	}
-	if c.HTTP.Timeout != 5*time.Second {
-		t.Errorf("default timeout = %s, want 5s", c.HTTP.Timeout)
+	cc, ok := c.(*rerank.Client)
+	if !ok {
+		t.Fatalf("expected *rerank.Client, got %T", c)
+	}
+	if cc.HTTP.Timeout != 5*time.Second {
+		t.Errorf("default timeout = %s, want 5s", cc.HTTP.Timeout)
 	}
 }
 

@@ -448,7 +448,92 @@ func TestCompressClientUsesDistilledContext(t *testing.T) {
 	compressSrv := fakeChat(t, "Greet is defined at main.go:3. Returns a greeting string.")
 	defer compressSrv.Close()
 
-	chatSrv, userMsgCh := fakeCapturingChat(t, "the answer")
+	chatSrv, userMsgCh := fakeCapturingChat(t, "generated code")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Greet(name string) string { return \"hi \" + name }\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient:    embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:     chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		CompressClient: chat.New(compressSrv.URL, "fake-compress", 10*time.Second),
+		IndexDir:       cacheDir,
+	}
+
+	_, out, err := s.generate(context.Background(), nil, GenerateInput{
+		Prompt: "add a GreetAll function", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q, want ok (hint: %q)", out.Status, out.Hint)
+	}
+	select {
+	case userMsg := <-userMsgCh:
+		if !strings.Contains(userMsg, "DISTILLED CONTEXT") {
+			t.Errorf("chat received raw context instead of distilled; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
+		}
+		if strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
+			t.Error("chat received raw formatContext header — compression did not replace it")
+		}
+	default:
+		t.Fatal("chat server received no request")
+	}
+}
+
+func TestCompressClientFallsBackOnFailure(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	chatSrv, userMsgCh := fakeCapturingChat(t, "generated code")
+	defer chatSrv.Close()
+
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Bye() {}\n")
+	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
+
+	s := &Server{
+		EmbedClient: embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
+		ChatClient:  chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
+		// Dead endpoint → compressHits will error, falling back to raw context.
+		CompressClient: chat.New("http://127.0.0.1:1", "dead", 200*time.Millisecond),
+		IndexDir:       cacheDir,
+	}
+
+	_, out, err := s.generate(context.Background(), nil, GenerateInput{
+		Prompt: "document Bye", ProjectRoot: root, K: 3,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("compress fallback failed: status = %q, hint: %q", out.Status, out.Hint)
+	}
+	select {
+	case userMsg := <-userMsgCh:
+		if !strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
+			t.Errorf("expected raw context fallback; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
+		}
+	default:
+		t.Fatal("chat server received no request on compress fallback")
+	}
+}
+
+func TestAskCodebaseNeverCompresses(t *testing.T) {
+	embedSrv := fakeEmbed(t, 16)
+	defer embedSrv.Close()
+
+	compressSrv := fakeChat(t, "Greet is defined at main.go:3.")
+	defer compressSrv.Close()
+
+	chatSrv, userMsgCh := fakeCapturingChat(t, "CITATIONS: [1] main.go:3\nANSWER: Greet returns a greeting. [1]")
 	defer chatSrv.Close()
 
 	cacheDir := t.TempDir()
@@ -475,54 +560,16 @@ func TestCompressClientUsesDistilledContext(t *testing.T) {
 	}
 	select {
 	case userMsg := <-userMsgCh:
-		if !strings.Contains(userMsg, "DISTILLED CONTEXT") {
-			t.Errorf("chat received raw context instead of distilled; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
+		// ask_codebase must send raw chunk content so the model can emit
+		// accurate [n] citations with real path:line references.
+		if strings.Contains(userMsg, "DISTILLED CONTEXT") {
+			t.Error("ask_codebase sent compressed context — citations contract is broken")
 		}
-		if strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
-			t.Error("chat received raw formatContext header — compression did not replace it")
+		if !strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
+			t.Errorf("ask_codebase did not send raw formatContext; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
 		}
 	default:
 		t.Fatal("chat server received no request")
-	}
-}
-
-func TestCompressClientFallsBackOnFailure(t *testing.T) {
-	embedSrv := fakeEmbed(t, 16)
-	defer embedSrv.Close()
-
-	chatSrv, userMsgCh := fakeCapturingChat(t, "answer")
-	defer chatSrv.Close()
-
-	cacheDir := t.TempDir()
-	projDir := t.TempDir()
-	writeFile(t, filepath.Join(projDir, "main.go"),
-		"package main\n\nfunc Bye() {}\n")
-	root := indexProject(t, projDir, cacheDir, embedSrv.URL)
-
-	s := &Server{
-		EmbedClient: embed.New(embedSrv.URL, "fake", 16, 5*time.Second),
-		ChatClient:  chat.New(chatSrv.URL, "fake-chat", 10*time.Second),
-		// Dead endpoint → compressHits will error, falling back to raw context.
-		CompressClient: chat.New("http://127.0.0.1:1", "dead", 200*time.Millisecond),
-		IndexDir:       cacheDir,
-	}
-
-	_, out, err := s.ask(context.Background(), nil, AskInput{
-		Prompt: "what is Bye?", ProjectRoot: root, K: 3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if out.Status != "ok" {
-		t.Fatalf("compress fallback failed: status = %q, hint: %q", out.Status, out.Hint)
-	}
-	select {
-	case userMsg := <-userMsgCh:
-		if !strings.Contains(userMsg, "CONTEXT — relevant chunks from the project") {
-			t.Errorf("expected raw context fallback; got prefix: %q", userMsg[:clamp(200, len(userMsg))])
-		}
-	default:
-		t.Fatal("chat server received no request on compress fallback")
 	}
 }
 

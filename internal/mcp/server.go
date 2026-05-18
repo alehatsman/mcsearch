@@ -23,7 +23,7 @@ import (
 type Server struct {
 	EmbedClient  *embed.Client
 	ChatClient   *chat.Client   // optional — when nil, generate_code is not registered
-	RerankClient *rerank.Client // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
+	RerankClient rerank.HealthChecker // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
 	// CompressClient, when set, distils retrieved chunks into a dense
 	// prose summary before they are injected into the chat model's
 	// context window. Reduces the token cost of each ask_codebase /
@@ -257,21 +257,26 @@ func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in Gene
 	if s.DraftClient != nil {
 		return s.generateWithLocalDraft(ctx, in)
 	}
-	return s.runRAGChat(ctx, in, defaultGenerateSystem, "")
+	return s.runRAGChat(ctx, in, defaultGenerateSystem, "", true)
 }
 
 func (s *Server) ask(ctx context.Context, req *sdk.CallToolRequest, in AskInput) (*sdk.CallToolResult, GenerateOutput, error) {
 	// AskInput and GenerateInput are shape-compatible; the only
 	// reason ask_codebase has its own type is to advertise different
 	// jsonschema descriptions to MCP clients (Q&A vs. code gen).
-	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem, s.AskChatModel)
+	//
+	// Compression is disabled for ask_codebase: the citations-first
+	// contract requires exact path:line references in each chunk so the
+	// model can emit accurate [n] citations. Distilled prose loses that
+	// granularity and breaks the CITATIONS / ANSWER template.
+	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem, s.AskChatModel, false)
 }
 
 // runRAGChat is the shared semantic-search → chat pipeline behind
 // both generate_code and ask_codebase. Caller picks the default system
 // prompt; everything else (retrieval, context formatting, error
 // translation) is identical.
-func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem string, modelOverride string) (*sdk.CallToolResult, GenerateOutput, error) {
+func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem string, modelOverride string, allowCompress bool) (*sdk.CallToolResult, GenerateOutput, error) {
 	out := GenerateOutput{}
 	if s.ChatClient == nil {
 		return nil, GenerateOutput{Status: "error", Hint: "chat client not configured on this server"}, nil
@@ -359,7 +364,7 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	userContent := in.Prompt
 	if len(contextChunks) > 0 {
 		ctxText := formatContext(contextChunks)
-		if s.CompressClient != nil {
+		if allowCompress && s.CompressClient != nil {
 			if compressed, cerr := compressHits(ctx, s.CompressClient, in.Prompt, contextChunks); cerr == nil && compressed != "" {
 				ctxText = fmt.Sprintf("DISTILLED CONTEXT (from %d retrieved chunks):\n\n%s", len(contextChunks), compressed)
 			}
@@ -924,8 +929,8 @@ func (s *Server) status(ctx context.Context, req *sdk.CallToolRequest, _ StatusI
 		ccancel()
 	}
 	if s.RerankClient != nil {
-		out.RerankEndpoint = s.RerankClient.BaseURL
-		out.RerankModel = s.RerankClient.Model
+		out.RerankEndpoint = s.RerankClient.Endpoint()
+		out.RerankModel = s.RerankClient.ModelName()
 		rctx, rcancel := context.WithTimeout(ctx, 3*time.Second)
 		if err := s.RerankClient.Health(rctx); err == nil {
 			out.RerankReachable = true

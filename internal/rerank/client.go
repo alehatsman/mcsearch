@@ -141,3 +141,19 @@ func (c *Client) Health(ctx context.Context) error {
 	_, err := c.Rerank(ctx, "ping", []string{"ping"})
 	return err
 }
+
+// Endpoint returns the server's base URL for status reporting.
+func (c *Client) Endpoint() string { return c.BaseURL }
+
+// ModelName returns the configured model identifier for status reporting.
+func (c *Client) ModelName() string { return c.Model }
+
+// HealthChecker extends Reranker with endpoint metadata and a health probe.
+// Both *Client and *ChatReranker implement it; mcp.Server stores this
+// interface so either backend can be wired without a type switch.
+type HealthChecker interface {
+	Reranker
+	Health(ctx context.Context) error
+	Endpoint() string
+	ModelName() string
+}

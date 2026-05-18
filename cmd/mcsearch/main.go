@@ -127,10 +127,12 @@ env:
   MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
   MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
   MCSEARCH_ASK_MODEL          override the chat model for ask_codebase only (e.g. an instruct-tuned model); empty = use MCSEARCH_CHAT_MODEL
-  MCSEARCH_RERANK_URL         unset by default; set to enable cross-encoder rerank
-  MCSEARCH_RERANK_MODEL       default qwen3-reranker:4b
+  MCSEARCH_RERANK_URL         unset by default; set to enable reranking
+  MCSEARCH_RERANK_STYLE       "cohere" (default) or "chat" (decoder-style, e.g. Qwen3-Reranker-4B via vLLM)
+  MCSEARCH_RERANK_MODEL       default BAAI/bge-reranker-v2-m3
   MCSEARCH_RERANK_POOL        default 40 (candidates before rerank; clamped to 1..100)
   MCSEARCH_RERANK_TIMEOUT     default 5s (Go duration)
+  MCSEARCH_RERANK_CONCURRENCY default 4 (concurrent scoring goroutines, chat style only)
   MCSEARCH_DISABLE_RERANK     set to 1 to short-circuit rerank even if URL is set
   MCSEARCH_COMPRESS_URL       unset by default; set to enable context compression for ask/generate
   MCSEARCH_COMPRESS_MODEL     default: value of MCSEARCH_CHAT_MODEL
@@ -225,11 +227,19 @@ func newChatClient() *chat.Client {
 	return chat.New(url, model, timeout)
 }
 
-// newRerankClient returns a configured rerank client, or nil when
-// reranking is disabled. Rerank is OFF by default — empty
-// MCSEARCH_RERANK_URL or MCSEARCH_DISABLE_RERANK=1 yields nil, and
-// store.Search treats nil as "skip the stage" (today's behaviour).
-func newRerankClient() *rerank.Client {
+// newRerankClient returns a rerank.HealthChecker (either the Cohere-compatible
+// *rerank.Client or the decoder-style *rerank.ChatReranker), or nil when
+// reranking is disabled. Rerank is OFF by default — empty MCSEARCH_RERANK_URL
+// or MCSEARCH_DISABLE_RERANK=1 yields nil; store.Search treats nil as
+// "skip the stage".
+//
+// MCSEARCH_RERANK_STYLE selects the backend:
+//
+//	"cohere" (default) — Cohere-compatible /rerank endpoint (TEI, Infinity,
+//	                     vLLM with a cross-encoder model like bge-reranker-v2-m3)
+//	"chat"             — chat-completions + logprobs (vLLM serving a decoder-style
+//	                     reranker like Qwen3-Reranker-4B)
+func newRerankClient() rerank.HealthChecker {
 	url := os.Getenv("MCSEARCH_RERANK_URL")
 	if url == "" {
 		return nil
@@ -237,12 +247,21 @@ func newRerankClient() *rerank.Client {
 	if os.Getenv("MCSEARCH_DISABLE_RERANK") == "1" {
 		return nil
 	}
-	model := envOr("MCSEARCH_RERANK_MODEL", "qwen3-reranker:4b")
+	model := envOr("MCSEARCH_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
 	rawTimeout := envOr("MCSEARCH_RERANK_TIMEOUT", "5s")
 	timeout, err := time.ParseDuration(rawTimeout)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_TIMEOUT=%q is not a Go duration; using 5s\n", rawTimeout)
 		timeout = 5 * time.Second
+	}
+	if os.Getenv("MCSEARCH_RERANK_STYLE") == "chat" {
+		rawConc := envOr("MCSEARCH_RERANK_CONCURRENCY", "4")
+		concurrency, cerr := strconv.Atoi(rawConc)
+		if cerr != nil || concurrency <= 0 {
+			fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_CONCURRENCY=%q is not a positive integer; using 4\n", rawConc)
+			concurrency = 4
+		}
+		return rerank.NewChat(url, model, concurrency, timeout)
 	}
 	return rerank.New(url, model, timeout)
 }
