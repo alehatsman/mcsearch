@@ -2,9 +2,7 @@
 
 mcsearch — a local code-search MCP server for Claude (and a CLI).
 
-It pre-indexes a project into a SQLite vector store and exposes it to Claude over MCP, so the agent can ask conceptual
-   questions ("where is filesystem event debouncing handled?") and get back the exact function/type/doc block — instead
-  of grepping and reading files to orient.
+It pre-indexes a project into a SQLite vector store and exposes it to Claude over MCP, so the agent can ask conceptual questions ("where is filesystem event debouncing handled?") and get back the exact function/type/doc block — instead of grepping and reading files to orient.
 
   How it works:
   - Tree-sitter parses source into named chunks (functions, methods, types).
