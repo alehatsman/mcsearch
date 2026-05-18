@@ -146,7 +146,8 @@ env:
 
 flags:
   mcsearch query --rerank=off <path> "..."     skip rerank for this call
-  mcsearch query --format=json <path> "..."    emit hits as JSON`)
+  mcsearch query --format=json <path> "..."    emit hits as JSON
+  mcsearch query --explain <path> "..."        show per-chunk score breakdown and stage timings`)
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────
@@ -384,6 +385,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 	k := fs.Int("k", 8, "number of results to return")
 	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
+	explain := fs.Bool("explain", false, "show per-chunk score breakdown and stage timings")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -421,11 +423,15 @@ func cmdQuery(ctx context.Context, args []string) error {
 	}
 	defer st.Close()
 	em := newEmbedClient()
+	t0 := time.Now()
 	vecs, err := em.Embed(ctx, []string{q})
+	embedDur := time.Since(t0)
 	if err != nil {
 		return err
 	}
+	t1 := time.Now()
 	hits, err := st.Search(ctx, vecs[0], q, *k)
+	searchDur := time.Since(t1)
 	if err != nil {
 		return err
 	}
@@ -440,13 +446,33 @@ func cmdQuery(ctx context.Context, args []string) error {
 		return enc.Encode(hitsToJSON(hits))
 	case "", "text":
 		for i, h := range hits {
-			header := fmt.Sprintf("─── #%d %s:%d-%d  (%s)  score=%.4f", i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)
-			if h.RerankScore > 0 {
-				header += fmt.Sprintf("  rerank=%.4f", h.RerankScore)
+			header := fmt.Sprintf("─── #%d %s:%d-%d  (%s)", i+1, h.Path, h.StartLine, h.EndLine, h.Kind)
+			if *explain {
+				scores := fmt.Sprintf("sem=%.4f", h.Score)
+				if h.BM25Score > 0 {
+					scores += fmt.Sprintf("  bm25=%.4f", h.BM25Score)
+				}
+				if h.RRFScore > 0 {
+					scores += fmt.Sprintf("  rrf=%.4f", h.RRFScore)
+				}
+				if h.RerankScore > 0 {
+					scores += fmt.Sprintf("  rerank=%.4f", h.RerankScore)
+				}
+				fmt.Println(header)
+				fmt.Println("  " + scores)
+			} else {
+				header += fmt.Sprintf("  score=%.4f", h.Score)
+				if h.RerankScore > 0 {
+					header += fmt.Sprintf("  rerank=%.4f", h.RerankScore)
+				}
+				fmt.Println(header)
 			}
-			fmt.Println(header)
 			fmt.Println(truncate(h.Content, 1500))
 			fmt.Println()
+		}
+		if *explain {
+			fmt.Fprintf(os.Stderr, "timing:  embed=%dms  search=%dms  total=%dms\n",
+				embedDur.Milliseconds(), searchDur.Milliseconds(), (embedDur+searchDur).Milliseconds())
 		}
 		return nil
 	default:
