@@ -24,18 +24,67 @@ ollama, vLLM, or TEI; or an SSH-tunneled remote. At query time, cosine
 similarity and BM25 are fused via RRF, then optionally reranked by a
 cross-encoder. Source code never leaves your machine.
 
+## Primary entry point: `mcsearch_context`
+
+The headline tool is **`mcsearch_context`** — a query planner for code
+understanding. The agent (or you, from the shell) asks one free-text
+question; the router picks an intent, composes the right legs
+(`semantic_search` + `find_symbol` + graph expansion), and returns a
+compact bundle:
+
+- `semantic_hits` — top semantic chunks (path + line range + score).
+- `symbols` — exact-identifier hits with kind and location.
+- `graph` — nodes/edges from the Go graph layer when available.
+- `suggested_reads` — file ranges to open in full. Prefer these over
+  reading whole files.
+- `next_action` — a **prose** directive the agent can execute verbatim.
+- `avoid` — what NOT to do (e.g. "don't read entire files").
+
+Intent is inferred automatically from the question shape; override via
+`intent` if needed. Supported intents:
+
+```
+auto                 // default — let the router decide
+behavior_search      // "where is X handled"
+symbol_lookup        // exact identifier mentioned
+callers              // "what calls X"            (degrades — needs `calls` edges)
+callees              // "what does X call"        (degrades — needs `calls` edges)
+architecture         // "how does X work overall"
+package_topology     // package-level relations
+editing_context      // "I want to edit X, what do I need"
+```
+
+From the shell:
+
+```console
+$ mcsearch context . "where is filesystem event debouncing handled"
+$ mcsearch context . "callers of (*Store).Search"
+$ mcsearch context . "how does the indexing pipeline work" --intent architecture
+$ mcsearch context . "..." --format=json    # raw output for piping
+```
+
+From an agent, call the MCP tool `mcsearch_context`. The other MCP
+tools below are the building blocks the router composes — call them
+directly only when you already know exactly which leg you want.
+
+Drop the snippet at [`docs/claude-md-snippet.md`](docs/claude-md-snippet.md)
+into your `CLAUDE.md` to route the agent to `mcsearch_context` before
+its grep/Read reflex kicks in.
+
 **MCP tools exposed to Claude:**
 
+- **`mcsearch_context`** — the primary entry point. Pick this for any
+  code-understanding question; the tools below are what it composes.
 - `semantic_search` — ask in natural language; returns ranked chunks. Hybrid cosine + BM25 + optional rerank. Supports `exclude` path filter and `k` up to 30.
 - `find_symbol` — exact identifier lookup by name (SQL, no embedding). Use when you already know the function or type name.
 - `related_chunks` — vector neighbours of a known chunk at `path:start_line`. Explore the neighbourhood of a function without a query string.
 - `summarize_path` — one-shot file-or-range gist sent directly to the chat model. No retrieval.
 - `mcsearch_status` — endpoint health (embed / chat / rerank) and indexed project list.
 
-`semantic_search`, `find_symbol`, `related_chunks`, and `mcsearch_status` are
-always available. `summarize_path` registers only when `MCSEARCH_CHAT_URL`
-points at a live `/v1/chat/completions` server. See [MCP tools](#mcp-tools)
-for the full input/output contract.
+`mcsearch_context`, `semantic_search`, `find_symbol`, `related_chunks`,
+and `mcsearch_status` are always available. `summarize_path` registers
+only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
+server. See [MCP tools](#mcp-tools) for the full input/output contract.
 
 ## Install
 
@@ -65,7 +114,14 @@ also wired up.
 
 ```bash
 mcsearch index <path>            # index a project (or re-index incrementally)
-mcsearch query <path> "..."      # query an indexed project from the terminal
+mcsearch context <path> "..."    # one-shot router: picks intent, fuses semantic
+                                 # + symbol (+ graph when available) and returns
+                                 # suggested_reads + a prose next_action. Use
+                                 # this BEFORE grep loops.
+                                 #   --intent=<name>       force a strategy (see above)
+                                 #   --k=<n>               per-lane hit cap (default 8)
+                                 #   --format=text|json    raw output for piping
+mcsearch query <path> "..."      # raw top-k chunks for a query (no planner)
                                  #   --rerank=off          skip rerank for this call
                                  #   --format=json         emit hits as JSON (rerank_score included)
                                  #   --explain             show per-chunk score breakdown + stage timings
@@ -500,7 +556,8 @@ for the calling agent. All tools except `summarize_path` are always available.
 
 | Tool | Always on? | What it does | Key inputs |
 | --- | --- | --- | --- |
-| `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval. Returns top-k chunks with scores. Use for natural-language queries. Supports `exclude` path-prefix list for noisy directories. | `query`, `project_root?`, `k?` (default 8, max 30), `exclude?` |
+| **`mcsearch_context`** | yes | **Primary entry point.** Query planner: picks intent, fuses `semantic_search` + `find_symbol` (+ graph when available), returns `semantic_hits`, `symbols`, `suggested_reads`, plus a prose `next_action` and an `avoid` line the agent can execute verbatim. Call this before grep/Read fan-out. | `question`, `project?`, `intent?` (`auto` default; `behavior_search` / `symbol_lookup` / `callers` / `callees` / `architecture` / `package_topology` / `editing_context`), `k?` (default 8, max 30) |
+| `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval. Returns top-k chunks with scores. Use for natural-language queries. Supports `exclude` path-prefix list for noisy directories. Prefer `mcsearch_context` unless you already know you only need this leg. | `query`, `project_root?`, `k?` (default 8, max 30), `exclude?` |
 | `find_symbol` | yes | Exact identifier lookup by name — SQL index scan, no embedding. Fast and reliable for known symbol names (`MyFunc`, `HTTPHandler`). | `name`, `project_root?`, `k?` (default 10) |
 | `related_chunks` | yes | Vector neighbours of a known chunk at `path:start_line`. Finds semantically related code without a query string — use after `find_symbol` or `semantic_search` to explore the neighbourhood. | `path`, `start_line`, `project_root?`, `k?` (default 8, max 30) |
 | `mcsearch_status` | yes | Reports embed / chat / rerank endpoint health and the list of indexed projects with chunk counts, dim, and `last_indexed`. Use it before chasing a "missing result" through the code — the index may be absent, stale, or the embedding endpoint may be down. | — |
