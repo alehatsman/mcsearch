@@ -9,6 +9,8 @@
 //	nuke <path>              Delete the on-disk index for a project.
 //	watch <path>             Keep the index fresh as files change.
 //	clone <src> <dst>        Seed dst's index from src's (worktrees).
+//	graph index <path>       Build or refresh the Go static graph index.
+//	graph export <path>      Dump nodes/edges as JSONL.
 //	mcp                      Run as an MCP server over stdio.
 //	version                  Print the build version.
 package main
@@ -71,6 +73,8 @@ func main() {
 		err = cmdWatch(ctx, args)
 	case "clone":
 		err = cmdClone(ctx, args)
+	case "graph":
+		err = cmdGraph(ctx, args)
 	case "version", "-V", "--version":
 		fmt.Println(mcp.Version)
 		return
@@ -118,6 +122,11 @@ func usage() {
                                     new git worktree); follow with
                                     `+"`mcsearch index <dst>`"+` to reconcile
                                     any chunks that differ between the two.
+  mcsearch graph index <path>       extract Go packages/files/functions/methods/
+                                    types/imports into a structural graph stored
+                                    alongside the chunk index
+  mcsearch graph export <path>      dump graph_nodes/graph_edges as JSONL
+                                    (--output=<dir> defaults to <path>/.mcsearch/graph)
 
 env:
   MCSEARCH_EMBED_URL          default http://127.0.0.1:8082

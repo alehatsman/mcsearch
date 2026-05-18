@@ -7,6 +7,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
 	github.com/smacker/go-tree-sitter v0.0.0-20240827094217-dd81d9e9be82
+	golang.org/x/tools v0.41.0
 	modernc.org/sqlite v1.39.0
 )
 
@@ -21,7 +22,9 @@ require (
 	github.com/segmentio/encoding v0.5.4 // indirect
 	github.com/yosida95/uritemplate/v3 v3.0.2 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
+	golang.org/x/mod v0.32.0 // indirect
 	golang.org/x/oauth2 v0.34.0 // indirect
+	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	modernc.org/libc v1.66.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

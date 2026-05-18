@@ -185,6 +185,47 @@ func (s *Store) migrate(ctx context.Context) error {
 		   INSERT INTO chunks_fts(rowid, content, path, kind)
 		   VALUES (new.id, new.content, new.path, new.kind);
 		 END`,
+		// graph_nodes / graph_edges hold the structural index produced by
+		// `mcsearch graph index`. The schema is intentionally string-keyed
+		// (id TEXT) so node identities are stable across re-extraction and
+		// independent of SQLite's rowid. chunk_id links back to chunks.id
+		// for callers that want code text plus structural neighborhood;
+		// no FK constraint — chunks can be re-upserted with new rowids and
+		// we re-resolve the linkage on the next graph index pass.
+		`CREATE TABLE IF NOT EXISTS graph_nodes (
+		   id              TEXT PRIMARY KEY,
+		   kind            TEXT NOT NULL,
+		   name            TEXT NOT NULL,
+		   qualified_name  TEXT NOT NULL,
+		   package_path    TEXT NOT NULL DEFAULT '',
+		   file_path       TEXT NOT NULL DEFAULT '',
+		   start_line      INTEGER NOT NULL DEFAULT 0,
+		   end_line        INTEGER NOT NULL DEFAULT 0,
+		   chunk_id        INTEGER,
+		   metadata_json   TEXT NOT NULL DEFAULT '{}',
+		   content_hash    TEXT NOT NULL,
+		   last_seen_at    INTEGER NOT NULL
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_nodes_kind      ON graph_nodes(kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_nodes_name      ON graph_nodes(name)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_nodes_package   ON graph_nodes(package_path)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_nodes_file      ON graph_nodes(file_path)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_nodes_last_seen ON graph_nodes(last_seen_at)`,
+		`CREATE TABLE IF NOT EXISTS graph_edges (
+		   id              TEXT PRIMARY KEY,
+		   kind            TEXT NOT NULL,
+		   src_id          TEXT NOT NULL,
+		   dst_id          TEXT NOT NULL,
+		   file_path       TEXT NOT NULL DEFAULT '',
+		   start_line      INTEGER NOT NULL DEFAULT 0,
+		   end_line        INTEGER NOT NULL DEFAULT 0,
+		   metadata_json   TEXT NOT NULL DEFAULT '{}',
+		   content_hash    TEXT NOT NULL,
+		   last_seen_at    INTEGER NOT NULL
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_edges_src       ON graph_edges(src_id, kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_edges_dst       ON graph_edges(dst_id, kind)`,
+		`CREATE INDEX IF NOT EXISTS idx_graph_edges_last_seen ON graph_edges(last_seen_at)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {

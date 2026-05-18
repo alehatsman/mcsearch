@@ -88,7 +88,7 @@ linters:
 
       # defer rows/stmt/db.Close() and deferred store handle closes — idiomatic
       # SQL and SQLite patterns; errors in deferred cleanup are unactionable.
-      - path: internal/store/store\.go
+      - path: internal/store/(store|store_graph)\.go
         linters: [errcheck]
         text: "Error return value of `(rows|stmt|db)\\.Close` is not checked"
 
@@ -102,9 +102,15 @@ linters:
         linters: [errcheck]
         text: "Error return value of `st\\.Close` is not checked"
 
-      - path: cmd/mcsearch/main\.go
+      - path: cmd/mcsearch/(main|graph)\.go
         linters: [errcheck]
         text: "Error return value of `(st|in|out)\\.Close` is not checked"
+
+      # defer f.Close() for JSONL writers — best-effort close after a
+      # successful w.Flush(); flush errors are surfaced.
+      - path: internal/graph/export\.go
+        linters: [errcheck]
+        text: "Error return value of `f\\.Close` is not checked"
 
       # defer fw.Close() / f.Close() — fsnotify watcher and file handles;
       # idiomatic best-effort cleanup in deferred position.
@@ -129,6 +135,19 @@ linters:
       - path: internal/index/index\.go
         linters: [gosec]
         text: "G(505|401)"
+
+      # sha1 is used for stable graph-node/edge IDs and content
+      # fingerprinting (graph_nodes.content_hash). Not cryptographic.
+      - path: internal/graph/graph\.go
+        linters: [gosec]
+        text: "G(505|401)"
+
+      # G202: SQL string concatenation in store_graph.go — same
+      # justification as store.go above: query strings are built from
+      # controlled internal inputs (placeholder counts), not user data.
+      - path: internal/store/store_graph\.go
+        linters: [gosec]
+        text: "G202"
 
       # G122: os.ReadFile path in WalkDir callback — the root is the user's
       # own project directory; symlink TOCTOU is not a threat model here.
