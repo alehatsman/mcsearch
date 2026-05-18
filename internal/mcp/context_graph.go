@@ -24,6 +24,7 @@ package mcp
 
 import (
 	"context"
+	"strings"
 
 	"github.com/alehatsman/mcsearch/internal/graph"
 	"github.com/alehatsman/mcsearch/internal/store"
@@ -134,6 +135,12 @@ func loadGraphView(ctx context.Context, st *store.Store) (*graphView, error) {
 // enrichGraph populates GraphResult based on the resolved intent.
 // Mutates out.Graph in place. Returns whether anything was emitted —
 // the caller uses this to keep avoid/next_action consistent.
+//
+// Node IDs and edge from/to are rewritten to a compact form
+// (`<pkg-tail>.<qualified-name>`) so agents don't have to parse
+// `<module>::<pkg>::<kind>::<qname>` for every reference. The full
+// IDs remain available via the in-memory view for any future query
+// that takes a graph ID as input.
 func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []SemHit, symbols []SymbolHit) bool {
 	if view == nil {
 		return false
@@ -147,7 +154,7 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 		}
 		seenNode[n.ID] = true
 		gr.Nodes = append(gr.Nodes, GraphNode{
-			ID:            n.ID,
+			ID:            compactID(n),
 			QualifiedName: n.QualifiedName,
 			Kind:          string(n.Kind),
 		})
@@ -158,9 +165,16 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 			return
 		}
 		seenEdge[key] = true
+		from, to := e.SrcID, e.DstID
+		if n, ok := view.nodesByID[e.SrcID]; ok {
+			from = compactID(n)
+		}
+		if n, ok := view.nodesByID[e.DstID]; ok {
+			to = compactID(n)
+		}
 		gr.Edges = append(gr.Edges, GraphEdge{
-			From: e.SrcID,
-			To:   e.DstID,
+			From: from,
+			To:   to,
 			Kind: string(e.Kind),
 		})
 	}
@@ -276,4 +290,44 @@ func graphSupportsIntent(intent string) bool {
 		return true
 	}
 	return false
+}
+
+// compactID condenses internal/graph.NodeID's
+// `<module>::<pkg>::<kind>::<qualified-name>` into a form an agent can
+// scan at a glance. Kept stable within one response so edges and
+// nodes refer to the same string. Examples:
+//
+//	mcp.(*Server).ContextRouter    — methods, functions, types, fields
+//	internal/mcp                    — packages (qualified_name *is* the path)
+//	github.com/foo/bar              — imports (qualified_name is the path)
+func compactID(n graphNode) string {
+	switch n.Kind {
+	case graph.NodePackage:
+		if n.PackagePath != "" {
+			return pkgTail(n.PackagePath)
+		}
+		return n.QualifiedName
+	case graph.NodeImport:
+		return n.QualifiedName
+	}
+	tail := pkgTail(n.PackagePath)
+	if n.QualifiedName != "" {
+		if tail != "" {
+			return tail + "." + n.QualifiedName
+		}
+		return n.QualifiedName
+	}
+	if tail != "" && n.Name != "" {
+		return tail + "." + n.Name
+	}
+	return n.Name
+}
+
+// pkgTail returns the last path segment of pkg, e.g.
+// "github.com/x/y/internal/mcp" → "mcp". Empty string in, empty out.
+func pkgTail(pkg string) string {
+	if i := strings.LastIndex(pkg, "/"); i >= 0 {
+		return pkg[i+1:]
+	}
+	return pkg
 }

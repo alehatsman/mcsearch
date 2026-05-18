@@ -44,6 +44,11 @@ func TestResolveIntent(t *testing.T) {
 
 		// Priority: callers beats editing when both present.
 		{"callers beats editing", ContextInput{Question: "fix the callers of Search"}, IntentCallers},
+
+		// change/update no longer trigger editing_context — they're too
+		// noisy on questions like "when X changes" / "update the timestamp".
+		{"change is behavior_search", ContextInput{Question: "where does the cache invalidate when chunks change"}, IntentBehaviorSearch},
+		{"update is behavior_search", ContextInput{Question: "what triggers an update to last_indexed"}, IntentBehaviorSearch},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -117,6 +122,44 @@ func TestPickSuggestedReadsCrossLaneBias(t *testing.T) {
 	}
 	if !strings.Contains(got[0].Reason, "symbol agreement") {
 		t.Errorf("reason should mention symbol agreement: %q", got[0].Reason)
+	}
+}
+
+func TestPickSuggestedReadsCodePreferredOverDocs(t *testing.T) {
+	// A README at 0.66 shouldn't beat the .go file at 0.51 for a
+	// behavior_search question — the rerank stage occasionally lets
+	// docs outscore the code they describe, so the router applies a
+	// tiebreaker.
+	sem := []SemHit{
+		{Path: "README.md", Score: 0.66},
+		{Path: "internal/store/store.go", Score: 0.51},
+	}
+	got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, nil)
+	if len(got) == 0 || got[0].Path != "internal/store/store.go" {
+		t.Errorf("behavior_search should prefer .go over .md tiebreaker; got %+v", got)
+	}
+
+	// Architecture explicitly welcomes README — no demotion.
+	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	if len(gotArch) == 0 || gotArch[0].Path != "README.md" {
+		t.Errorf("architecture should keep README on top; got %+v", gotArch)
+	}
+}
+
+func TestIsDocPath(t *testing.T) {
+	tests := map[string]bool{
+		"README.md":              true,
+		"docs/spec.rst":          true,
+		"NOTES.txt":              true,
+		"docs/page.adoc":         true,
+		"site/post.mdx":          true,
+		"internal/store/store.go": false,
+		"cmd/main.py":             false,
+	}
+	for p, want := range tests {
+		if got := isDocPath(p); got != want {
+			t.Errorf("isDocPath(%q) = %v, want %v", p, got, want)
+		}
 	}
 }
 
@@ -334,6 +377,28 @@ func TestContextRouterEmptyQuestion(t *testing.T) {
 	}
 }
 
+func TestCompactID(t *testing.T) {
+	cases := []struct {
+		name string
+		n    graphNode
+		want string
+	}{
+		{"method", graphNode{Kind: graph.NodeMethod, Name: "ContextRouter", QualifiedName: "(*Server).ContextRouter", PackagePath: "github.com/foo/bar/internal/mcp"}, "mcp.(*Server).ContextRouter"},
+		{"type", graphNode{Kind: graph.NodeStruct, Name: "Server", QualifiedName: "Server", PackagePath: "github.com/foo/bar/internal/mcp"}, "mcp.Server"},
+		{"package", graphNode{Kind: graph.NodePackage, QualifiedName: "github.com/foo/bar/internal/mcp", PackagePath: "github.com/foo/bar/internal/mcp"}, "mcp"},
+		{"import", graphNode{Kind: graph.NodeImport, Name: "sync", QualifiedName: "sync", PackagePath: "github.com/foo/bar/internal/mcp"}, "sync"},
+		{"field", graphNode{Kind: graph.NodeField, Name: "ChatClient", QualifiedName: "Server.ChatClient", PackagePath: "github.com/foo/bar/internal/mcp"}, "mcp.Server.ChatClient"},
+		{"stdlib pkg path", graphNode{Kind: graph.NodeFunction, Name: "Println", QualifiedName: "Println", PackagePath: "fmt"}, "fmt.Println"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := compactID(tc.n); got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // seedGraph writes a synthetic graph for `root` directly via the
 // store's upsert methods. Avoids invoking ExtractGo (which needs a
 // real go.mod + GOPATH-resolvable imports) so we can test the router's
@@ -407,14 +472,32 @@ func TestContextRouterGraphSymbolLookup(t *testing.T) {
 		t.Fatalf("graph.nodes should be populated; got %+v", out.Graph)
 	}
 
-	var names []string
+	var names, ids []string
 	for _, n := range out.Graph.Nodes {
 		names = append(names, n.QualifiedName)
+		ids = append(ids, n.ID)
 	}
-	joined := strings.Join(names, ",")
+	joinedNames := strings.Join(names, ",")
 	for _, want := range []string{"Store", "(*Store).Search", "(*Store).Open"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("graph.nodes should include %q; got %s", want, joined)
+		if !strings.Contains(joinedNames, want) {
+			t.Errorf("graph.nodes should include %q; got %s", want, joinedNames)
+		}
+	}
+	// IDs must be the compact form (`<pkg-tail>.<qualified-name>`),
+	// never the legacy `<module>::<pkg>::<kind>::<qname>`.
+	joinedIDs := strings.Join(ids, ",")
+	if strings.Contains(joinedIDs, "::") {
+		t.Errorf("graph.nodes[].id should be compact, not module-qualified; got %s", joinedIDs)
+	}
+	for _, want := range []string{"p.(*Store).Search", "p.(*Store).Open", "p.Store"} {
+		if !strings.Contains(joinedIDs, want) {
+			t.Errorf("graph.nodes[].id should include %q; got %s", want, joinedIDs)
+		}
+	}
+	// Edges must reference the same compact IDs.
+	for _, e := range out.Graph.Edges {
+		if strings.Contains(e.From, "::") || strings.Contains(e.To, "::") {
+			t.Errorf("edge id should be compact; got from=%q to=%q", e.From, e.To)
 		}
 	}
 	if !strings.Contains(out.Avoid, "Do not grep") {

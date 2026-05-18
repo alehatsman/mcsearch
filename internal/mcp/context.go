@@ -79,7 +79,10 @@ var (
 	reCallees      = regexp.MustCompile(`\b(callees?|what does .* call|calls from|outgoing calls|dependencies of)\b`)
 	reArchitecture = regexp.MustCompile(`\b(architecture|how does .* work|overview|big picture|design of|walk me through|how is .* organized)\b`)
 	rePackages     = regexp.MustCompile(`\b(packages?|modules?|topology|dependency graph|import graph|package layout)\b`)
-	reEditing      = regexp.MustCompile(`\b(edit|modify|change|update|refactor|rename|extend|fix|patch|implement|add)\b`)
+	// `change` / `update` deliberately omitted — they fire on questions
+	// like "when X changes" or "update the timestamp on Y" that are
+	// really behavior_search, not editing_context.
+	reEditing      = regexp.MustCompile(`\b(edit|modify|refactor|rename|extend|fix|patch|implement|add)\b`)
 )
 
 // ─── tool: mcsearch_context ───────────────────────────────────────────────
@@ -430,6 +433,22 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 	return out, false
 }
 
+// isDocPath returns true for plain-text documentation files. Used by
+// pickSuggestedReads to keep code wins over a near-tied README hit on
+// non-architecture intents — the rerank stage *should* sort this out
+// but in practice docs sometimes outscore the code they describe.
+func isDocPath(p string) bool {
+	switch {
+	case strings.HasSuffix(p, ".md"),
+		strings.HasSuffix(p, ".rst"),
+		strings.HasSuffix(p, ".txt"),
+		strings.HasSuffix(p, ".adoc"),
+		strings.HasSuffix(p, ".mdx"):
+		return true
+	}
+	return false
+}
+
 // ─── suggested_reads ──────────────────────────────────────────────────────
 
 // pickSuggestedReads merges the top results from both lanes into a
@@ -475,18 +494,27 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 	}
 
 	// Pass 2: semantic hits, biased toward cross-lane agreement.
+	// For code-oriented intents we also demote doc paths (.md/.rst/...)
+	// as a tiebreaker, so a README at score 0.66 doesn't beat the
+	// store.go that implements the feature at score 0.51. Architecture
+	// is the exception — the README often IS the right read.
+	preferCode := intent != IntentArchitecture
 	type ranked struct {
 		hit       SemHit
 		crossLane bool
+		isDoc     bool
 	}
 	rs := make([]ranked, 0, len(semHits))
 	for _, h := range semHits {
 		_, cross := symbolPaths[h.Path]
-		rs = append(rs, ranked{hit: h, crossLane: cross})
+		rs = append(rs, ranked{hit: h, crossLane: cross, isDoc: isDocPath(h.Path)})
 	}
 	sort.SliceStable(rs, func(i, j int) bool {
 		if rs[i].crossLane != rs[j].crossLane {
 			return rs[i].crossLane // cross-lane agreement first
+		}
+		if preferCode && rs[i].isDoc != rs[j].isDoc {
+			return !rs[i].isDoc // non-doc beats doc
 		}
 		return rs[i].hit.Score > rs[j].hit.Score
 	})
