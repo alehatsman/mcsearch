@@ -655,26 +655,28 @@ func (s *Server) RunStdio(ctx context.Context) error {
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "semantic_search",
-		Description: "Search a project's code semantically by embedding the query and returning the top-k matching chunks. " +
-			"Use this instead of fanning out grep when the user's intent is described in natural language. " +
-			"Supports exclude list to skip paths. " +
-			"On error, the tool returns a structured status: 'no-index' (run mcsearch index first), " +
+		Description: "Prefer `mcsearch_context` for general code-understanding questions — it composes this " +
+			"tool with symbol lookup and graph expansion. Use semantic_search directly only when you specifically " +
+			"want raw semantic ranking without intent routing. " +
+			"Embeds the query and returns top-k matching chunks. Supports exclude list to skip paths. " +
+			"On error, returns a structured status: 'no-index' (run mcsearch index first), " +
 			"'embedding-service-unreachable' (fall back to grep), or 'ok'.",
 	}, s.search)
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "find_symbol",
-		Description: "Look up chunks by exact identifier name (function, method, type, class). " +
-			"Fast SQL lookup — no embedding required. " +
-			"Use when you already know the exact name of a symbol and want to find its definition(s). " +
-			"Returns 'not-found' when no chunk with that name exists in the index.",
+		Description: "Prefer `mcsearch_context` — it detects identifiers in your question and runs this " +
+			"lookup automatically as part of a fused response. Use find_symbol directly only when you " +
+			"already have the exact identifier name and want nothing else. " +
+			"Fast SQL lookup — no embedding required. Returns 'not-found' when no chunk with that name exists.",
 	}, s.findSymbol)
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name: "related_chunks",
-		Description: "Return chunks most similar to a specific chunk at (path, start_line). " +
-			"Uses vector cosine similarity — finds code that is semantically related even without keyword overlap. " +
-			"Use after semantic_search or find_symbol to explore the neighbourhood of a known chunk.",
+		Description: "Prefer `mcsearch_context` — it includes neighborhood expansion as part of routing. " +
+			"Use related_chunks directly only when you already have the exact (path, start_line) of a chunk " +
+			"and want its cosine neighbors. " +
+			"Finds code that is semantically related even without keyword overlap.",
 	}, s.related)
 
 	sdk.AddTool(srv, &sdk.Tool{
@@ -682,14 +684,25 @@ func (s *Server) RunStdio(ctx context.Context) error {
 		Description: "Report mcsearch endpoint health and the list of indexed projects with their chunk counts and last-indexed times.",
 	}, s.status)
 
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "mcsearch_context",
+		Description: "PRIMARY ENTRY POINT for code-understanding questions. Call this BEFORE Grep/Glob/Read fan-out. " +
+			"Given a free-text question (and optional intent override), it picks a strategy, composes semantic_search " +
+			"+ find_symbol + graph expansion, and returns a compact bundle: `semantic_hits`, `symbols`, `suggested_reads` " +
+			"(file ranges to open in full), a prose `next_action` directive you can execute verbatim, and an `avoid` line " +
+			"telling you what NOT to do. Intent is inferred automatically " +
+			"(behavior_search/symbol_lookup/callers/callees/architecture/package_topology/editing_context) — pass `intent` " +
+			"only to override. Returns 'no-index' / 'embedding-service-unreachable' for graceful fallback to grep.",
+	}, s.contextRouter)
+
 	if s.ChatClient != nil {
 		sdk.AddTool(srv, &sdk.Tool{
 			Name: "summarize_path",
-			Description: "Summarize a single file (or line range) into a tight factual digest the caller can read instead " +
-				"of the full file. No retrieval — sends the file slice directly to the chat model. Pass `focus` to steer " +
-				"(e.g. 'public API surface', 'side effects'). Path must resolve inside project_root. Files larger than " +
-				"64 KB are truncated. " +
-				"On error, returns a structured status: 'chat-service-unreachable' or 'error'.",
+			Description: "Prefer `mcsearch_context` first — its `suggested_reads` will name the file worth " +
+				"summarizing. Use summarize_path directly only when you already know which file you need digested. " +
+				"Sends the file slice directly to the chat model. Pass `focus` to steer (e.g. 'public API surface'). " +
+				"Path must resolve inside project_root. Files larger than 64 KB are truncated. " +
+				"On error, returns 'chat-service-unreachable' or 'error'.",
 		}, s.summarize)
 	}
 

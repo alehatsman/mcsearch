@@ -59,6 +59,8 @@ func main() {
 		err = cmdIndex(ctx, args)
 	case "query":
 		err = cmdQuery(ctx, args)
+	case "context":
+		err = cmdContext(ctx, args)
 	case "generate":
 		err = cmdGenerate(ctx, args)
 	case "status":
@@ -108,6 +110,11 @@ func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   mcsearch index <path>             build or refresh the index for a project
   mcsearch query <path> <query>     return top-k chunks for a query
+  mcsearch context <path> <question>  one-shot router: picks intent, fuses
+                                    semantic + symbol (+ graph when it lands)
+                                    and returns suggested_reads + a prose
+                                    next_action. Use this BEFORE grep loops.
+                                    Flags: --intent, --k, --format=text|json
   mcsearch generate <path> <prompt> generate code grounded in the project's
                                     index (RAG: top-k chunks → chat endpoint)
   mcsearch status [<path>]          show endpoint health and project stats
@@ -522,6 +529,132 @@ func hitsToJSON(hits []store.Hit) []queryJSONHit {
 		}
 	}
 	return out
+}
+
+// ─── context ──────────────────────────────────────────────────────────────
+
+// cmdContext mirrors the `mcsearch_context` MCP tool so agents and
+// humans share one implementation. The flag surface maps 1-to-1 onto
+// mcp.ContextInput so a CLI invocation can stand in for a tool call
+// when an agent is offline.
+func cmdContext(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("context", flag.ContinueOnError)
+	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
+	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
+	format := fs.String("format", "text", "output format: text | json")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) < 2 {
+		return fmt.Errorf("context needs <path> <question...>")
+	}
+	path := rest[0]
+	question := strings.Join(rest[1:], " ")
+
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(path, base)
+	if err != nil {
+		return err
+	}
+
+	s := &mcp.Server{
+		EmbedClient: newEmbedClient(),
+		IndexDir:    base,
+		StoreOpts:   storeOpts(),
+	}
+	_, out, err := s.ContextRouter(ctx, mcp.ContextInput{
+		Project:  p.Root,
+		Question: question,
+		Intent:   *intent,
+		K:        *k,
+	})
+	if err != nil {
+		return err
+	}
+
+	switch *format {
+	case "json":
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	case "", "text":
+		printContextText(out)
+		return nil
+	default:
+		return fmt.Errorf("unknown format %q (want text|json)", *format)
+	}
+}
+
+// printContextText emits a human-readable rendering of a ContextOutput.
+// Mirrors the layout cmdQuery uses for hits so the two surfaces feel
+// like the same tool.
+func printContextText(out mcp.ContextOutput) {
+	if out.Status != "ok" {
+		fmt.Fprintf(os.Stderr, "status: %s\n", out.Status)
+		if out.Hint != "" {
+			fmt.Fprintf(os.Stderr, "hint:   %s\n", out.Hint)
+		}
+		if out.Endpoint != "" {
+			fmt.Fprintf(os.Stderr, "endpoint: %s\n", out.Endpoint)
+		}
+		return
+	}
+	fmt.Printf("intent: %s  project: %s\n", out.Intent, out.Project)
+	if out.Stale {
+		fmt.Println("⚠ index is stale — refresh recommended")
+	}
+	if out.Hint != "" {
+		fmt.Printf("hint: %s\n", out.Hint)
+	}
+	fmt.Println()
+
+	if len(out.SuggestedReads) > 0 {
+		fmt.Println("Suggested reads:")
+		for i, r := range out.SuggestedReads {
+			loc := r.Path
+			if r.StartLine > 0 || r.EndLine > 0 {
+				loc = fmt.Sprintf("%s:%d-%d", r.Path, r.StartLine, r.EndLine)
+			}
+			fmt.Printf("  %d. %s\n     reason: %s\n", i+1, loc, r.Reason)
+		}
+		fmt.Println()
+	}
+
+	if len(out.Symbols) > 0 {
+		fmt.Println("Relevant symbols:")
+		for _, sym := range out.Symbols {
+			loc := sym.Path
+			if sym.StartLine > 0 {
+				loc = fmt.Sprintf("%s:%d", sym.Path, sym.StartLine)
+			}
+			fmt.Printf("  - %s  (%s)  %s\n", sym.QualifiedName, sym.Kind, loc)
+		}
+		fmt.Println()
+	}
+
+	if len(out.SemanticHits) > 0 {
+		fmt.Println("Semantic hits:")
+		for i, h := range out.SemanticHits {
+			loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
+			fmt.Printf("  %d. %s  score=%.4f", i+1, loc, h.Score)
+			if h.Reason != "" {
+				fmt.Printf("  (%s)", h.Reason)
+			}
+			fmt.Println()
+		}
+		fmt.Println()
+	}
+
+	if out.NextAction != "" {
+		fmt.Printf("Next action:\n  %s\n\n", out.NextAction)
+	}
+	if out.Avoid != "" {
+		fmt.Printf("Avoid:\n  %s\n", out.Avoid)
+	}
 }
 
 // ─── generate ──────────────────────────────────────────────────────────────
