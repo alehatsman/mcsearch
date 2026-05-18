@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,14 +164,209 @@ func TestIsDocPath(t *testing.T) {
 	}
 }
 
+// ─── inlineSuggestedReads ─────────────────────────────────────────────────
+
+func TestInlineSuggestedReadsBasic(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "f.go"),
+		"line 1\nline 2\nline 3\nline 4\nline 5\n")
+
+	reads := []SuggestedRead{{Path: "f.go", StartLine: 2, EndLine: 4, Reason: "x"}}
+	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+
+	want := "line 2\nline 3\nline 4\n"
+	if reads[0].Content != want {
+		t.Errorf("content=%q want %q", reads[0].Content, want)
+	}
+	if reads[0].Truncated {
+		t.Error("should not be truncated")
+	}
+}
+
+func TestInlineSuggestedReadsPerReadLineCap(t *testing.T) {
+	// Generate a 200-line file and ask for the whole thing. The
+	// per-read cap (60 lines) should clip the content and flag it.
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	writeFile(t, filepath.Join(root, "big.go"), b.String())
+
+	reads := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
+	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+
+	if !reads[0].Truncated {
+		t.Error("want truncated=true when range exceeds per-read cap")
+	}
+	got := strings.Count(reads[0].Content, "\n")
+	if got > 60 {
+		t.Errorf("got %d lines, want ≤60", got)
+	}
+	// EndLine on the wire stays as the original request so the
+	// caller can issue a follow-up Read for the rest.
+	if reads[0].EndLine != 200 {
+		t.Errorf("EndLine=%d, want 200 (unchanged)", reads[0].EndLine)
+	}
+}
+
+func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
+	// Three reads each at the per-read byte cap should exhaust the
+	// total budget before all are filled.
+	root := t.TempDir()
+	// Write a file with ~30 long lines so any 60-line slice hits the
+	// per-read byte cap (4 KB) first.
+	var b strings.Builder
+	for range 30 {
+		b.WriteString(strings.Repeat("x", 500))
+		b.WriteByte('\n')
+	}
+	for _, n := range []string{"a.go", "b.go", "c.go", "d.go"} {
+		writeFile(t, filepath.Join(root, n), b.String())
+	}
+	reads := []SuggestedRead{
+		{Path: "a.go", StartLine: 1, EndLine: 30},
+		{Path: "b.go", StartLine: 1, EndLine: 30},
+		{Path: "c.go", StartLine: 1, EndLine: 30},
+		{Path: "d.go", StartLine: 1, EndLine: 30},
+	}
+	inlineSuggestedReads(root, IntentBehaviorSearch, reads)
+
+	total := 0
+	for _, r := range reads {
+		total += len(r.Content)
+	}
+	if total > 12*1024 {
+		t.Errorf("total inlined bytes %d > 12 KB cap", total)
+	}
+	// Last read should be empty — budget exhausted.
+	if reads[len(reads)-1].Content != "" {
+		t.Errorf("last read should be empty once budget is exhausted; got %d bytes", len(reads[len(reads)-1].Content))
+	}
+}
+
+func TestInlineSuggestedReadsMissingFileGraceful(t *testing.T) {
+	root := t.TempDir()
+	reads := []SuggestedRead{{Path: "does-not-exist.go", StartLine: 1, EndLine: 5}}
+	inlineSuggestedReads(root, IntentBehaviorSearch, reads) // must not panic
+	if reads[0].Content != "" {
+		t.Errorf("missing file should leave content empty, got %q", reads[0].Content)
+	}
+}
+
+func TestContextRouterInlinesByDefault(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Greet(name string) string { return \"hi \" + name }\nfunc Bye() {}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	s := newServer(srv.URL, cacheDir)
+
+	_, out, err := s.ContextRouter(context.Background(), ContextInput{
+		Question: "where do we greet users",
+		Project:  root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.SuggestedReads) == 0 {
+		t.Fatal("want suggested_reads")
+	}
+	if out.SuggestedReads[0].Content == "" {
+		t.Errorf("suggested_reads[0].Content should be inlined by default; got empty")
+	}
+}
+
+func TestContextRouterNoInline(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Greet(name string) string { return \"hi \" + name }\nfunc Bye() {}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	s := newServer(srv.URL, cacheDir)
+
+	_, out, err := s.ContextRouter(context.Background(), ContextInput{
+		Question: "where do we greet users",
+		Project:  root,
+		NoInline: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.SuggestedReads) == 0 {
+		t.Fatal("want suggested_reads")
+	}
+	for i, r := range out.SuggestedReads {
+		if r.Content != "" {
+			t.Errorf("suggested_reads[%d].Content should be empty with NoInline=true; got %d bytes", i, len(r.Content))
+		}
+	}
+}
+
 func TestPickSuggestedReadsArchitectureCap(t *testing.T) {
 	sem := []SemHit{
 		{Path: "a.go", Score: 0.9}, {Path: "b.go", Score: 0.8},
 		{Path: "c.go", Score: 0.7}, {Path: "d.go", Score: 0.6},
+		{Path: "e.go", Score: 0.5}, {Path: "f.go", Score: 0.4},
 	}
 	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
-	if len(got) != 3 {
-		t.Errorf("architecture should return 3 reads, got %d", len(got))
+	// Exploration intents widen to 5 reads so the initial bundle gives
+	// the caller a real cross-file picture.
+	if len(got) != 5 {
+		t.Errorf("architecture should return 5 reads, got %d", len(got))
+	}
+}
+
+func TestInlineCapsFor(t *testing.T) {
+	exploration := []string{IntentArchitecture, IntentPackageTopology}
+	targeted := []string{
+		IntentBehaviorSearch, IntentSymbolLookup, IntentCallers,
+		IntentCallees, IntentEditingContext,
+	}
+	for _, intent := range exploration {
+		c := inlineCapsFor(intent)
+		if c.totalBytesCap < 32*1024 {
+			t.Errorf("%s totalBytesCap=%d, want ≥32 KB for exploration", intent, c.totalBytesCap)
+		}
+		if c.maxLinesPerRead < 100 {
+			t.Errorf("%s maxLinesPerRead=%d, want ≥100 for exploration", intent, c.maxLinesPerRead)
+		}
+	}
+	for _, intent := range targeted {
+		c := inlineCapsFor(intent)
+		if c.totalBytesCap > 16*1024 {
+			t.Errorf("%s totalBytesCap=%d, want ≤16 KB for targeted intents", intent, c.totalBytesCap)
+		}
+	}
+}
+
+func TestInlineSuggestedReadsExplorationDenser(t *testing.T) {
+	// 200-line file requested in full. targeted caps clip at 60 lines;
+	// exploration caps should clip at 120.
+	root := t.TempDir()
+	var b strings.Builder
+	for i := 1; i <= 200; i++ {
+		fmt.Fprintf(&b, "line %d\n", i)
+	}
+	writeFile(t, filepath.Join(root, "big.go"), b.String())
+
+	targeted := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
+	inlineSuggestedReads(root, IntentBehaviorSearch, targeted)
+	targetedLines := strings.Count(targeted[0].Content, "\n")
+
+	exploration := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
+	inlineSuggestedReads(root, IntentArchitecture, exploration)
+	explorationLines := strings.Count(exploration[0].Content, "\n")
+
+	if !(explorationLines > targetedLines) {
+		t.Errorf("exploration should include more lines than targeted; got %d vs %d", explorationLines, targetedLines)
+	}
+	if explorationLines > 120 {
+		t.Errorf("exploration line count %d exceeds expected 120 cap", explorationLines)
 	}
 }
 

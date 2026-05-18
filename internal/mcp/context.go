@@ -18,10 +18,12 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -92,6 +94,7 @@ type ContextInput struct {
 	Question string `json:"question" jsonschema:"free-text question about the codebase (e.g. 'where is filesystem event debouncing handled?', 'how does indexing work?', 'callers of (*Store).Search')"`
 	Intent   string `json:"intent,omitempty" jsonschema:"force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context (default: auto)"`
 	K        int    `json:"k,omitempty" jsonschema:"max hits per lane (default 8, max 30)"`
+	NoInline bool   `json:"no_inline,omitempty" jsonschema:"skip inlining file contents into suggested_reads. Default off: each suggested_read carries its line-range content (per-read cap ~60 lines / 4 KB, total cap ~12 KB across reads; oversize ranges are clipped with truncated=true). Set true if you already have the files open."`
 }
 
 // SemHit is a semantic-search result reduced to the wire shape the
@@ -139,6 +142,16 @@ type SuggestedRead struct {
 	StartLine int    `json:"start_line,omitempty"`
 	EndLine   int    `json:"end_line,omitempty"`
 	Reason    string `json:"reason"`
+	// Content is the file slice for [StartLine, EndLine], inlined by
+	// default so the caller doesn't need a follow-up Read for the
+	// common case. Capped per-read and totaled across reads — see
+	// inlineSuggestedReads. Empty when no_inline=true, when the file
+	// cannot be opened, or when the caller hit the total byte budget.
+	Content   string `json:"content,omitempty"`
+	// Truncated is set when the per-read line/byte cap clipped the
+	// content before reaching EndLine. The caller can still issue a
+	// regular Read for the rest if needed.
+	Truncated bool `json:"truncated,omitempty"`
 }
 
 type ContextOutput struct {
@@ -242,6 +255,9 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 
 	enrichGraph(&out, intent, graphView, out.SemanticHits, out.Symbols)
 	out.SuggestedReads = pickSuggestedReads(intent, out.SemanticHits, out.Symbols, symbolPaths)
+	if !in.NoInline {
+		inlineSuggestedReads(p.Root, intent, out.SuggestedReads)
+	}
 	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols)
 	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil)
 	out.Status = "ok"
@@ -466,7 +482,10 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 	maxReads := 2
 	switch intent {
 	case IntentArchitecture, IntentPackageTopology:
-		maxReads = 3
+		// Exploration intents — the caller is forming a mental model,
+		// so a denser bundle (more files, more lines, see
+		// inlineCapsFor) pays off more than a slim one.
+		maxReads = 5
 	case IntentSymbolLookup, IntentCallers, IntentCallees:
 		maxReads = 2
 	}
@@ -609,5 +628,115 @@ func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndex
 		return "Do not read entire files; the suggested ranges cover the relevant context."
 	}
 	return ""
+}
+
+// ─── inline file contents into suggested_reads ────────────────────────────
+
+// inlineCaps are the per-intent budgets for inlineSuggestedReads.
+// Exploration intents (architecture, package_topology) get a denser
+// bundle than targeted ones — the caller is forming a mental model,
+// so giving them more files / longer slices saves multiple round-trips
+// vs. saving a few KB of response.
+type inlineCaps struct {
+	maxLinesPerRead int
+	maxBytesPerRead int
+	totalBytesCap   int
+}
+
+func inlineCapsFor(intent string) inlineCaps {
+	switch intent {
+	case IntentArchitecture, IntentPackageTopology:
+		return inlineCaps{maxLinesPerRead: 120, maxBytesPerRead: 8 * 1024, totalBytesCap: 40 * 1024}
+	default:
+		return inlineCaps{maxLinesPerRead: 60, maxBytesPerRead: 4 * 1024, totalBytesCap: 12 * 1024}
+	}
+}
+
+// inlineSuggestedReads fills each SuggestedRead.Content with the file
+// slice for its [StartLine, EndLine] range so callers don't need a
+// follow-up Read for the common case. Bounds are enforced at two
+// levels: per-read (lines + bytes) and total bytes across all reads,
+// so a minified single-line file or a 1000-line suggested range can't
+// blow up the response. Caps scale with intent (see inlineCapsFor).
+//
+// Failures (missing file, unreadable, scanner error) leave Content
+// empty and the caller still has Path/StartLine/EndLine to fall back
+// on a manual Read.
+func inlineSuggestedReads(projectRoot, intent string, reads []SuggestedRead) {
+	caps := inlineCapsFor(intent)
+	budget := caps.totalBytesCap
+	for i := range reads {
+		if budget <= 0 {
+			return
+		}
+		abs := reads[i].Path
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(projectRoot, abs)
+		}
+		content, truncated, err := readLineRange(abs, reads[i].StartLine, reads[i].EndLine, caps.maxLinesPerRead, min(caps.maxBytesPerRead, budget))
+		if err != nil {
+			continue
+		}
+		reads[i].Content = content
+		reads[i].Truncated = truncated
+		budget -= len(content)
+	}
+}
+
+// readLineRange returns the 1-indexed [start, end] line slice of a
+// file, clipped at maxLines and maxBytes. truncated reports whether
+// either cap fired before reaching end.
+func readLineRange(path string, start, end, maxLines, maxBytes int) (string, bool, error) {
+	if maxLines <= 0 || maxBytes <= 0 {
+		return "", false, nil
+	}
+	if start <= 0 {
+		start = 1
+	}
+	if end < start {
+		end = start
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false, err
+	}
+	defer f.Close()
+
+	sc := bufio.NewScanner(f)
+	// Lift the default 64 KB line cap so minified files don't bail —
+	// we still bound the output via maxBytes below.
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+
+	var buf strings.Builder
+	lineNum := 0
+	included := 0
+	truncated := false
+	for sc.Scan() {
+		lineNum++
+		if lineNum < start {
+			continue
+		}
+		if lineNum > end {
+			break
+		}
+		if included >= maxLines {
+			truncated = true
+			break
+		}
+		line := sc.Bytes()
+		if buf.Len()+len(line)+1 > maxBytes {
+			truncated = true
+			break
+		}
+		buf.Write(line)
+		buf.WriteByte('\n')
+		included++
+	}
+	if err := sc.Err(); err != nil {
+		return "", false, err
+	}
+	// If we exited the loop because the file ended before EndLine,
+	// that's not truncation by the cap — leave truncated as-is.
+	return buf.String(), truncated, nil
 }
 

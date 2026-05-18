@@ -536,6 +536,7 @@ func cmdContext(ctx context.Context, args []string) error {
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
+	noInline := fs.Bool("no-inline", false, "skip inlining file contents into suggested_reads (default: inline on)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -565,6 +566,7 @@ func cmdContext(ctx context.Context, args []string) error {
 		Question: question,
 		Intent:   *intent,
 		K:        *k,
+		NoInline: *noInline,
 	})
 	if err != nil {
 		return err
@@ -614,6 +616,14 @@ func printContextText(out mcp.ContextOutput) {
 				loc = fmt.Sprintf("%s:%d-%d", r.Path, r.StartLine, r.EndLine)
 			}
 			fmt.Printf("  %d. %s\n     reason: %s\n", i+1, loc, r.Reason)
+			if r.Content != "" {
+				for line := range strings.SplitSeq(strings.TrimRight(r.Content, "\n"), "\n") {
+					fmt.Printf("     │ %s\n", line)
+				}
+				if r.Truncated {
+					fmt.Println("     │ … (truncated; Read the file for the rest)")
+				}
+			}
 		}
 		fmt.Println()
 	}

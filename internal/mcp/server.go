@@ -689,8 +689,13 @@ func (s *Server) RunStdio(ctx context.Context) error {
 		Description: "PRIMARY ENTRY POINT for code-understanding questions. Call this BEFORE Grep/Glob/Read fan-out. " +
 			"Given a free-text question (and optional intent override), it picks a strategy, composes semantic_search " +
 			"+ find_symbol + graph expansion, and returns a compact bundle: `semantic_hits`, `symbols`, `suggested_reads` " +
-			"(file ranges to open in full), a prose `next_action` directive you can execute verbatim, and an `avoid` line " +
-			"telling you what NOT to do. Intent is inferred automatically " +
+			"(file ranges with their CONTENTS inlined by default — no follow-up Read needed in the common case), a prose " +
+			"`next_action` directive you can execute verbatim, and an `avoid` line telling you what NOT to do. Suggested " +
+			"reads are capped per-intent: targeted intents get ~2 reads × 60 lines / 4 KB each (~12 KB total); exploration " +
+			"intents (architecture, package_topology) widen to ~5 reads × 120 lines / 8 KB each (~40 KB total) so the " +
+			"initial bundle alone gives a real cross-file picture. Oversize ranges arrive with `truncated: true` and the " +
+			"original line range, so the caller can Read the rest if needed. Pass `no_inline: true` to omit the content " +
+			"payload when you already have the files open. Intent is inferred automatically " +
 			"(behavior_search/symbol_lookup/callers/callees/architecture/package_topology/editing_context) — pass `intent` " +
 			"only to override. Returns 'no-index' / 'embedding-service-unreachable' for graceful fallback to grep.",
 	}, s.contextRouter)
