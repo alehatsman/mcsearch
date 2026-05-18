@@ -636,6 +636,48 @@ func printContextText(out mcp.ContextOutput) {
 				loc = fmt.Sprintf("%s:%d", sym.Path, sym.StartLine)
 			}
 			fmt.Printf("  - %s  (%s)  %s\n", sym.QualifiedName, sym.Kind, loc)
+			if sym.Signature != "" {
+				fmt.Printf("      sig: %s\n", sym.Signature)
+			}
+			if sym.Doc != "" {
+				for line := range strings.SplitSeq(sym.Doc, "\n") {
+					fmt.Printf("      doc: %s\n", line)
+				}
+			}
+		}
+		fmt.Println()
+	}
+
+	if len(out.References) > 0 {
+		fmt.Println("References:")
+		for _, r := range out.References {
+			fmt.Printf("  - %s:%d  %s\n", r.Path, r.Line, r.Snippet)
+		}
+		fmt.Println()
+	}
+
+	if len(out.Annotations) > 0 {
+		fmt.Println("Annotations:")
+		for path, meta := range out.Annotations {
+			fmt.Printf("  %s\n", path)
+			if meta.LastCommit != "" {
+				fmt.Printf("    last:    %s  %s\n", meta.LastCommit, meta.LastAuthor)
+			}
+			if len(meta.Owners) > 0 {
+				fmt.Printf("    owners:  %s\n", strings.Join(meta.Owners, " "))
+			}
+			if meta.NearestDoc != "" {
+				fmt.Printf("    doc:     %s\n", meta.NearestDoc)
+			}
+			if len(meta.Tests) > 0 {
+				fmt.Printf("    tests:   %s\n", strings.Join(meta.Tests, " "))
+			}
+			if meta.BuildTags != "" {
+				fmt.Printf("    build:   %s\n", meta.BuildTags)
+			}
+			if meta.Package != "" {
+				fmt.Printf("    package: %s\n", meta.Package)
+			}
 		}
 		fmt.Println()
 	}
