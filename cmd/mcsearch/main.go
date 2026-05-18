@@ -126,6 +126,7 @@ env:
   MCSEARCH_CHAT_URL           default http://127.0.0.1:8081
   MCSEARCH_CHAT_MODEL         default Qwen/Qwen2.5-Coder-7B-Instruct
   MCSEARCH_CHAT_TIMEOUT       default 120s (Go duration)
+  MCSEARCH_ASK_MODEL          override the chat model for ask_codebase only (e.g. an instruct-tuned model); empty = use MCSEARCH_CHAT_MODEL
   MCSEARCH_RERANK_URL         unset by default; set to enable cross-encoder rerank
   MCSEARCH_RERANK_MODEL       default qwen3-reranker:4b
   MCSEARCH_RERANK_POOL        default 40 (candidates before rerank; clamped to 1..100)
@@ -963,6 +964,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 		RerankClient: rerankClient,
 		IndexDir:     base,
 		StoreOpts:    opts,
+		AskChatModel: os.Getenv("MCSEARCH_ASK_MODEL"),
 	}
 	return srv.RunStdio(ctx)
 }

@@ -26,6 +26,13 @@ type Server struct {
 	RerankClient *rerank.Client // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
 	IndexDir     string         // base dir holding per-project index folders
 	StoreOpts    store.Options  // applied to every Store opened by the server
+	// AskChatModel optionally overrides ChatClient.Model for the
+	// ask_codebase tool. Empty = use the same model as generate_code.
+	// Intended for swapping in an instruction-tuned model for Q&A while
+	// keeping a coder-tuned model for code generation — coder models
+	// resist citation-only prompts and produce ungrounded "hypothetical"
+	// answers, instruct models follow the contract more reliably.
+	AskChatModel string
 }
 
 // ─── tool: semantic_search ────────────────────────────────────────────────
@@ -195,32 +202,55 @@ const defaultGenerateSystem = "You are a precise coding assistant. " +
 // the project rather than emitting code. The retrieval pipeline is
 // identical to generate_code; only the framing differs — code chunks
 // in, prose out.
-const defaultAskSystem = "You are a precise repository analyst answering questions about the user's codebase. " +
-	"Ground every claim in the CONTEXT chunks: cite file paths and symbol names verbatim, " +
-	"never invent identifiers or guess at code you weren't shown. " +
-	"If the CONTEXT is insufficient, say so plainly and name what's missing. " +
-	"When multiple chunks bear on the question — for example, several gates in a filter chain, " +
-	"several layers in a pipeline, several call sites of a function — enumerate ALL of them. " +
-	"Do not stop at the first plausible answer when the CONTEXT shows more. " +
-	"Prefer short, structured answers (bullets or numbered steps) over long prose. " +
-	"Quote code only when the literal text matters; otherwise describe it."
+//
+// Output is forced into a two-section CITATIONS / ANSWER format:
+// commit to evidence before opining. This pattern (chain-of-grounding)
+// dramatically reduces hallucination across models — even ones that
+// otherwise ignore "don't invent" instructions, because they have to
+// physically write down which chunks they're using first, and then
+// any claim in ANSWER without a [n] tag is visibly wrong.
+//
+// Code blocks are banned because qwen2.5-coder and similar coder-tuned
+// models otherwise wrap invented signatures in real file paths. Reach
+// for an instruct-tuned model via MCSEARCH_ASK_MODEL if the coder
+// model keeps cheating on the format.
+const defaultAskSystem = "You are a repository analyst. Your job is to point at where code lives and describe what it does — not to reproduce it. Code blocks are banned in your output: no triple-backtick fences, no four-space indents.\n" +
+	"\n" +
+	"OUTPUT FORMAT — you MUST follow this exact two-section template:\n" +
+	"\n" +
+	"CITATIONS:\n" +
+	"[1] <path>:<start>-<end> — <one short clause describing what this chunk contains>\n" +
+	"[2] <path>:<start>-<end> — <one short clause describing what this chunk contains>\n" +
+	"... (one line per chunk you'll actually rely on; skip irrelevant chunks)\n" +
+	"\n" +
+	"ANSWER:\n" +
+	"<numbered list of steps or bullets answering the question. Every concrete claim ends with a [n] tag pointing back to a CITATIONS entry.>\n" +
+	"\n" +
+	"RULES:\n" +
+	"1. CITATIONS comes first, always. If you write the ANSWER section before CITATIONS, the response is invalid.\n" +
+	"2. Every path/line in CITATIONS must come from the CONTEXT chunks below — copy them verbatim from the chunk headers. Never invent a path.\n" +
+	"3. Every claim in ANSWER must end with a `[n]` tag. Claims without a tag are guessing — drop them or move them to a separate \"UNCLEAR:\" line that names what CONTEXT is missing.\n" +
+	"4. Mention symbols inline with single backticks (`funcName`). No fenced code blocks; no paraphrased code snippets.\n" +
+	"5. Banned phrases — they signal guessing, not citing: \"hypothetical\", \"example\", \"for example\", \"for instance\", \"approximate\", \"simplified\", \"pseudo-code\", \"something like\", \"likely\", \"probably\", \"typically\". If you reach for one, replace it with a citation or drop the claim.\n" +
+	"6. When several chunks bear on the question — gates in a filter chain, stages in a pipeline, call sites of a function — enumerate ALL of them. Each gets its own CITATIONS entry and its own ANSWER bullet.\n" +
+	"7. If CONTEXT is insufficient, the ANSWER section ends with \"UNCLEAR: <what's missing>\". Suggest a follow-up (raise k, read a specific path)."
 
 func (s *Server) generate(ctx context.Context, req *sdk.CallToolRequest, in GenerateInput) (*sdk.CallToolResult, GenerateOutput, error) {
-	return s.runRAGChat(ctx, in, defaultGenerateSystem)
+	return s.runRAGChat(ctx, in, defaultGenerateSystem, "")
 }
 
 func (s *Server) ask(ctx context.Context, req *sdk.CallToolRequest, in AskInput) (*sdk.CallToolResult, GenerateOutput, error) {
 	// AskInput and GenerateInput are shape-compatible; the only
 	// reason ask_codebase has its own type is to advertise different
 	// jsonschema descriptions to MCP clients (Q&A vs. code gen).
-	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem)
+	return s.runRAGChat(ctx, GenerateInput(in), defaultAskSystem, s.AskChatModel)
 }
 
 // runRAGChat is the shared semantic-search → chat pipeline behind
 // both generate_code and ask_codebase. Caller picks the default system
 // prompt; everything else (retrieval, context formatting, error
 // translation) is identical.
-func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem string) (*sdk.CallToolResult, GenerateOutput, error) {
+func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem string, modelOverride string) (*sdk.CallToolResult, GenerateOutput, error) {
 	out := GenerateOutput{}
 	if s.ChatClient == nil {
 		return nil, GenerateOutput{Status: "error", Hint: "chat client not configured on this server"}, nil
@@ -314,6 +344,7 @@ func (s *Server) runRAGChat(ctx context.Context, in GenerateInput, defaultSystem
 	resp, err := s.ChatClient.Generate(ctx, messages, chat.Options{
 		Temperature: in.Temperature,
 		MaxTokens:   in.MaxTokens,
+		Model:       modelOverride,
 	})
 	if err != nil {
 		if errors.Is(err, chat.ErrUnreachable) {

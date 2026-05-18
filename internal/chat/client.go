@@ -52,6 +52,11 @@ type Options struct {
 	Temperature float32
 	// MaxTokens caps the response length. Zero means "use server default".
 	MaxTokens int
+	// Model overrides the client's default Model for this call. Empty
+	// means "use c.Model". Lets a single Client serve multiple tools
+	// that each want a different model on the same backend — e.g.
+	// generate_code on a coder model, ask_codebase on an instruct model.
+	Model string
 }
 
 type Response struct {
@@ -86,8 +91,12 @@ func (c *Client) Generate(ctx context.Context, messages []Message, opts Options)
 	if len(messages) == 0 {
 		return Response{}, fmt.Errorf("chat: no messages")
 	}
+	model := c.Model
+	if opts.Model != "" {
+		model = opts.Model
+	}
 	reqBody := chatRequest{
-		Model:    c.Model,
+		Model:    model,
 		Messages: messages,
 		Stream:   false,
 	}

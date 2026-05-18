@@ -415,6 +415,26 @@ fall back to grep without crashing.
 matching common secret patterns in their first 4 KB are skipped at index
 time with a warning.
 
+## MCP tools
+
+When running as `mcsearch mcp`, the server registers the following tools
+for the calling agent. `semantic_search` and `mcsearch_status` are always
+available; the three chat-backed tools register only when
+`MCSEARCH_CHAT_URL` is set and the chat client initialises cleanly.
+
+| Tool | Always on? | What it does | Key inputs |
+| --- | --- | --- | --- |
+| `semantic_search` | yes | Hybrid (cosine + BM25 + optional rerank) retrieval over the project's index. Returns the top-k chunks with `path`, `kind`, `start_line`, `end_line`, `score`, `bm25_score`, `rrf_score`, `rerank_score`, `content`. Prefer this over fanning out `grep` when the query is described in natural language. | `query`, `project_root?`, `k?` (default 8, max 30) |
+| `mcsearch_status` | yes | Reports embed / chat / rerank endpoint health and the list of indexed projects with chunk counts, dim, and `last_indexed`. Use it before chasing a "missing result" through the code — the index may be absent, stale, or the embedding endpoint may be down. | — |
+| `ask_codebase` | needs chat | Natural-language Q&A grounded in the index. Same retrieval pipeline as `generate_code` but tuned for prose answers: emits a `CITATIONS:` / `ANSWER:` block where every claim carries a `[n]` tag back to a real chunk. Use this instead of `Read`+synthesise for "how does X work?" / "where is Y handled?". | `prompt`, `project_root?`, `k?`, `use_index?` (default true), `system?`, `temperature?`, `max_tokens?` |
+| `generate_code` | needs chat | Code generation / edit / explanation. Same retrieval as `ask_codebase`, but the system prompt steers the model toward fenced code blocks. Returns both the generated `content` and the `context` chunks that were fed in, so callers can verify the model didn't invent symbols. | same as `ask_codebase` |
+| `summarize_path` | needs chat | One-shot file-or-range gist. No retrieval — reads the path directly and sends the slice to the chat model. Path must resolve inside `project_root`; slices larger than 64 KB are truncated (`truncated: true` in the response). Use `focus` to steer (`"public API surface"`, `"side effects"`, etc.). For whole-repo overviews use `ask_codebase` instead. | `path`, `project_root?`, `start_line?`, `end_line?`, `focus?`, `temperature?`, `max_tokens?` |
+
+Every tool returns a structured `status` field — `ok` / `no-index` /
+`embedding-service-unreachable` / `chat-service-unreachable` / `error` —
+with a human-readable `hint` so the agent can recover (fall back to
+`grep`, run `mcsearch index`, etc.) instead of pretending success.
+
 ## Docker
 
 A self-contained image is provided. Tree-sitter requires CGO, so the
