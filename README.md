@@ -1,15 +1,22 @@
 # mcsearch
 
-Local semantic-search helper for Claude Code. Indexes a project on-disk,
-embeds chunks against a self-hosted OpenAI-compatible `/v1/embeddings`
-endpoint (vLLM, TEI, or ollama — local GPU or SSH-tunneled to a remote
-host), and exposes a `semantic_search` tool over MCP so Claude can ask
-for ranked code chunks instead of fanning out grep calls.
+Local code-intelligence MCP server for Claude Code. Indexes a project
+on disk, embeds chunks against a self-hosted OpenAI-compatible
+`/v1/embeddings` endpoint (vLLM, TEI, or ollama — local GPU or
+SSH-tunneled to a remote host), and exposes a small toolkit so the agent
+can retrieve, reason about, and generate code grounded in real symbols
+and paths from your project:
 
-A second MCP tool, `generate_code`, reuses the same index as RAG context
-and routes the prompt through a self-hosted `/v1/chat/completions`
-endpoint — same wire shape, different model — so generation is grounded
-in real symbols and paths from your project.
+- `semantic_search` — hybrid retrieval (cosine + BM25 + optional cross-encoder rerank) over the project index. Replaces fanning-out `grep` for natural-language queries.
+- `ask_codebase` — natural-language Q&A with citations that point back to real chunks. Replaces `Read`-and-synthesise for "how does X work?" / "where is Y handled?".
+- `generate_code` — same retrieval pipeline, routed through a self-hosted `/v1/chat/completions` endpoint so generation references real symbols, not invented ones.
+- `summarize_path` — one-shot file-or-range gist; no retrieval, just sends the slice to the chat model with a structured framing prompt.
+- `mcsearch_status` — endpoint health (embed / chat / rerank) and the list of indexed projects.
+
+The first and the last are always on. The chat-backed three register
+only when `MCSEARCH_CHAT_URL` points at a live `/v1/chat/completions`
+server. See the [MCP tools](#mcp-tools) section at the end for the full
+input/output contract.
 
 Source code never leaves the calling machine — only chunk text crosses
 the wire to the embedding / chat endpoints, which you control.
@@ -174,6 +181,7 @@ The `status` field is one of `ok` / `no-index` / `embedding-service-unreachable`
 | `MCSEARCH_DISABLE_BM25`   | unset                              | Set to `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone. |
 | `MCSEARCH_CHAT_URL`       | `http://127.0.0.1:8081`            | OpenAI-compatible `/v1/chat/completions` base URL (used by `generate`). |
 | `MCSEARCH_CHAT_MODEL`     | `Qwen/Qwen2.5-Coder-7B-Instruct`   | Model name forwarded as `model` for the chat leg. |
+| `MCSEARCH_ASK_MODEL`      | unset                              | Override `MCSEARCH_CHAT_MODEL` for the `ask_codebase` tool only — useful when an instruct-tuned model follows the citation template more reliably than a coder-tuned one. |
 | `MCSEARCH_ALLOW_PATHS`    | unset                              | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` and `$HOME` expansion. |
 | `MCSEARCH_CHAT_TIMEOUT`   | `120s`                             | HTTP timeout for each chat-completion request. |
 | `MCSEARCH_RERANK_URL`     | unset                              | Base URL of a Cohere-shape `/rerank` server (TEI, Infinity, vLLM with reranker). Unset = rerank disabled. |
@@ -254,12 +262,29 @@ touch `Search` and is unaffected. Per-call opt-out is
 Design and migration notes: see
 [`docs/specs/spec-01-rerank.md`](docs/specs/spec-01-rerank.md).
 
-### Code generation (RAG + chat)
+### Code generation and Q&A (RAG + chat)
 
+Two MCP tools share the same retrieval pipeline as `semantic_search`,
+but route the top-k chunks through a self-hosted `/v1/chat/completions`
+endpoint instead of returning them raw:
+
+- `generate_code` — tuned for code output. Steers the model toward
+  fenced code blocks and warns it to ground in CONTEXT.
+- `ask_codebase` — tuned for prose Q&A. Forces a `CITATIONS:` /
+  `ANSWER:` template where every claim carries a `[n]` tag back to a
+  real chunk, and bans code fences so the model can't smuggle invented
+  signatures past the format.
+
+Both return the chunks fed in as `context` alongside the generated
+text, so the caller can verify the model didn't hallucinate symbols
+that weren't in the project. `MCSEARCH_ASK_MODEL` optionally points
+`ask_codebase` at a separate instruct-tuned model — coder-tuned models
+resist citation-only prompts and still try to emit code.
+
+From the terminal, only the code-generation half is wired up:
 `mcsearch generate <path> "<prompt>"` runs the same hybrid retrieval as
 `query`, then prepends the top-k chunks to the prompt as a `CONTEXT`
-block and sends the result to a self-hosted `/v1/chat/completions`
-endpoint:
+block and sends the result to the chat endpoint:
 
 ```console
 $ mcsearch generate ./ "add a flag to skip the BM25 leg in cmdQuery"
