@@ -22,3 +22,4 @@ coverage.txt
 
 # arch-snapshot output (local read-only, regenerated on demand)
 /docs-working/
+.claude/
