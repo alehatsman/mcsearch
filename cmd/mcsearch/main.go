@@ -67,6 +67,8 @@ func main() {
 		err = cmdStatus(ctx, args)
 	case "env":
 		err = cmdEnv(ctx, args)
+	case "compact":
+		err = cmdCompact(ctx, args)
 	case "nuke":
 		err = cmdNuke(ctx, args)
 	case "reindex":
@@ -123,6 +125,12 @@ func usage() {
   mcsearch env                      print effective env-var config with sources
                                     (--all to include tuning knobs, --doc for
                                     descriptions, --format=text|json)
+  mcsearch compact <path>           concatenate all indexable files under <path>
+                                    to stdout with `+"`===== <relpath> =====`"+`
+                                    headers — for pasting into LLM prompts.
+                                    Honors .gitignore/.mcsearch-ignore and
+                                    skips binaries + secret-shaped files.
+                                    Flags: --out FILE, --max-bytes N, --strip
   mcsearch nuke   <path>            delete the on-disk index for a project
   mcsearch reindex <path>           drop and re-embed a project from scratch
   mcsearch reindex --all --yes      drop and re-embed every known project
