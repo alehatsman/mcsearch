@@ -44,6 +44,7 @@ const WindowOverlap = 10
 type Chunk struct {
 	Path      string // relative to project root
 	Kind      string // tree-sitter node kind or "window"
+	Name      string // primary identifier (function/method/type name); empty for windows/orphans
 	StartLine int    // 1-based, inclusive
 	EndLine   int    // 1-based, inclusive
 	Content   string
@@ -191,9 +192,10 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 		body := string(src[startByte:endByte])
 		startLine := lineOf(src, startByte)
 		endLine := max(lineOf(src, endByte-1), startLine)
+		name := nodeIdentifier(n, src)
 		if len(body) <= MaxBytes {
 			out = append(out, Chunk{
-				Path: relPath, Kind: kind,
+				Path: relPath, Kind: kind, Name: name,
 				StartLine: startLine, EndLine: endLine,
 				Content:   body,
 				startByte: startByte,
@@ -206,12 +208,26 @@ func treeChunks(ctx context.Context, relPath string, src []byte, cfg langConfig)
 		for _, w := range windowOver(bodyLines, startLine) {
 			w.Path = relPath
 			w.Kind = kind + ":window"
+			w.Name = name
 			w.startByte = startByte
 			w.endByte = endByte
 			out = append(out, w)
 		}
 	}
 	return out, nil
+}
+
+// nodeIdentifier extracts the primary identifier of a tree-sitter node by
+// looking up its "name" field — the standard field name for the declared
+// identifier in every tree-sitter grammar we target (Go functions, Python
+// defs, JS/TS classes, Rust items, Java methods, etc.). Returns "" when the
+// node has no such field (e.g. impl_item, lexical_declaration).
+func nodeIdentifier(n *sitter.Node, src []byte) string {
+	nameNode := n.ChildByFieldName("name")
+	if nameNode == nil {
+		return ""
+	}
+	return string(src[nameNode.StartByte():nameNode.EndByte()])
 }
 
 // orphanWindows emits window chunks over the parts of src that aren't
@@ -444,6 +460,11 @@ func (c Chunk) EmbedText() string {
 	if c.Kind != "" && c.Kind != "window" {
 		b.WriteString("// kind: ")
 		b.WriteString(c.Kind)
+		b.WriteByte('\n')
+	}
+	if c.Name != "" {
+		b.WriteString("// name: ")
+		b.WriteString(c.Name)
 		b.WriteByte('\n')
 	}
 	b.WriteString(c.Content)

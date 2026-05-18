@@ -166,6 +166,38 @@ class Greeter:
 	}
 }
 
+func TestChunkNameExtraction(t *testing.T) {
+	src := []byte("package main\n\nfunc cmdIndex(ctx context.Context) error { return nil }\n\nfunc helper() {}\n")
+	chunks, err := Chunks(context.Background(), "main.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, c := range chunks {
+		if c.Name != "" {
+			names[c.Name] = true
+		}
+	}
+	for _, want := range []string{"cmdIndex", "helper"} {
+		if !names[want] {
+			t.Errorf("expected Name=%q in chunks; got names: %v", want, names)
+		}
+	}
+}
+
+func TestEmbedTextStampsName(t *testing.T) {
+	c := Chunk{Path: "main.go", Kind: "function_declaration", Name: "cmdIndex", Content: "func cmdIndex() {}"}
+	got := c.EmbedText()
+	if !strings.Contains(got, "// name: cmdIndex\n") {
+		t.Errorf("EmbedText missing name header: %q", got)
+	}
+	// windows and orphans have no Name — ensure no spurious header
+	w := Chunk{Path: "main.go", Kind: "window", Content: "some code"}
+	if strings.Contains(w.EmbedText(), "// name:") {
+		t.Errorf("window chunk should not emit name header: %q", w.EmbedText())
+	}
+}
+
 func TestLineCountsAreOneBased(t *testing.T) {
 	src := []byte("package x\n\nfunc A() {}\n")
 	chunks, _ := Chunks(context.Background(), "a.go", src)
