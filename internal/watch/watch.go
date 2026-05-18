@@ -39,10 +39,10 @@ type Watcher struct {
 	opts    Options
 	ctx     context.Context // set by Run, used by flush
 
-	mu       sync.Mutex
-	dirty    bool   // events have arrived since the last successful flush
-	running  bool   // a flush goroutine is currently running
-	timer    *time.Timer
+	mu      sync.Mutex
+	dirty   bool // events have arrived since the last successful flush
+	running bool // a flush goroutine is currently running
+	timer   *time.Timer
 }
 
 func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watcher {
@@ -157,9 +157,7 @@ func (w *Watcher) flush() {
 		start := time.Now()
 		err := w.indexer.Run(w.ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) {
-				// Shutdown initiated. Stop quietly.
-			} else {
+			if !errors.Is(err, context.Canceled) {
 				w.opts.Logger.Error("re-index failed", "err", err)
 			}
 		} else if w.opts.Verbose {

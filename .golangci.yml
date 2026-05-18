@@ -81,13 +81,67 @@ linters:
 
   exclusions:
     rules:
+      # defer resp.Body.Close() — standard HTTP client pattern; error is
+      # unactionable at the point of deferred close.
+      - linters: [errcheck]
+        text: "Error return value of `resp\\.Body\\.Close` is not checked"
+
+      # defer rows/stmt/db.Close() and deferred store handle closes — idiomatic
+      # SQL and SQLite patterns; errors in deferred cleanup are unactionable.
+      - path: internal/store/store\.go
+        linters: [errcheck]
+        text: "Error return value of `(rows|stmt|db)\\.Close` is not checked"
+
+      - path: internal/store/store\.go
+        linters: [errcheck]
+        text: "Error return value of `fmt\\.Sscanf` is not checked"
+
+      # defer st.Close() — mcp server and cmd store handles; best-effort
+      # close in hot path and error paths; original error is what matters.
+      - path: internal/mcp/server\.go
+        linters: [errcheck]
+        text: "Error return value of `st\\.Close` is not checked"
+
+      - path: cmd/mcsearch/main\.go
+        linters: [errcheck]
+        text: "Error return value of `(st|in|out)\\.Close` is not checked"
+
+      # defer fw.Close() / f.Close() — fsnotify watcher and file handles;
+      # idiomatic best-effort cleanup in deferred position.
+      - path: internal/(watch/watch|ignore/ignore)\.go
+        linters: [errcheck]
+        text: "Error return value of `(fw|f)\\.Close` is not checked"
+
       # fmt.Fprintf/Fprintln/Fprint to stdout/stderr in cmd/ — best-effort
       # writes to terminal output; ignoring the error is idiomatic Go CLI code.
       - path: cmd/
         linters: [errcheck]
         text: "Error return value of `fmt\\.F"
 
-      # cyclop: main.go dispatch is intentionally monolithic.
+      # G202: SQL string concatenation in store.go — query strings are built
+      # from controlled internal inputs (column names, operators), not user data.
+      - path: internal/store/store\.go
+        linters: [gosec]
+        text: "G202"
+
+      # sha1 is used for content fingerprinting (chunk dedup), not for
+      # cryptographic security. G505/G401 are false positives here.
+      - path: internal/index/index\.go
+        linters: [gosec]
+        text: "G(505|401)"
+
+      # G122: os.ReadFile path in WalkDir callback — the root is the user's
+      # own project directory; symlink TOCTOU is not a threat model here.
+      - path: internal/index/index\.go
+        linters: [gosec]
+        text: "G122"
+
+      # cyclop: index.Run and main.go dispatch are intentionally complex; each
+      # branch handles a distinct subcommand or index state — extraction would
+      # add indirection without reducing real complexity.
+      - path: internal/index/index\.go
+        linters: [cyclop]
+
       - path: cmd/mcsearch/main\.go
         linters: [cyclop]
 

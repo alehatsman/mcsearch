@@ -25,7 +25,7 @@ import (
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/rerank"
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // register sqlite driver
 )
 
 // Options influence the runtime behaviour of an opened Store.
@@ -80,7 +80,7 @@ type Store struct {
 	// to fall back to the per-row SQL hot path.
 	cacheMu        sync.RWMutex
 	cacheLoaded    bool
-	cacheIndexedAt int64   // last_indexed_at (nanoseconds) when the cache was built
+	cacheIndexedAt int64 // last_indexed_at (nanoseconds) when the cache was built
 	cacheIDs       []int64
 	cacheVecs      []float32 // flat [len(cacheIDs) * dim]
 	cacheNorms     []float32 // precomputed |v| per row, zero-norm rows skipped at load time

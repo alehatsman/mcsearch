@@ -494,7 +494,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 		}
 		if *explain {
 			fmt.Fprintf(os.Stderr, "timing:  embed=%dms  search=%dms  total=%dms\n",
-				embedDur.Milliseconds(), searchDur.Milliseconds(), (embedDur+searchDur).Milliseconds())
+				embedDur.Milliseconds(), searchDur.Milliseconds(), (embedDur + searchDur).Milliseconds())
 		}
 		return nil
 	default:
@@ -630,7 +630,6 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	return nil
 }
 
-
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
@@ -719,7 +718,6 @@ func cmdStatus(ctx context.Context, args []string) error {
 		files   int
 		last    time.Time
 		corrupt bool
-		empty   bool
 	}
 	var rows []row
 	var empties int
@@ -821,7 +819,7 @@ func relativeTime(t time.Time) string {
 
 // ─── nuke ──────────────────────────────────────────────────────────────────
 
-func cmdNuke(ctx context.Context, args []string) error {
+func cmdNuke(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("nuke", flag.ContinueOnError)
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1044,7 +1042,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 // at the same path with the same content in dst; differing files get
 // reconciled on the next `mcsearch index <dst>` (incremental — only
 // changed chunks are re-embedded).
-func cmdClone(ctx context.Context, args []string) error {
+func cmdClone(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
 	force := fs.Bool("force", false, "overwrite dst's index if it already exists")
 	if err := fs.Parse(args); err != nil {
@@ -1145,7 +1143,6 @@ func cmdMCP(ctx context.Context, args []string) error {
 		DraftClient:    newDraftClient(),
 		IndexDir:       base,
 		StoreOpts:      opts,
-		AskChatModel:   os.Getenv("MCSEARCH_ASK_MODEL"),
 	}
 	return srv.RunStdio(ctx)
 }
