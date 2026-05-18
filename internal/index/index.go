@@ -75,6 +75,14 @@ func New(p *proj.Project, st *store.Store, em *embed.Client, ig *ignore.Matcher,
 // processed last time. We TouchPath() all of its chunks in one UPDATE
 // and skip the read+parse+SHA work entirely — turning the no-change
 // re-index from O(files × parse) into O(files × stat + 1 UPDATE).
+// slowFile holds one file that survived all walk-phase filters and needs
+// SHA-based deduplication against the store.
+type slowFile struct {
+	rel    string
+	data   []byte
+	chunks []chunk.Chunk
+}
+
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	var (
@@ -90,6 +98,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		lastIndexed = prevStats.LastIndex
 	}
 
+	// Pass 1: walk the tree. Files that hit the mtime fast-path are handled
+	// immediately (one UPDATE). Files that need SHA-level deduplication are
+	// collected into slowFiles for a single batch query after the walk.
+	var slowFiles []slowFile
 	err := filepath.WalkDir(ix.Proj.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if ix.Options.Verbose {
@@ -176,7 +188,6 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			skipped++
 			return nil
 		}
-
 		chunks, err := chunk.Chunks(ctx, rel, data)
 		if err != nil {
 			if ix.Options.Verbose {
@@ -184,21 +195,41 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			}
 			return nil
 		}
-		seen += len(chunks)
+		slowFiles = append(slowFiles, slowFile{rel: rel, data: data, chunks: chunks})
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("walk: %w", err)
+	}
 
-		existing, err := ix.Store.ExistingSHAs(ctx, rel)
-		if err != nil {
+	// Pass 2: one batch query for all slow-path files instead of N per-file
+	// queries. This is the main latency win on cold/partial-change runs.
+	slowPaths := make([]string, len(slowFiles))
+	for i, sf := range slowFiles {
+		slowPaths[i] = sf.rel
+	}
+	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, slowPaths)
+	if err != nil {
+		return fmt.Errorf("existing SHAs: %w", err)
+	}
+
+	// Pass 3: process each slow-path file using the pre-fetched SHA sets.
+	for _, sf := range slowFiles {
+		if err := ctx.Err(); err != nil {
 			return err
 		}
-		for _, c := range chunks {
+		existing := existingBatch[sf.rel]
+		seen += len(sf.chunks)
+
+		for _, c := range sf.chunks {
 			sha := chunkSHA(c.Content)
 			if existing[sha] {
-				if err := ix.Store.TouchSeen(ctx, rel, sha, c.Name, startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, sf.rel, sha, c.Name, startTime); err != nil {
 					return err
 				}
 				continue
 			}
-			toEmbed = append(toEmbed, pending{rel: rel, chunk: c, sha: sha})
+			toEmbed = append(toEmbed, pending{rel: sf.rel, chunk: c, sha: sha})
 		}
 
 		// Per-file summary, opt-in. SHA is computed on the slice we'd
@@ -206,8 +237,8 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		// doesn't re-summarize on every run). If we already have a
 		// summary chunk for this exact slice, just bump last_seen_at
 		// and skip the chat round-trip.
-		if ix.Options.Summarize && ix.Options.Chat != nil && len(chunks) > 0 {
-			slice := data
+		if ix.Options.Summarize && ix.Options.Chat != nil && len(sf.chunks) > 0 {
+			slice := sf.data
 			truncated := false
 			if len(slice) > summarizeCap {
 				slice = slice[:summarizeCap]
@@ -215,25 +246,25 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			}
 			fileSHA := chunkSHA(string(slice))
 			if existing[fileSHA] {
-				if err := ix.Store.TouchSeen(ctx, rel, fileSHA, "", startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, sf.rel, fileSHA, "", startTime); err != nil {
 					return err
 				}
 				seen++
 			} else {
-				summary, err := summarizeFile(ctx, ix.Options.Chat, rel, slice)
+				summary, err := summarizeFile(ctx, ix.Options.Chat, sf.rel, slice)
 				if err != nil {
-					ix.Options.Logger.Warn("summarize failed", "path", rel, "err", err)
+					ix.Options.Logger.Warn("summarize failed", "path", sf.rel, "err", err)
 				} else if strings.TrimSpace(summary) != "" {
 					if ix.Options.Verbose && truncated {
-						ix.Options.Logger.Info("summarize truncated", "path", rel, "size", len(data))
+						ix.Options.Logger.Info("summarize truncated", "path", sf.rel, "size", len(sf.data))
 					}
 					toEmbed = append(toEmbed, pending{
-						rel: rel,
+						rel: sf.rel,
 						chunk: chunk.Chunk{
-							Path:      rel,
+							Path:      sf.rel,
 							Kind:      chunk.KindFileSummary,
 							StartLine: 1,
-							EndLine:   chunk.LineCount(data),
+							EndLine:   chunk.LineCount(sf.data),
 							Content:   summary,
 						},
 						sha: fileSHA,
@@ -248,30 +279,30 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		// SHA is keyed on the chunk source text so cache invalidation is
 		// automatic when the function body changes.
 		if ix.Options.Summarize && ix.Options.Chat != nil {
-			for _, c := range chunks {
+			for _, c := range sf.chunks {
 				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < chunkSummaryMinLines {
 					continue
 				}
 				sumSHA := chunkSHA(chunk.KindChunkSummary + ":" + c.Content)
 				if existing[sumSHA] {
-					if err := ix.Store.TouchSeen(ctx, rel, sumSHA, "", startTime); err != nil {
+					if err := ix.Store.TouchSeen(ctx, sf.rel, sumSHA, "", startTime); err != nil {
 						return err
 					}
 					seen++
 					continue
 				}
-				summary, err := summarizeChunk(ctx, ix.Options.Chat, rel, c)
+				summary, err := summarizeChunk(ctx, ix.Options.Chat, sf.rel, c)
 				if err != nil {
-					ix.Options.Logger.Warn("chunk summarize failed", "path", rel, "start", c.StartLine, "err", err)
+					ix.Options.Logger.Warn("chunk summarize failed", "path", sf.rel, "start", c.StartLine, "err", err)
 					continue
 				}
 				if strings.TrimSpace(summary) == "" {
 					continue
 				}
 				toEmbed = append(toEmbed, pending{
-					rel: rel,
+					rel: sf.rel,
 					chunk: chunk.Chunk{
-						Path:      rel,
+						Path:      sf.rel,
 						Kind:      chunk.KindChunkSummary,
 						StartLine: c.StartLine,
 						EndLine:   c.EndLine,
@@ -285,10 +316,6 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		// Old rows for this file whose SHA disappeared get pruned at the
 		// end via PruneUnseen — they never had last_seen_at bumped on this
 		// run.
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("walk: %w", err)
 	}
 
 	if len(toEmbed) > 0 {

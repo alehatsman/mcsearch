@@ -307,6 +307,48 @@ func (s *Store) ExistingSHAs(ctx context.Context, path string) (map[string]bool,
 	return out, rows.Err()
 }
 
+// ExistingSHAsBatch returns existing content_sha1 sets for multiple paths in a
+// single round-trip. The outer map is keyed by path; missing paths map to nil.
+// Batched in groups of 500 to stay within SQLite's default parameter limit.
+func (s *Store) ExistingSHAsBatch(ctx context.Context, paths []string) (map[string]map[string]bool, error) {
+	out := make(map[string]map[string]bool, len(paths))
+	const batchSize = 500
+	for i := 0; i < len(paths); i += batchSize {
+		end := i + batchSize
+		if end > len(paths) {
+			end = len(paths)
+		}
+		slice := paths[i:end]
+		args := make([]any, len(slice))
+		for j, p := range slice {
+			args[j] = p
+		}
+		rows, err := s.db.QueryContext(ctx,
+			`SELECT path, content_sha1 FROM chunks WHERE path IN (`+inPlaceholders(len(slice))+`)`,
+			args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var path, sha string
+			if err := rows.Scan(&path, &sha); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if out[path] == nil {
+				out[path] = make(map[string]bool)
+			}
+			out[path][sha] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return out, nil
+}
+
 // PendingChunk is one row destined for an UpsertMany batch.
 type PendingChunk struct {
 	Path       string
