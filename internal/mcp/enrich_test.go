@@ -269,6 +269,62 @@ func TestReadSignatureAndDocFieldShape(t *testing.T) {
 	if !startsWithName("Callback func(int) error", "Callback") {
 		t.Error("startsWithName should accept field whose type is a function type")
 	}
+	// Bash function decl: `name() {` IS the declaration shape.
+	if !startsWithName("run_rule() {", "run_rule") {
+		t.Error("startsWithName should accept bash function decl `name() {`")
+	}
+	if !startsWithName("\trun_rule () {", "run_rule") {
+		t.Error("startsWithName should accept bash decl with whitespace inside parens")
+	}
+}
+
+func TestLooksLikeBashFuncDecl(t *testing.T) {
+	cases := map[string]bool{
+		"()":               false, // missing body opener
+		"() {":             true,
+		"( ) {":            true,
+		"(\t)\t{":          true,
+		"() {  # comment":  true,
+		"(int) {":          false, // has args — not a bash function decl
+		"(":                false,
+		"":                 false,
+	}
+	for in, want := range cases {
+		if got := looksLikeBashFuncDecl(in); got != want {
+			t.Errorf("looksLikeBashFuncDecl(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+func TestReadSignatureAndDocBashFunction(t *testing.T) {
+	// Bash function decl `name() {` plus a leading comment block.
+	// Confirms two things: the bash decl shape is recognized as a
+	// signature, AND a later `name arg \` call site doesn't shadow
+	// the real declaration during the forward scan.
+	root := t.TempDir()
+	src := strings.Join([]string{
+		"#!/usr/bin/env bash",
+		"",
+		"# run_rule scans the project for one regex rule.",
+		"run_rule() {",
+		"  local name=\"$1\"",
+		"}",
+		"",
+		"# call sites later in the file",
+		"run_rule stub-panic \\",
+		"  '.*panic.*' \\",
+		"  'avoid raw panics'",
+	}, "\n") + "\n"
+	path := filepath.Join(root, "lint.sh")
+	writeFile(t, path, src)
+
+	sig, doc := readSignatureAndDoc(path, 3, "run_rule")
+	if !strings.HasPrefix(sig, "run_rule()") {
+		t.Errorf("sig=%q, want bash decl `run_rule() {`", sig)
+	}
+	if !strings.Contains(doc, "run_rule scans the project") {
+		t.Errorf("doc=%q, want the leading #-comment", doc)
+	}
 }
 
 func TestReadSignatureAndDocMultiLineSignature(t *testing.T) {

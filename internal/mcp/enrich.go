@@ -374,13 +374,41 @@ func startsWithName(line, name string) bool {
 	if isIdentChar(next) {
 		return false
 	}
-	// `name(` is a call — reject. Declarations have a keyword prefix
-	// (`func name(`, `def name(`) which is handled by looksLikeDeclaration
-	// instead.
+	// `name(...)` is usually a call — reject. The exception is bash
+	// where `name() {` IS the function declaration. Detect that
+	// specific shape (empty/whitespace parens followed by `{`) before
+	// falling through to call-rejection.
 	if next == '(' {
-		return false
+		return looksLikeBashFuncDecl(t[len(name):])
 	}
 	return true
+}
+
+// looksLikeBashFuncDecl matches the bash function-declaration suffix
+// starting at the opening paren: `( )` followed by `{` (with any
+// whitespace in between). Used by startsWithName to distinguish
+//
+//	run_rule() {        # declaration
+//	run_rule arg \      # call
+//
+// — both lines start with `run_rule` but only the first should be
+// accepted as a signature.
+func looksLikeBashFuncDecl(s string) bool {
+	if len(s) == 0 || s[0] != '(' {
+		return false
+	}
+	i := 1
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	if i >= len(s) || s[i] != ')' {
+		return false
+	}
+	i++
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i < len(s) && s[i] == '{'
 }
 
 func isIdentChar(b byte) bool {
