@@ -563,10 +563,21 @@ func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intent
 			})
 			paths[h.Path] = struct{}{}
 			if len(out) >= k {
-				return out, paths
+				break
 			}
 		}
+		if len(out) >= k {
+			break
+		}
 	}
+	// Demote test/doc/build/fixture paths so the prose directive
+	// (which points at the first symbol) lands on real implementation.
+	// FindSymbol returns rows sorted by (path, start_line), which
+	// alphabetically lifts `internal/graph/testdata/...` above the
+	// real `internal/store/...` for shared names like `Store`.
+	sort.SliceStable(out, func(i, j int) bool {
+		return !isNonImplPath(out[i].Path) && isNonImplPath(out[j].Path)
+	})
 	return out, paths
 }
 
@@ -710,7 +721,15 @@ func isBuildOrConfigPath(p string) bool {
 // annotations still link the matching test from each suggested
 // implementation read — demotion only affects ranking, not
 // availability.
+//
+// Also catches Go testdata/ directories: those hold chunker / graph
+// fixtures (e.g. `internal/graph/testdata/simple/store/store.go`),
+// which look like real code but aren't — promoting them above the
+// real definition is a foot-gun.
 func isTestPath(p string) bool {
+	if isFixturePath(p) {
+		return true
+	}
 	base := filepath.Base(p)
 	switch {
 	case strings.HasSuffix(base, "_test.go"),
@@ -727,6 +746,23 @@ func isTestPath(p string) bool {
 		strings.HasSuffix(base, "_spec.rb"),
 		strings.HasSuffix(base, "_test.rs"):
 		return true
+	}
+	return false
+}
+
+// isFixturePath reports whether the path lives inside a fixture
+// directory — Go's canonical `testdata/`, plus `__fixtures__/` (JS).
+// These are intentionally test-only inputs and should rank below
+// real implementation files.
+func isFixturePath(p string) bool {
+	// Normalize separators so the segment scan works on both POSIX
+	// and Windows paths.
+	p = filepath.ToSlash(p)
+	for _, seg := range strings.Split(p, "/") {
+		switch seg {
+		case "testdata", "__fixtures__":
+			return true
+		}
 	}
 	return false
 }

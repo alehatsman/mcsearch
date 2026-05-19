@@ -571,6 +571,56 @@ func TestMaxSemanticScore(t *testing.T) {
 	}
 }
 
+func TestIsFixturePath(t *testing.T) {
+	cases := map[string]bool{
+		"internal/graph/testdata/simple/store/store.go": true,
+		"pkg/testdata/foo.go":                           true,
+		"web/__fixtures__/users.json":                   true,
+		"internal/store/store.go":                       false,
+		"internal/test_helpers.go":                      false, // not in a testdata dir
+		"docs/README.md":                                false,
+	}
+	for path, want := range cases {
+		if got := isFixturePath(path); got != want {
+			t.Errorf("isFixturePath(%q) = %v, want %v", path, got, want)
+		}
+	}
+}
+
+func TestRunSymbolLaneDemotesFixtures(t *testing.T) {
+	// FindSymbol orders by (path, start_line), so `internal/graph/
+	// testdata/simple/store/store.go` lands BEFORE `internal/store/
+	// store.go` alphabetically. The symbol lane must demote testdata
+	// paths so the prose directive points at real code.
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "real.go"),
+		"package main\n\ntype Store struct{}\n")
+	writeFile(t, filepath.Join(projDir, "testdata", "fixture.go"),
+		"package fixture\n\ntype Store struct{}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	s := newServer(srv.URL, cacheDir)
+
+	_, out, err := s.ContextRouter(context.Background(), ContextInput{
+		Question: "Store",
+		Project:  root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Symbols) < 2 {
+		t.Fatalf("expected 2 symbols (real + testdata); got %d", len(out.Symbols))
+	}
+	if out.Symbols[0].Path != "real.go" {
+		t.Errorf("first symbol should be real.go (not testdata); got %q", out.Symbols[0].Path)
+	}
+	if !strings.Contains(out.Symbols[1].Path, "testdata") {
+		t.Errorf("second symbol should be the testdata fixture; got %q", out.Symbols[1].Path)
+	}
+}
+
 func TestPickSuggestedReadsFiltersRollupSummaries(t *testing.T) {
 	// package_summary / repo_summary rollup chunks have Path pointing
 	// at a directory and zero line ranges. They're informative in the
