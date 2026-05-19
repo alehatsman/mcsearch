@@ -252,9 +252,16 @@ func declarationMentions(decl, name string) bool {
 }
 
 // startsWithName reports whether the first whitespace-delimited token
-// of line equals name. Used to accept field-shape declaration lines
-// (Go fields, Python attrs) that don't begin with a recognized
-// declaration keyword but DO start with the symbol identifier itself.
+// of line equals name AND the line looks like a declaration (not a
+// call). Used to accept field-shape declaration lines (Go fields,
+// Python attrs) that don't begin with a recognized declaration keyword
+// but DO start with the symbol identifier itself.
+//
+// Rejects call sites: a line like `extractFile(p, file, ...)` also
+// starts with the name, but `name(` is always a call/invocation, never
+// a Go field or Python attr declaration. Without this guard, stale
+// chunk offsets in the index can latch onto a call site instead of the
+// real declaration.
 func startsWithName(line, name string) bool {
 	if name == "" {
 		return false
@@ -266,10 +273,20 @@ func startsWithName(line, name string) bool {
 	if len(t) == len(name) {
 		return true
 	}
+	next := t[len(name)]
 	// Boundary: next char must not be an identifier character (so
 	// "MaxFileSize" matches " MaxFileSize int64" but NOT
 	// " MaxFileSizeOther int64").
-	return !isIdentChar(t[len(name)])
+	if isIdentChar(next) {
+		return false
+	}
+	// `name(` is a call — reject. Declarations have a keyword prefix
+	// (`func name(`, `def name(`) which is handled by looksLikeDeclaration
+	// instead.
+	if next == '(' {
+		return false
+	}
+	return true
 }
 
 func isIdentChar(b byte) bool {

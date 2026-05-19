@@ -256,6 +256,19 @@ func TestReadSignatureAndDocFieldShape(t *testing.T) {
 	if startsWithName("Other MaxFileSize int64", "MaxFileSize") {
 		t.Error("startsWithName must require leading position")
 	}
+	// `name(` is a call — must reject.
+	if startsWithName("extractFile(p, file)", "extractFile") {
+		t.Error("startsWithName must reject call sites (name followed by paren)")
+	}
+	if startsWithName("\textractFile(ctx)", "extractFile") {
+		t.Error("startsWithName must reject calls even with leading whitespace")
+	}
+	// Sanity: a field with parens-in-type (Go func type, etc.) — common
+	// shape `Callback func(...)`. The leading token is `Callback`, next
+	// non-ident char is space (then `func`), so it's accepted.
+	if !startsWithName("Callback func(int) error", "Callback") {
+		t.Error("startsWithName should accept field whose type is a function type")
+	}
 }
 
 func TestReadSignatureAndDocStalenessGuard(t *testing.T) {
