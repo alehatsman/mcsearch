@@ -84,14 +84,14 @@ func enrichSymbolsSigDoc(projectRoot string, syms []SymbolHit) {
 		if !filepath.IsAbs(abs) {
 			abs = filepath.Join(projectRoot, abs)
 		}
-		sig, doc := readSignatureAndDoc(abs, syms[i].StartLine)
+		sig, doc := readSignatureAndDoc(abs, syms[i].StartLine, bareSymbolName(syms[i].QualifiedName))
 		syms[i].Signature = sig
 		syms[i].Doc = doc
 	}
 }
 
 // readSignatureAndDoc reads the file once and returns:
-//   - signature: the declaration line at-or-just-after startLine, trimmed
+//   - signature: the declaration line at-or-after startLine, trimmed
 //   - doc: contiguous //-prefix (Go) or #-prefix (Python/shell) lines
 //     attached to the declaration, joined with newlines, capped
 //
@@ -99,15 +99,20 @@ func enrichSymbolsSigDoc(projectRoot string, syms []SymbolHit) {
 // which for Go funcs+methods is the first doc-comment line, NOT the
 // `func` line. So we scan forward from startLine through contiguous
 // blanks/comments and treat the first non-comment line as the
-// declaration anchor. The forward-walked comments become the doc; if
-// there are none (chunk start lands on the decl itself), we fall back
-// to comments above startLine.
+// declaration anchor.
 //
-// Both fields come back empty when no declaration is found within a
-// small forward window. That's the staleness guard — when the index
-// drifts, the recorded offset rarely lands near a real decl, so
-// suppressing the fields is better than emitting nonsense.
-func readSignatureAndDoc(path string, startLine int) (string, string) {
+// `wantName` (optional) is the bare identifier the caller expects to
+// find — when the chunker's start_line is bumped back into a *prior*
+// function's doc block (observed for adjacent decls in the same
+// file), the first decl we encounter belongs to that prior function.
+// Pass the symbol's name to keep scanning past mismatched decls until
+// we hit one whose signature mentions wantName; pass "" to accept the
+// first decl unconditionally (matches the legacy behavior).
+//
+// Both fields come back empty when no matching declaration is found
+// within a small forward window — staleness guard for the case where
+// the recorded offset has drifted off any real decl.
+func readSignatureAndDoc(path string, startLine int, wantName string) (string, string) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", ""
@@ -119,10 +124,12 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 
 	// `above` buffers up to maxDocLines lines preceding startLine for
 	// the doc-fallback when the chunk starts on the decl itself.
-	// `forward` buffers up to maxDocLines+1 lines starting at startLine
-	// so we can walk past leading comments to find the decl.
+	// `forward` buffers a wider window starting at startLine — wide
+	// enough that we can skip past a mismatched adjacent function's
+	// body if the chunker's start_line points there.
 	above := make([]string, 0, maxDocLines)
-	forward := make([]string, 0, maxDocLines+1)
+	const forwardWindow = 120
+	forward := make([]string, 0, forwardWindow)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
@@ -135,7 +142,7 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 			continue
 		}
 		forward = append(forward, sc.Text())
-		if len(forward) > maxDocLines {
+		if len(forward) >= forwardWindow {
 			break
 		}
 	}
@@ -146,37 +153,57 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 		return "", ""
 	}
 
-	// Walk forward through blanks/comments to find the declaration.
+	// Walk forward looking for a declaration whose signature mentions
+	// wantName (or any declaration when wantName is empty). Decls that
+	// don't match are skipped — they belong to a different symbol whose
+	// chunk happens to share our start_line. lastCommentStart tracks
+	// the most recent run of comments we've seen, so the accepted
+	// declaration carries ITS doc, not the previous function's.
 	declIdx := -1
+	lastCommentStart := -1
+	inCommentRun := false
 	for i, line := range forward {
 		t := strings.TrimSpace(line)
-		if t == "" || isCommentLine(t) {
-			continue
-		}
-		if looksLikeDeclaration(t) {
+		switch {
+		case t == "":
+			inCommentRun = false
+		case isCommentLine(t):
+			if !inCommentRun {
+				lastCommentStart = i
+				inCommentRun = true
+			}
+		default:
+			inCommentRun = false
+			if !looksLikeDeclaration(t) {
+				continue
+			}
+			if wantName != "" && !declarationMentions(t, wantName) {
+				continue
+			}
 			declIdx = i
 		}
-		break
+		if declIdx >= 0 {
+			break
+		}
 	}
 	if declIdx < 0 {
-		// Staleness guard: nothing decl-shaped in the forward window.
 		return "", ""
 	}
 
 	sig := strings.TrimSpace(forward[declIdx])
 
-	// Doc precedence: if the forward walk passed through comment lines,
-	// those ARE the doc (the chunk starts on the doc comment). Otherwise
-	// fall back to comments immediately above startLine.
+	// Doc precedence: contiguous comments immediately above the
+	// accepted decl in the forward window. Falls back to `above` when
+	// the decl is at forward[0] (no leading comments captured).
 	var docLines []string
-	if declIdx > 0 {
-		for _, line := range forward[:declIdx] {
+	if lastCommentStart >= 0 && lastCommentStart < declIdx {
+		for _, line := range forward[lastCommentStart:declIdx] {
 			t := strings.TrimSpace(line)
 			if isCommentLine(t) {
 				docLines = append(docLines, t)
 			}
 		}
-	} else {
+	} else if declIdx == 0 {
 		for i := len(above) - 1; i >= 0; i-- {
 			t := strings.TrimSpace(above[i])
 			if !isCommentLine(t) {
@@ -190,6 +217,38 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 		doc = doc[:maxDocBytes] + "…"
 	}
 	return sig, doc
+}
+
+// declarationMentions reports whether the declaration line `decl`
+// references the identifier `name`. Used to disambiguate adjacent-
+// function chunks whose chunker-recorded start_line points back at a
+// prior function's doc block. Matches whole-identifier tokens only —
+// "Search" should not match "searchRaw" or "SearchSummaries".
+func declarationMentions(decl, name string) bool {
+	if name == "" {
+		return true
+	}
+	for i := 0; i < len(decl); {
+		j := strings.Index(decl[i:], name)
+		if j < 0 {
+			return false
+		}
+		start := i + j
+		end := start + len(name)
+		// Boundary check on both sides — letter/digit/underscore = same token.
+		leftOK := start == 0 || !isIdentChar(decl[start-1])
+		rightOK := end == len(decl) || !isIdentChar(decl[end])
+		if leftOK && rightOK {
+			return true
+		}
+		i = end
+	}
+	return false
+}
+
+func isIdentChar(b byte) bool {
+	return (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') ||
+		(b >= '0' && b <= '9') || b == '_'
 }
 
 func isCommentLine(s string) bool {

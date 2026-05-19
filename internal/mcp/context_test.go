@@ -538,6 +538,27 @@ func TestContextRouterNoInline(t *testing.T) {
 	}
 }
 
+func TestMaxSemanticScore(t *testing.T) {
+	// Observed in production: the router was reading score from
+	// hits[0], but semantic_hits is reordered by mergeSummaryHits and
+	// rerank — so a low-score symbol-driven entry at the head was
+	// fooling buildNextAction into emitting "weak match" even when a
+	// strong hit existed further down.
+	hits := []SemHit{
+		{Path: "noise.go", Score: 0.01},  // promoted to front by re-ordering
+		{Path: "strong.go", Score: 0.85}, // the real best match
+		{Path: "mid.go", Score: 0.42},
+	}
+	if got := maxSemanticScore(hits); got != 0.85 {
+		t.Errorf("maxSemanticScore = %v, want 0.85 (must scan all hits, not just [0])", got)
+	}
+
+	// Empty input → 0 (no confidence claim).
+	if got := maxSemanticScore(nil); got != 0 {
+		t.Errorf("empty hits should yield 0; got %v", got)
+	}
+}
+
 func TestPickSuggestedReadsFiltersRollupSummaries(t *testing.T) {
 	// package_summary / repo_summary rollup chunks have Path pointing
 	// at a directory and zero line ranges. They're informative in the

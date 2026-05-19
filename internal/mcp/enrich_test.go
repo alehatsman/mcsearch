@@ -92,7 +92,7 @@ func TestReadSignatureAndDoc(t *testing.T) {
 	path := filepath.Join(root, "g.go")
 	writeFile(t, path, src)
 
-	sig, doc := readSignatureAndDoc(path, 5)
+	sig, doc := readSignatureAndDoc(path, 5, "")
 	if !strings.HasPrefix(sig, "func Greet") {
 		t.Errorf("sig=%q, want to start with `func Greet`", sig)
 	}
@@ -107,7 +107,7 @@ func TestReadSignatureAndDoc(t *testing.T) {
 	src2 := "package x\n\nfunc Bare() {}\n"
 	path2 := filepath.Join(root, "b.go")
 	writeFile(t, path2, src2)
-	_, doc2 := readSignatureAndDoc(path2, 3)
+	_, doc2 := readSignatureAndDoc(path2, 3, "")
 	if doc2 != "" {
 		t.Errorf("doc=%q, want empty for func with no comment", doc2)
 	}
@@ -134,7 +134,7 @@ func TestReadSignatureAndDocCommentLeadingStartLine(t *testing.T) {
 	writeFile(t, path, src)
 
 	// StartLine = 3 (the first doc-comment line, mimicking the chunker).
-	sig, doc := readSignatureAndDoc(path, 3)
+	sig, doc := readSignatureAndDoc(path, 3, "")
 	if !strings.HasPrefix(sig, "func (s *Store) Search") {
 		t.Errorf("sig=%q, want to start with `func (s *Store) Search`", sig)
 	}
@@ -143,6 +143,64 @@ func TestReadSignatureAndDocCommentLeadingStartLine(t *testing.T) {
 	}
 	if !strings.Contains(doc, "per-file diversity") {
 		t.Errorf("doc=%q, want both comment lines", doc)
+	}
+}
+
+func TestReadSignatureAndDocAdjacentFunctionDisambiguation(t *testing.T) {
+	// Observed in production: when two functions are adjacent, the
+	// chunker can record the SECOND function's chunk with start_line
+	// pointing at the FIRST function's doc block (likely because the
+	// chunk's content range extends back to include the section header
+	// or trailing context). The forward scan would then return the
+	// first function's signature. Passing wantName must redirect the
+	// scan to the actual target function.
+	root := t.TempDir()
+	src := strings.Join([]string{
+		"package x",
+		"",
+		"// First explains the first function.",
+		"func First() bool {",
+		"  return true",
+		"}",
+		"",
+		"// Second explains the second function.",
+		"func Second(n int) error {",
+		"  return nil",
+		"}",
+		"",
+	}, "\n") + "\n"
+	path := filepath.Join(root, "adj.go")
+	writeFile(t, path, src)
+
+	// With wantName="Second" and start_line=3 (pointing at First's doc),
+	// the scan must skip past `func First` and return Second.
+	sig, doc := readSignatureAndDoc(path, 3, "Second")
+	if !strings.HasPrefix(sig, "func Second") {
+		t.Errorf("sig=%q, want `func Second` (disambiguation failed)", sig)
+	}
+	if !strings.Contains(doc, "Second explains") {
+		t.Errorf("doc=%q, want Second's doc comment, not First's", doc)
+	}
+	if strings.Contains(doc, "First explains") {
+		t.Errorf("doc=%q, leaked First's comment", doc)
+	}
+
+	// Without wantName, legacy behavior — accept the first declaration.
+	sigLegacy, _ := readSignatureAndDoc(path, 3, "")
+	if !strings.HasPrefix(sigLegacy, "func First") {
+		t.Errorf("empty wantName should accept first decl; got %q", sigLegacy)
+	}
+
+	// declarationMentions is identifier-boundary aware — "Search" must
+	// not match inside "searchRaw" / "SearchSummaries".
+	if declarationMentions("func searchRaw() {}", "Search") {
+		t.Error("`Search` should not match inside searchRaw")
+	}
+	if declarationMentions("func SearchSummaries() {}", "Search") {
+		t.Error("`Search` should not match inside SearchSummaries")
+	}
+	if !declarationMentions("func (s *Store) Search() {}", "Search") {
+		t.Error("`Search` should match the actual Search method")
 	}
 }
 
@@ -162,7 +220,7 @@ func TestReadSignatureAndDocStalenessGuard(t *testing.T) {
 	path := filepath.Join(root, "stale.go")
 	writeFile(t, path, src)
 
-	sig, doc := readSignatureAndDoc(path, 4)
+	sig, doc := readSignatureAndDoc(path, 4, "")
 	if sig != "" || doc != "" {
 		t.Errorf("stale-line should suppress fields; got sig=%q doc=%q", sig, doc)
 	}

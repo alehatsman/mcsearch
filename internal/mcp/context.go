@@ -334,10 +334,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		inlineContent(p.Root, intent, out.SuggestedReads, out.SemanticHits)
 	}
 	enrich(ctx, p.Root, intent, k, &out)
-	var topSem float32
-	if len(out.SemanticHits) > 0 {
-		topSem = out.SemanticHits[0].Score
-	}
+	topSem := maxSemanticScore(out.SemanticHits)
 	var graphEdgeCount int
 	if out.Graph != nil {
 		graphEdgeCount = len(out.Graph.Edges)
@@ -678,6 +675,21 @@ func isNonImplPath(p string) bool {
 }
 
 // ─── suggested_reads ──────────────────────────────────────────────────────
+
+// maxSemanticScore returns the highest Score across all semantic
+// hits. semantic_hits isn't strictly score-sorted (summary merging
+// and rerank-driven re-ordering permute it), so using [0] for the
+// "weak match" decision mis-classifies strong responses whenever a
+// low-score symbol-driven entry gets promoted to the front.
+func maxSemanticScore(hits []SemHit) float32 {
+	var top float32
+	for _, h := range hits {
+		if h.Score > top {
+			top = h.Score
+		}
+	}
+	return top
+}
 
 // isReadableRange reports whether a SemHit points at a concrete file
 // slice the agent can actually `Read`. Rollup chunks (package_summary,
