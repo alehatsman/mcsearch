@@ -700,6 +700,30 @@ func (s *Store) FileSummariesForPaths(ctx context.Context, paths []string) ([]st
 	return out, rows.Err()
 }
 
+// FileSummarySHAs returns path → content_sha1 for every file_summary chunk
+// in the store. Used by the indexer's mtime fast-path under --summarize:
+// fetching all SHAs once up front lets the walker decide fast-path
+// eligibility synchronously without N round-trips, and the recovered SHA
+// feeds Pass 5's package_summary cache key so dirs whose files all took
+// the fast-path don't regenerate.
+func (s *Store) FileSummarySHAs(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, content_sha1 FROM chunks WHERE kind = 'file_summary'`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]string)
+	for rows.Next() {
+		var path, sha string
+		if err := rows.Scan(&path, &sha); err != nil {
+			return nil, err
+		}
+		out[path] = sha
+	}
+	return out, rows.Err()
+}
+
 // AllSummariesByKind returns the content of every chunk with the given kind,
 // ordered by path. Used by the indexer to aggregate lower-level summaries
 // into a higher-level one (e.g. package summaries → repo summary).

@@ -117,6 +117,42 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		lastIndexed = prevStats.LastIndex
 	}
 
+	// Pre-walk: when --summarize is on, fetch every existing file_summary
+	// row's content_sha1 in one query. The walker uses this to decide
+	// whether each unchanged file is fully covered by the previous
+	// summarize run (file_summary present → fast-path eligible) and to
+	// recover the per-file SHA that Pass 5 needs as input to its
+	// package_summary cache key. Without the pre-fetch we'd either
+	// disable the fast-path under --summarize (the historical behaviour,
+	// wasteful) or do N round-trips during the walk.
+	var existingFileSummarySHAs map[string]string
+	if ix.Options.Summarize && ix.Options.Chat != nil {
+		shas, err := ix.Store.FileSummarySHAs(ctx)
+		if err != nil {
+			return fmt.Errorf("prefetch file_summary SHAs: %w", err)
+		}
+		existingFileSummarySHAs = shas
+	}
+
+	// pkgFiles tracks per-directory file entries for package summary
+	// generation in Pass 5. Only populated when Summarize is on.
+	// Initialized before the walk so the fast-path branch can populate
+	// entries for files that bypass slowFiles. Mutated only by the
+	// walker goroutine (the workers don't touch it), so no lock needed.
+	type pkgFileEntry struct {
+		path    string
+		fileSHA string
+	}
+	var pkgFiles map[string][]pkgFileEntry
+	if ix.Options.Summarize && ix.Options.Chat != nil {
+		pkgFiles = make(map[string][]pkgFileEntry, len(existingFileSummarySHAs))
+	}
+	// fastDirs tracks dirs that contributed only via the summarize
+	// fast-path (no slow-path siblings). Pass 2's batch-SHA query needs
+	// to include them so Pass 5 can cache-hit their package_summary
+	// without a needless chat regeneration. Walker-only mutation.
+	fastDirs := make(map[string]bool)
+
 	// Pass 1: walk the tree.
 	//
 	// The walker (this goroutine) does only cheap work — directory
@@ -256,14 +292,36 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		}
 		// Mtime fast-path: file hasn't changed since the last successful
 		// index → just bump last_seen_at on its existing chunks.
-		// Skipped when -summarize is set: we need to read the file to
-		// discover which chunks still lack a summary and generate them.
-		// The SHA-based summary cache prevents re-generating existing ones.
-		if !ix.Options.Summarize && !lastIndexed.IsZero() && !info.ModTime().After(lastIndexed) {
+		// Under --summarize the fast-path requires that the previous run
+		// produced a file_summary row for this path. If so, the same
+		// TouchPath bumps the file_summary, chunk_summary and code chunks
+		// in one shot (they all share `path = rel`), and we recover the
+		// stored file_summary SHA so Pass 5's package_summary cache key
+		// still resolves cleanly. If not, fall through to the slow path
+		// so the missing summaries get generated.
+		//
+		// Caveat: this trusts that whatever chunk_summary set the previous
+		// run produced is still complete. Lowering MCSEARCH_CHUNK_SUMMARY_MIN_LINES
+		// between runs leaves previously-too-short chunks without summaries
+		// — operators changing the threshold should `mcsearch reindex` once.
+		fastPathSummary := ""
+		canFastPath := !ix.Options.Summarize
+		if !canFastPath {
+			if sha, ok := existingFileSummarySHAs[rel]; ok {
+				canFastPath = true
+				fastPathSummary = sha
+			}
+		}
+		if canFastPath && !lastIndexed.IsZero() && !info.ModTime().After(lastIndexed) {
 			rows, terr := ix.Store.TouchPath(ctx, rel, startTime)
 			if terr == nil && rows > 0 {
 				seen += int(rows)
 				mtimeSkips.Add(1)
+				if ix.Options.Summarize && fastPathSummary != "" {
+					dir := filepath.Dir(rel)
+					pkgFiles[dir] = append(pkgFiles[dir], pkgFileEntry{path: rel, fileSHA: fastPathSummary})
+					fastDirs[dir] = true
+				}
 				return nil
 			}
 			// rows==0: never indexed before, fall through to slow path.
@@ -285,18 +343,23 @@ func (ix *Indexer) Run(ctx context.Context) error {
 
 	// Pass 2: one batch query for all slow-path files instead of N per-file
 	// queries. Also include unique package dirs so we can check package
-	// summary cache without extra round-trips in Pass 5.
+	// summary cache without extra round-trips in Pass 5. Dirs that hosted
+	// only fast-path-summarize files (no slow-path siblings) are included
+	// too, so their package_summary cache key still resolves.
 	slowPaths := make([]string, len(slowFiles))
 	for i, sf := range slowFiles {
 		slowPaths[i] = sf.rel
 	}
 	allPaths := slowPaths
 	if ix.Options.Summarize && ix.Options.Chat != nil {
-		dirSet := make(map[string]bool, len(slowFiles)/4)
+		dirSet := make(map[string]bool, len(slowFiles)/4+len(fastDirs))
 		for _, sf := range slowFiles {
 			if len(sf.chunks) > 0 {
 				dirSet[filepath.Dir(sf.rel)] = true
 			}
+		}
+		for d := range fastDirs {
+			dirSet[d] = true
 		}
 		for d := range dirSet {
 			allPaths = append(allPaths, d)
@@ -306,17 +369,6 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, allPaths)
 	if err != nil {
 		return fmt.Errorf("existing SHAs: %w", err)
-	}
-
-	// pkgFiles tracks per-directory file entries for package summary
-	// generation in Pass 5. Only populated when Summarize is on.
-	type pkgFileEntry struct {
-		path    string
-		fileSHA string
-	}
-	var pkgFiles map[string][]pkgFileEntry
-	if ix.Options.Summarize && ix.Options.Chat != nil {
-		pkgFiles = make(map[string][]pkgFileEntry, len(slowFiles)/4)
 	}
 
 	// Pass 3: process each slow-path file using the pre-fetched SHA sets.

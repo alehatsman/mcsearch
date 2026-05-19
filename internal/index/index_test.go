@@ -1,21 +1,25 @@
 package index
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/chat"
+	"github.com/alehatsman/mcsearch/internal/chunk"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/proj"
@@ -419,4 +423,106 @@ func F%d() string { return "f%d" }
 	if stats.Chunks < fileCount {
 		t.Errorf("Chunks indexed = %d, want >= %d (one func per file)", stats.Chunks, fileCount)
 	}
+}
+
+// TestSummarizeMtimeFastPath asserts that a re-index with --summarize on an
+// unchanged file takes the mtime fast-path (no file read, no chunk parse),
+// preserves file_summary / chunk_summary / package_summary rows, and does
+// not regenerate any summaries via chat.
+func TestSummarizeMtimeFastPath(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "summary text"}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// Two files in a single dir → exercises the package_summary keepalive
+	// path. One file is large enough to trigger a chunk_summary.
+	body := "package main\n\n// LongFunc is deliberately long.\nfunc LongFunc() {\n"
+	for i := 0; i < chunkSummaryMinLines; i++ {
+		body += fmt.Sprintf("\t// line %d\n", i+1)
+	}
+	body += "}\n"
+	writeFile(t, filepath.Join(projDir, "pkg", "long.go"), body)
+	writeFile(t, filepath.Join(projDir, "pkg", "tiny.go"), "package main\nfunc Tiny() {}\n")
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	// First run: populates file_summary, chunk_summary, package_summary, repo_summary.
+	ix1 := New(p, st, em, ig, Options{Summarize: true, Chat: cc})
+	if err := ix1.Run(ctx); err != nil {
+		t.Fatalf("Run #1: %v", err)
+	}
+	callsAfterFirst := atomic.LoadInt32(&chatCalls)
+	if callsAfterFirst == 0 {
+		t.Fatal("expected chat calls during first summarize run; got 0")
+	}
+
+	// Confirm the various summary kinds landed in the store.
+	chunksBefore := countByKind(t, ctx, st)
+	for _, k := range []string{chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary, chunk.KindRepoSummary} {
+		if chunksBefore[k] == 0 {
+			t.Fatalf("expected at least one %s row after run #1; counts=%v", k, chunksBefore)
+		}
+	}
+
+	// Second run: every file's mtime is < lastIndexed (set during run #1),
+	// so every file is eligible for the new summarize fast-path. Capture
+	// logs to verify the fast-path actually fired.
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	ix2 := New(p, st, em, ig, Options{Summarize: true, Chat: cc, Verbose: true, Logger: logger})
+	if err := ix2.Run(ctx); err != nil {
+		t.Fatalf("Run #2: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&chatCalls); got != callsAfterFirst {
+		t.Errorf("second run made %d extra chat calls; expected 0", got-callsAfterFirst)
+	}
+	logs := logBuf.String()
+	if !strings.Contains(logs, "files_fast_path=") || strings.Contains(logs, "files_fast_path=0") {
+		t.Errorf("expected files_fast_path>0 in indexed log line; logs:\n%s", logs)
+	}
+
+	// Every summary kind must still be present — PruneUnseen would have
+	// dropped them if last_seen_at wasn't refreshed.
+	chunksAfter := countByKind(t, ctx, st)
+	for _, k := range []string{chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary, chunk.KindRepoSummary} {
+		if chunksAfter[k] != chunksBefore[k] {
+			t.Errorf("%s count changed: before=%d after=%d (fast-path should preserve all summary rows)",
+				k, chunksBefore[k], chunksAfter[k])
+		}
+	}
+}
+
+func countByKind(t *testing.T, ctx context.Context, st *store.Store) map[string]int {
+	t.Helper()
+	out := make(map[string]int)
+	for _, k := range []string{chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary, chunk.KindRepoSummary} {
+		s, err := st.AllSummariesByKind(ctx, k)
+		if err != nil {
+			t.Fatalf("AllSummariesByKind(%s): %v", k, err)
+		}
+		out[k] = len(s)
+	}
+	return out
 }
