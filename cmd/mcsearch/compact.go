@@ -30,7 +30,7 @@ func cmdCompact(_ context.Context, args []string) (err error) {
 	out := flags.String("out", "", "write to file instead of stdout")
 	maxBytes := flags.Int64("max-bytes", 1<<20, "skip individual files larger than N bytes")
 	strip := flags.Bool("strip", false, "drop line comments (// and #), blank lines, and trailing whitespace")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(reorderFlags(flags, args)); err != nil {
 		return err
 	}
 	if flags.NArg() < 1 {

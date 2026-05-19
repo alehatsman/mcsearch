@@ -123,7 +123,7 @@ func cmdEnv(_ context.Context, args []string) error {
 	format := fs.String("format", "text", "output format: text | json")
 	showAll := fs.Bool("all", false, "include tuning knobs (default: core/chat/rerank/compress/draft only)")
 	doc := fs.Bool("doc", false, "include doc strings in text output")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 

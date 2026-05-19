@@ -107,7 +107,7 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 		"Dump graph_nodes/graph_edges as JSONL.",
 		"mcsearch graph export [--output=<dir>] <path>")
 	output := fs.String("output", "", "output directory (default: <project>/.mcsearch/graph)")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()

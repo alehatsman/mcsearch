@@ -166,6 +166,67 @@ flags:
   mcsearch query --explain <path> "..."        show per-chunk score breakdown and stage timings`)
 }
 
+// validIntent reports whether s is one of the strategies the context
+// router accepts. Empty string means "auto" and is allowed.
+func validIntent(s string) bool {
+	switch s {
+	case "", "auto", "behavior_search", "symbol_lookup", "callers", "callees",
+		"architecture", "package_topology", "editing_context":
+		return true
+	}
+	return false
+}
+
+// boolFlag duck-types the stdlib's unexported flag.boolFlag interface so
+// reorderFlags can tell standalone boolean flags (`-v`) from flags that
+// consume a value as the next token (`--rerank off`).
+type boolFlag interface {
+	flag.Value
+	IsBoolFlag() bool
+}
+
+// reorderFlags moves every flag-shaped token to the front of args so
+// flag.Parse sees them even when the user typed them after positional
+// args. Without this, Go's flag package silently stops parsing at the
+// first non-flag arg and quietly drops every flag that follows — a
+// real footgun for invocations like `mcsearch query <path> "q" --k=3`.
+//
+// Uses the FlagSet to detect which flags consume a separate-token value
+// (so `--rerank off` is treated as one flag/value pair, not flag plus
+// stray positional). `--` ends flag scanning, matching stdlib behavior.
+func reorderFlags(fs *flag.FlagSet, args []string) []string {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if a == "--" {
+			positional = append(positional, args[i:]...)
+			break
+		}
+		if !strings.HasPrefix(a, "-") || a == "-" {
+			positional = append(positional, a)
+			continue
+		}
+		flags = append(flags, a)
+		if strings.Contains(a, "=") {
+			continue
+		}
+		name := strings.TrimLeft(a, "-")
+		f := fs.Lookup(name)
+		if f == nil {
+			// Unknown flag — let fs.Parse raise the error.
+			continue
+		}
+		if bf, ok := f.Value.(boolFlag); ok && bf.IsBoolFlag() {
+			continue
+		}
+		if i+1 < len(args) {
+			flags = append(flags, args[i+1])
+			i++
+		}
+	}
+	return append(flags, positional...)
+}
+
 // setHelp wires `<cmd> -h` to print a one-line summary, a usage pattern
 // showing positional args, and the auto-generated flag defaults. The
 // default flag.FlagSet usage prints only flags and omits everything
@@ -396,7 +457,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_SUMMARY_URL is set)")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	switch *graphMode {
@@ -545,7 +606,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
 	explain := fs.Bool("explain", false, "show per-chunk score breakdown and stage timings")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -657,9 +718,12 @@ func cmdContext(ctx context.Context, args []string) error {
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
-	noInline := fs.Bool("no-inline", false, "skip inlining file contents into suggested_reads (default: inline on)")
-	if err := fs.Parse(args); err != nil {
+	noInline := fs.Bool("no-inline", false, "skip inlining raw file contents into suggested_reads (stored chunk/file summaries are still emitted; use --format=json to inspect)")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
+	}
+	if !validIntent(*intent) {
+		return fmt.Errorf("invalid --intent=%q (want one of: auto, behavior_search, symbol_lookup, callers, callees, architecture, package_topology, editing_context)", *intent)
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
@@ -715,7 +779,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	temp := fs.Float64("temperature", 0, "sampling temperature (0 = server default)")
 	maxTok := fs.Int("max-tokens", 0, "max tokens to generate (0 = server default)")
 	showCtx := fs.Bool("show-context", false, "print the chunks fed as context before the model output")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -808,7 +872,7 @@ func cmdStatus(ctx context.Context, args []string) error {
 	setHelp(fs,
 		"Show endpoint health and project stats (chunks/files/graph). Optional path narrows to one project.",
 		"mcsearch status [<path>]")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -991,7 +1055,7 @@ func cmdNuke(_ context.Context, args []string) error {
 	setHelp(fs,
 		"Delete the on-disk index for a project (irreversible).",
 		"mcsearch nuke <path>")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -1031,7 +1095,7 @@ func cmdReindex(ctx context.Context, args []string) error {
 	yes := fs.Bool("yes", false, "confirm the destructive sweep required by --all")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	base, err := indexDir()
@@ -1179,7 +1243,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -1243,7 +1307,7 @@ func cmdClone(ctx context.Context, args []string) error {
 		"Seed dst's index from src's (e.g. for a new git worktree). Follow with `mcsearch index <dst>` to reconcile.",
 		"mcsearch clone [flags] <src-path> <dst-path>")
 	force := fs.Bool("force", false, "overwrite dst's index if it already exists")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	rest := fs.Args()
@@ -1339,7 +1403,7 @@ func cmdMCP(ctx context.Context, args []string) error {
 	setHelp(fs,
 		"Run mcsearch as an MCP server over stdio (canonical entrypoint for Claude Code).",
 		"mcsearch mcp")
-	if err := fs.Parse(args); err != nil {
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {

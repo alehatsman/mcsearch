@@ -128,10 +128,25 @@ func (c *ChatReranker) Rerank(ctx context.Context, query string, docs []string) 
 	return out, nil
 }
 
-// Health implements HealthChecker with a minimal single-pair probe.
+// Health implements HealthChecker. Hits GET /v1/models rather than
+// scoring a real (query, doc) pair so a cold model load on the chat
+// backend doesn't trip the short status-time timeout. The configured
+// model not being loaded shows up on the first real rerank call, not
+// in status.
 func (c *ChatReranker) Health(ctx context.Context) error {
-	_, err := c.scoreOne(ctx, "ping", "pong")
-	return err
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("rerank(chat): /v1/models returned %d", resp.StatusCode)
+	}
+	return nil
 }
 
 // scoreOne sends a single (query, doc) pair to the chat completions endpoint

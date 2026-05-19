@@ -146,10 +146,25 @@ func (c *Client) Generate(ctx context.Context, messages []Message, opts Options)
 	}, nil
 }
 
-// Health does a cheap reachability check: a single 1-token completion.
-// Returns nil if the endpoint accepted and answered, ErrUnreachable on
-// transport failure, otherwise the server error.
+// Health does a cheap reachability check: a GET against /v1/models.
+// We deliberately avoid a real Generate() call because on Ollama / vLLM
+// that triggers a cold model load and routinely exceeds the short
+// status-time timeout, producing misleading UNREACHABLE rows when the
+// service is fine. /v1/models is the OpenAI-compat listing endpoint;
+// every supported backend (Ollama, vLLM, llama.cpp-server, TEI) serves
+// it cheaply.
 func (c *Client) Health(ctx context.Context) error {
-	_, err := c.Generate(ctx, []Message{{Role: "user", Content: "ping"}}, Options{MaxTokens: 1})
-	return err
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+"/v1/models", nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("chat: /v1/models returned %d", resp.StatusCode)
+	}
+	return nil
 }
