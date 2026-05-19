@@ -81,6 +81,18 @@ func TestExtractIdentifiers(t *testing.T) {
 		// A camelCase token inside a qualified form must not double-add
 		// (the qualified span masks sub-token matches).
 		{"(*Store).searchRaw", []string{"(*Store).searchRaw"}},
+		// Single-word lowercase fallback — `rerank` is a valid Go
+		// identifier (unexported method on (*Store)) that matches none
+		// of the regex passes. The fallback should pick it up.
+		{"rerank", []string{"rerank"}},
+		{"index", []string{"index"}},
+		// Multi-word lowercase phrases should NOT trigger the fallback —
+		// "plain english only" is correctly treated as natural language.
+		{"plain english only", nil},
+		// Too short (1-2 chars) doesn't qualify for the fallback.
+		{"go", nil},
+		// Punctuation/whitespace in single-word case → not an identifier.
+		{"go!", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -666,6 +678,10 @@ func TestBuildNextAction(t *testing.T) {
 		want       string // substring match
 	}{
 		{IntentSymbolLookup, reads, syms, 0.8, 0, false, "Read x.go lines 10-30"},
+		// symbol_lookup with NO symbols but a strong semantic hit:
+		// next_action must not claim "the definition" — that lied
+		// when the symbol genuinely wasn't found. Soft fallback.
+		{IntentSymbolLookup, reads, nil, 0.8, 0, false, "No exact symbol match"},
 		{IntentEditingContext, reads, syms, 0.8, 0, false, "before editing"},
 		{IntentBehaviorSearch, reads, syms, 0.8, 0, false, "ground your answer"},
 		{IntentArchitecture, reads, syms, 0.8, 0, false, "structural overview"},
@@ -859,6 +875,81 @@ func TestContextRouterCallersGraphDeferred(t *testing.T) {
 func hasRg() bool {
 	_, err := exec.LookPath("rg")
 	return err == nil
+}
+
+func TestContextRouterTruncatedReadFlagsNextAction(t *testing.T) {
+	// Inline content has per-read caps (60 lines / 4 KB for targeted
+	// intents). When a chunk exceeds those caps, Truncated=true is
+	// set on the read — next_action must surface that so the agent
+	// knows the inlined Content isn't the full chunk.
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	// Write a Go file with a function long enough to exceed the
+	// 60-line targeted cap. Use 100 distinct printable lines so the
+	// chunker treats it as one chunk.
+	var body strings.Builder
+	body.WriteString("package main\n\n// Long is intentionally long to exceed the inline cap.\nfunc Long() {\n")
+	for i := 0; i < 100; i++ {
+		body.WriteString(fmt.Sprintf("\t_ = %d\n", i))
+	}
+	body.WriteString("}\n")
+	writeFile(t, filepath.Join(projDir, "long.go"), body.String())
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	s := newServer(srv.URL, cacheDir)
+
+	_, out, err := s.ContextRouter(context.Background(), ContextInput{
+		Question: "Long", // exact symbol match → symbol_lookup
+		Project:  root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.SuggestedReads) == 0 {
+		t.Fatal("expected suggested_reads")
+	}
+	if !out.SuggestedReads[0].Truncated {
+		t.Fatalf("expected reads[0].Truncated; chunk was %d lines", out.SuggestedReads[0].EndLine-out.SuggestedReads[0].StartLine+1)
+	}
+	if !strings.Contains(out.NextAction, "truncated") {
+		t.Errorf("next_action should mention truncation when reads[0].Truncated=true; got %q", out.NextAction)
+	}
+}
+
+func TestContextRouterSymbolLookupMissNearMissCandidates(t *testing.T) {
+	// When the user asks for a specific identifier via symbol_lookup
+	// and we find nothing exact, the router should surface substring
+	// matches in `hint` — mirroring what find_symbol does — so the
+	// agent has real names to retry with instead of guessing.
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Indexer() {}\nfunc IndexableExt() {}\nfunc cmdIndex() {}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+	s := newServer(srv.URL, cacheDir)
+
+	_, out, err := s.ContextRouter(context.Background(), ContextInput{
+		Question: "Index", // bare identifier; no exact match
+		Project:  root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Intent != IntentSymbolLookup {
+		t.Errorf("intent=%s, want symbol_lookup", out.Intent)
+	}
+	if len(out.Symbols) != 0 {
+		t.Errorf("expected 0 symbol matches; got %d", len(out.Symbols))
+	}
+	if !strings.Contains(out.Hint, "did you mean") {
+		t.Errorf("hint should surface candidates; got %q", out.Hint)
+	}
+	if !strings.Contains(out.Hint, "Indexer") && !strings.Contains(out.Hint, "IndexableExt") && !strings.Contains(out.Hint, "cmdIndex") {
+		t.Errorf("hint should name at least one real candidate; got %q", out.Hint)
+	}
 }
 
 func TestContextRouterNoIndex(t *testing.T) {

@@ -328,6 +328,34 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		return nil, out, nil
 	}
 
+	// Near-miss surface for symbol_lookup whiffs: when the user
+	// clearly asked for an identifier (intent is symbol_lookup AND we
+	// extracted identifier candidates) but the symbols lane found
+	// nothing, scan the chunks table for substring matches and surface
+	// them in the hint. Mirrors find_symbol's behavior so the agent
+	// gets candidate names without a follow-up tool call.
+	if intent == IntentSymbolLookup && len(out.Symbols) == 0 && len(candidates.identifiers) > 0 {
+		var cands []string
+		for _, id := range candidates.identifiers {
+			bare := id
+			if i := strings.LastIndex(bare, "."); i >= 0 {
+				bare = bare[i+1:]
+			}
+			names, err := st.FindSymbolCandidates(ctx, bare, 5)
+			if err != nil {
+				continue
+			}
+			cands = append(cands, names...)
+			if len(cands) >= 5 {
+				cands = cands[:5]
+				break
+			}
+		}
+		if len(cands) > 0 {
+			out.Hint = "no exact symbol match — did you mean: " + strings.Join(cands, ", ") + "?"
+		}
+	}
+
 	enrichGraph(&out, intent, graphView, out.SemanticHits, out.Symbols)
 	out.SuggestedReads = pickSuggestedReads(intent, out.SemanticHits, out.Symbols, symbolPaths)
 	if !in.NoInline {
@@ -341,6 +369,12 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	}
 	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols, topSem,
 		graphEdgeCount, hasBlameAnnotations(out.Annotations))
+	// If the directive's primary read was truncated at inline time,
+	// flag that so the agent knows the inlined Content isn't the full
+	// chunk and can Read the original line range for the rest.
+	if !in.NoInline && len(out.SuggestedReads) > 0 && out.SuggestedReads[0].Truncated {
+		out.NextAction += " The inlined content is truncated at inline-budget caps — Read the full line range if you need the tail."
+	}
 	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil, len(out.References) > 0)
 	out.Status = "ok"
 	if embedFailed && out.Hint == "" {
@@ -457,7 +491,35 @@ func extractIdentifiers(q string) []string {
 		}
 		add(q[idx[0]:idx[1]])
 	}
+
+	// Fallback for single-word lowercase queries (e.g. `rerank`,
+	// `index`, `embed`). None of the regexes above pick these up —
+	// they require camelCase, PascalCase, or underscore shape — but
+	// they're a perfectly valid form for Go's unexported identifiers
+	// and short package names. When the question is literally one
+	// short token and we have nothing yet, treat the token as the
+	// identifier to look up. Guarded by length and content so a single
+	// English word like "fix" or "bug" doesn't dominate.
+	if len(out) == 0 {
+		trimmed := strings.TrimSpace(q)
+		if len(trimmed) >= 3 && len(trimmed) <= 32 && isAllIdentChars(trimmed) {
+			out = append(out, trimmed)
+		}
+	}
 	return out
+}
+
+// isAllIdentChars reports whether every byte in s is a valid Go
+// identifier character (letter, digit, or underscore). Used by the
+// single-token fallback in extractIdentifiers to avoid passing
+// punctuation/whitespace to find_symbol.
+func isAllIdentChars(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if !isIdentChar(s[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 // ─── lanes ────────────────────────────────────────────────────────────────
@@ -857,8 +919,15 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 	}
 	switch intent {
 	case IntentSymbolLookup:
-		if len(reads) > 0 {
+		// Only claim "the definition" when a symbol actually matched —
+		// reads[0] without symbols is a semantic neighbor, not the
+		// definition the user asked about.
+		if len(symbols) > 0 && len(reads) > 0 {
 			return fmt.Sprintf("Read %s lines %d-%d to see the definition.", reads[0].Path, reads[0].StartLine, reads[0].EndLine)
+		}
+		if len(symbols) == 0 && len(reads) > 0 {
+			return fmt.Sprintf("No exact symbol match — the closest semantic neighbor is %s lines %d-%d. Verify there before assuming the identifier exists.",
+				reads[0].Path, reads[0].StartLine, reads[0].EndLine)
 		}
 	case IntentCallers, IntentCallees:
 		if len(symbols) > 0 {
