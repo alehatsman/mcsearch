@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // ErrUnreachable is returned when the embed endpoint cannot be reached at
@@ -24,23 +26,47 @@ type Client struct {
 	BaseURL string
 	Model   string
 	Batch   int
-	HTTP    *http.Client
+	// Concurrency caps in-flight /v1/embeddings calls. <=1 = sequential
+	// (the historical behaviour). Larger values let multiple batches
+	// overlap network RTT with GPU work on servers that handle
+	// concurrent requests (vLLM, TEI, Ollama, …). The HTTP transport is
+	// sized for this — see New().
+	Concurrency int
+	HTTP        *http.Client
 }
 
 // New builds a client. baseURL is the server root (e.g.
 // http://127.0.0.1:8082), not the /v1/embeddings path.
 func New(baseURL, model string, batch int, timeout time.Duration) *Client {
+	return NewWithConcurrency(baseURL, model, batch, 1, timeout)
+}
+
+// NewWithConcurrency is like New but also pins the in-flight call limit.
+// concurrency<=0 falls back to 1 (sequential).
+func NewWithConcurrency(baseURL, model string, batch, concurrency int, timeout time.Duration) *Client {
 	if batch <= 0 {
 		batch = 32
+	}
+	if concurrency <= 0 {
+		concurrency = 1
 	}
 	if timeout <= 0 {
 		timeout = 60 * time.Second
 	}
+	// Default http.Transport keeps only 2 idle conns per host, which
+	// throttles parallel dispatch to the same embedding server. Size
+	// the pool to the configured concurrency so workers don't dial a
+	// fresh TCP/TLS connection on every batch.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.MaxIdleConns = concurrency * 2
+	tr.MaxIdleConnsPerHost = concurrency * 2
+	tr.MaxConnsPerHost = concurrency * 2
 	return &Client{
-		BaseURL: strings.TrimSuffix(baseURL, "/"),
-		Model:   model,
-		Batch:   batch,
-		HTTP:    &http.Client{Timeout: timeout},
+		BaseURL:     strings.TrimSuffix(baseURL, "/"),
+		Model:       model,
+		Batch:       batch,
+		Concurrency: concurrency,
+		HTTP:        &http.Client{Timeout: timeout, Transport: tr},
 	}
 }
 
@@ -64,24 +90,55 @@ type embedResponse struct {
 }
 
 // Embed sends inputs in batches of c.Batch and returns one vector per input.
+// Up to c.Concurrency batches are in flight at once; output ordering is
+// preserved regardless (each batch writes its own slot in `out`).
 func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	out := make([][]float32, len(inputs))
+	conc := c.Concurrency
+	if conc <= 1 {
+		// Sequential fast-path: skips goroutine/errgroup overhead for
+		// callers that opted out of parallel dispatch (Concurrency<=1).
+		for start := 0; start < len(inputs); start += c.Batch {
+			end := start + c.Batch
+			if end > len(inputs) {
+				end = len(inputs)
+			}
+			got, err := c.embedBatch(ctx, inputs[start:end])
+			if err != nil {
+				return nil, err
+			}
+			if len(got) != end-start {
+				return nil, fmt.Errorf("embed: server returned %d vectors for %d inputs", len(got), end-start)
+			}
+			copy(out[start:end], got)
+		}
+		return out, nil
+	}
+	eg, egctx := errgroup.WithContext(ctx)
+	eg.SetLimit(conc)
 	for start := 0; start < len(inputs); start += c.Batch {
 		end := start + c.Batch
 		if end > len(inputs) {
 			end = len(inputs)
 		}
-		got, err := c.embedBatch(ctx, inputs[start:end])
-		if err != nil {
-			return nil, err
-		}
-		if len(got) != end-start {
-			return nil, fmt.Errorf("embed: server returned %d vectors for %d inputs", len(got), end-start)
-		}
-		copy(out[start:end], got)
+		start, end := start, end
+		eg.Go(func() error {
+			got, err := c.embedBatch(egctx, inputs[start:end])
+			if err != nil {
+				return err
+			}
+			if len(got) != end-start {
+				return fmt.Errorf("embed: server returned %d vectors for %d inputs", len(got), end-start)
+			}
+			copy(out[start:end], got)
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

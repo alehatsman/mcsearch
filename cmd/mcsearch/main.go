@@ -331,8 +331,9 @@ func newEmbedClient() *embed.Client {
 		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_BATCH=%q is not a positive integer; using 32\n", rawBatch)
 		batch = 32
 	}
+	conc := envInt("MCSEARCH_EMBED_CONCURRENCY", 4)
 	timeout := parseDuration("MCSEARCH_EMBED_TIMEOUT", envOr("MCSEARCH_EMBED_TIMEOUT", "60s"), 60*time.Second)
-	return embed.New(url, model, batch, timeout)
+	return embed.NewWithConcurrency(url, model, batch, conc, timeout)
 }
 
 func newChatClient() *chat.Client {

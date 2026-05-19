@@ -62,6 +62,7 @@ var allEnvVars = []envVar{
 
 	// tuning — hidden unless --all. Most installs leave these alone.
 	{"MCSEARCH_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
+	{"MCSEARCH_EMBED_CONCURRENCY", "4", "Parallel /v1/embeddings calls in flight (1 = sequential, the historical default).", "tuning", false},
 	{"MCSEARCH_EMBED_TIMEOUT", "60s", "HTTP timeout per embed call.", "tuning", false},
 	{"MCSEARCH_CHAT_TIMEOUT", "120s", "HTTP timeout per chat call.", "tuning", false},
 	{"MCSEARCH_COMPRESS_TIMEOUT", "30s", "HTTP timeout per compress call.", "tuning", false},

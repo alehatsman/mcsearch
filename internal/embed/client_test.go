@@ -107,4 +107,101 @@ func TestNewDefaults(t *testing.T) {
 	if strings.HasSuffix(c.BaseURL, "/") {
 		t.Errorf("BaseURL should be trimmed: %q", c.BaseURL)
 	}
+	if c.Concurrency != 1 {
+		t.Errorf("Concurrency default = %d, want 1 (sequential)", c.Concurrency)
+	}
+}
+
+// TestEmbedConcurrentDispatch verifies that NewWithConcurrency lets multiple
+// batches actually fly in parallel. The handler blocks until it sees the
+// configured number of simultaneous requests, then releases them — if
+// dispatch were still sequential the test would hang and fail.
+func TestEmbedConcurrentDispatch(t *testing.T) {
+	const conc = 4
+	var (
+		inFlight    atomic.Int32
+		peak        atomic.Int32
+		totalCalls  atomic.Int32
+		releaseGate = make(chan struct{})
+		readyGate   = make(chan struct{}, conc)
+	)
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		now := inFlight.Add(1)
+		defer inFlight.Add(-1)
+		totalCalls.Add(1)
+		for {
+			old := peak.Load()
+			if now <= old || peak.CompareAndSwap(old, now) {
+				break
+			}
+		}
+		select {
+		case readyGate <- struct{}{}:
+		default:
+		}
+		<-releaseGate
+		ok(4).ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	c := NewWithConcurrency(srv.URL, "fake", 1, conc, 5*time.Second)
+	inputs := []string{"a", "b", "c", "d", "e", "f", "g", "h"}
+
+	done := make(chan error, 1)
+	var vecs [][]float32
+	go func() {
+		var err error
+		vecs, err = c.Embed(context.Background(), inputs)
+		done <- err
+	}()
+
+	deadline := time.After(2 * time.Second)
+	for i := 0; i < conc; i++ {
+		select {
+		case <-readyGate:
+		case <-deadline:
+			t.Fatalf("only %d concurrent requests reached the server (want %d)", peak.Load(), conc)
+		}
+	}
+	close(releaseGate)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := peak.Load(); got < conc {
+		t.Errorf("peak in-flight = %d, want >= %d", got, conc)
+	}
+	if got := totalCalls.Load(); got != int32(len(inputs)) {
+		t.Errorf("total calls = %d, want %d", got, len(inputs))
+	}
+	if len(vecs) != len(inputs) {
+		t.Fatalf("got %d vectors, want %d", len(vecs), len(inputs))
+	}
+	for i := range inputs {
+		if len(vecs[i]) != 4 {
+			t.Errorf("vec[%d] dim=%d, want 4", i, len(vecs[i]))
+		}
+	}
+}
+
+func TestEmbedConcurrentError(t *testing.T) {
+	var calls atomic.Int32
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 2 {
+			http.Error(w, "boom", 500)
+			return
+		}
+		ok(4).ServeHTTP(w, r)
+	})
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+	c := NewWithConcurrency(srv.URL, "fake", 1, 4, 5*time.Second)
+	_, err := c.Embed(context.Background(), []string{"a", "b", "c", "d"})
+	if err == nil {
+		t.Fatal("expected error from failing batch, got nil")
+	}
+	if !strings.Contains(err.Error(), "500") {
+		t.Errorf("expected http 500 error, got %v", err)
+	}
 }
