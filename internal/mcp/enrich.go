@@ -195,7 +195,7 @@ func readSignatureAndDoc(path string, startLine int, wantName string) (string, s
 		return "", ""
 	}
 
-	sig := strings.TrimSpace(forward[declIdx])
+	sig := assembleSignature(forward, declIdx)
 
 	// Doc precedence: contiguous comments immediately above the
 	// accepted decl in the forward window. Falls back to `above` when
@@ -249,6 +249,100 @@ func declarationMentions(decl, name string) bool {
 		i = end
 	}
 	return false
+}
+
+// assembleSignature joins the declaration line plus any continuation
+// lines (multi-line param lists) into one signature string. Walks
+// forward from declIdx until parens balance AND we see a body opener
+// (`{`, `:`, `=>`) — or until we hit a safety cap. Single-line
+// signatures pass through untouched.
+//
+// Without this, multi-line Go funcs like
+//
+//	func extractFile(
+//	    p *packages.Package,
+//	    ...
+//	) {
+//
+// returned just `func extractFile(` — the agent couldn't see params.
+func assembleSignature(forward []string, declIdx int) string {
+	first := strings.TrimSpace(forward[declIdx])
+	if isSignatureComplete(first) {
+		return first
+	}
+	const maxContinuation = 12
+	var b strings.Builder
+	b.WriteString(first)
+	parenDepth := signatureParenDelta(first)
+	for i := declIdx + 1; i < len(forward) && i <= declIdx+maxContinuation; i++ {
+		t := strings.TrimSpace(forward[i])
+		if t == "" {
+			continue
+		}
+		b.WriteByte(' ')
+		b.WriteString(t)
+		parenDepth += signatureParenDelta(t)
+		// Stop once params closed AND we see a body opener (or terminal).
+		if parenDepth <= 0 && hasBodyOpener(t) {
+			break
+		}
+	}
+	return b.String()
+}
+
+// isSignatureComplete returns true when the line ends in a token that
+// definitively closes a declaration — opening brace `{` (Go, Java,
+// JS), terminal `:` (Python class/def), terminal semicolon
+// (interface methods, forward decls), or trailing `=>` (TS arrow).
+// Also accepts a balanced single-line decl with no body opener
+// (interface method signatures: `M(int) error`).
+func isSignatureComplete(line string) bool {
+	t := strings.TrimRight(line, " \t")
+	if t == "" {
+		return false
+	}
+	if hasBodyOpener(t) {
+		return signatureParenDelta(line) <= 0
+	}
+	// No body opener — only "complete" if parens are balanced AND the
+	// line doesn't end mid-paren (no trailing `(`).
+	return signatureParenDelta(line) == 0 && !strings.HasSuffix(t, "(") && !strings.HasSuffix(t, ",")
+}
+
+func hasBodyOpener(line string) bool {
+	t := strings.TrimRight(line, " \t")
+	return strings.HasSuffix(t, "{") || strings.HasSuffix(t, ":") ||
+		strings.HasSuffix(t, "=>") || strings.HasSuffix(t, "=> {")
+}
+
+// signatureParenDelta returns (opens - closes) for `(` and `)` in
+// line, ignoring everything inside string and rune literals so a
+// `"("` doesn't fool us.
+func signatureParenDelta(line string) int {
+	delta := 0
+	inStr := byte(0)
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if inStr != 0 {
+			if c == '\\' && i+1 < len(line) {
+				i++
+				continue
+			}
+			if c == inStr {
+				inStr = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'', '`':
+			inStr = c
+		case '(':
+			delta++
+		case ')':
+			delta--
+		}
+	}
+	return delta
 }
 
 // startsWithName reports whether the first whitespace-delimited token

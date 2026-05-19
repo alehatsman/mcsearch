@@ -271,6 +271,96 @@ func TestReadSignatureAndDocFieldShape(t *testing.T) {
 	}
 }
 
+func TestReadSignatureAndDocMultiLineSignature(t *testing.T) {
+	// Multi-line function signatures (Go with one param per line, etc.)
+	// must be assembled into a single signature string — the agent
+	// needs the params to understand the API. Previously the reader
+	// returned only the first line (`func extractFile(`), giving
+	// nothing actionable.
+	root := t.TempDir()
+	src := strings.Join([]string{
+		"package x",
+		"",
+		"// extractFile processes one parsed file.",
+		"func extractFile(",
+		"\tp *Pkg,",
+		"\tfile *File,",
+		"\tfset *FileSet,",
+		"\tnodes *NodeSet,",
+		") {",
+		"\treturn",
+		"}",
+	}, "\n") + "\n"
+	path := filepath.Join(root, "f.go")
+	writeFile(t, path, src)
+
+	sig, doc := readSignatureAndDoc(path, 3, "extractFile")
+	if !strings.HasPrefix(sig, "func extractFile(") {
+		t.Errorf("sig=%q, want it to start with `func extractFile(`", sig)
+	}
+	if !strings.Contains(sig, "p *Pkg") {
+		t.Errorf("sig=%q, must include first param", sig)
+	}
+	if !strings.Contains(sig, "nodes *NodeSet") {
+		t.Errorf("sig=%q, must include last param", sig)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(sig), "{") {
+		t.Errorf("sig=%q, should end at body opener `{`", sig)
+	}
+	if !strings.Contains(doc, "extractFile processes one parsed file") {
+		t.Errorf("doc=%q should still contain leading comment", doc)
+	}
+}
+
+func TestAssembleSignatureSinglePass(t *testing.T) {
+	cases := []struct {
+		lines []string
+		want  string
+	}{
+		// Single-line signature passes through untouched.
+		{
+			lines: []string{"func Greet(name string) string {"},
+			want:  "func Greet(name string) string {",
+		},
+		// Multi-line Go params.
+		{
+			lines: []string{
+				"func Big(",
+				"\ta int,",
+				"\tb int,",
+				") int {",
+			},
+			want: "func Big( a int, b int, ) int {",
+		},
+		// Python multi-line def with `:` terminator.
+		{
+			lines: []string{
+				"def big(",
+				"    a: int,",
+				"    b: int,",
+				") -> int:",
+			},
+			want: "def big( a: int, b: int, ) -> int:",
+		},
+		// Interface method signature (no body opener, balanced).
+		{
+			lines: []string{"M(int) error"},
+			want:  "M(int) error",
+		},
+	}
+	for _, tc := range cases {
+		got := assembleSignature(tc.lines, 0)
+		if got != tc.want {
+			t.Errorf("assembleSignature(%v) = %q, want %q", tc.lines, got, tc.want)
+		}
+	}
+
+	// signatureParenDelta ignores strings.
+	if d := signatureParenDelta(`s := "(\""`); d != 0 {
+		t.Errorf("paren delta should ignore strings; got %d for sig", d)
+	}
+}
+
 func TestReadSignatureAndDocStalenessGuard(t *testing.T) {
 	// Simulate a stale index: the recorded StartLine points at a
 	// line that no longer holds a declaration. Both fields must come
