@@ -1122,6 +1122,14 @@ func (s *Store) fetchHits(ctx context.Context, ranked []scored, sc scoreContext)
 // given identifier. Results are ordered by (path, start_line). Uses a
 // SQL index scan — no embedding required — so it is fast regardless of
 // index size.
+//
+// When the chunks table yields zero hits, falls back to a graph_nodes
+// scan. The Go-graph layer indexes types and struct fields that don't
+// produce standalone chunks (the chunker emits chunks per function/
+// method/class, not per field), so a query like `MaxFileSize` finds
+// the field via the graph even though chunks has nothing. Graph-fallback
+// hits carry path + line range but empty Content, since graph nodes
+// only point at offsets — agents can Read the range for the body.
 func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, error) {
 	if k <= 0 {
 		k = 10
@@ -1140,6 +1148,41 @@ func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, erro
 		var id int64
 		var h Hit
 		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.Name, &h.StartLine, &h.EndLine, &h.Content); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) > 0 {
+		return out, nil
+	}
+	return s.findSymbolInGraph(ctx, name, k)
+}
+
+// findSymbolInGraph queries the Go-graph layer for nodes whose `name`
+// column matches exactly. Used as a fallback by FindSymbol when the
+// chunks table has nothing — covers types, struct fields, and other
+// entities that don't produce standalone chunks. Returns nil on
+// missing graph table (older index versions) rather than failing the
+// surrounding lookup.
+func (s *Store) findSymbolInGraph(ctx context.Context, name string, k int) ([]Hit, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT kind, name, file_path, start_line, end_line
+		 FROM graph_nodes
+		 WHERE name = ? AND file_path != '' AND start_line > 0
+		 ORDER BY file_path, start_line LIMIT ?`,
+		name, k)
+	if err != nil {
+		// graph_nodes may not exist on older indexes — degrade silently.
+		return nil, nil //nolint:nilerr
+	}
+	defer rows.Close()
+	var out []Hit
+	for rows.Next() {
+		var h Hit
+		if err := rows.Scan(&h.Kind, &h.Name, &h.Path, &h.StartLine, &h.EndLine); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

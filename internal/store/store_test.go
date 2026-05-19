@@ -666,6 +666,68 @@ func TestPersistsDimAcrossOpen(t *testing.T) {
 	}
 }
 
+func TestFindSymbolFallsBackToGraphNodes(t *testing.T) {
+	// Struct fields and type-only entities aren't represented as chunks
+	// (the chunker emits per-function/method chunks), but they ARE in
+	// graph_nodes. FindSymbol should fall back to that table when
+	// chunks misses, so a query like `MaxFileSize` resolves to the
+	// field even though there's no matching chunk row.
+	st, ctx := newStore(t)
+	now := time.Now()
+
+	// One unrelated chunk so the chunks table isn't empty.
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", Kind: "fn", Name: "Other", ContentSHA: "h", Content: "x", Vec: []float32{1, 0, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// Insert a graph node mimicking a struct field — same shape the
+	// Go static-graph layer produces.
+	gnodes := []GraphNodeRow{{
+		ID:            "field:Options.MaxFileSize",
+		Kind:          "field",
+		Name:          "MaxFileSize",
+		QualifiedName: "Options.MaxFileSize",
+		PackagePath:   "github.com/example/index",
+		FilePath:      "internal/index/index.go",
+		StartLine:     39,
+		EndLine:       39,
+		ContentHash:   "h1",
+	}}
+	if err := st.GraphUpsertNodes(ctx, gnodes, now); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := st.FindSymbol(ctx, "MaxFileSize", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("expected 1 hit via graph fallback, got %d: %+v", len(hits), hits)
+	}
+	if hits[0].Kind != "field" {
+		t.Errorf("hit.Kind=%q, want field", hits[0].Kind)
+	}
+	if hits[0].Path != "internal/index/index.go" || hits[0].StartLine != 39 {
+		t.Errorf("hit path/line wrong: %+v", hits[0])
+	}
+
+	// When chunks DOES have the name, fallback shouldn't kick in.
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "b.go", Kind: "fn", Name: "ChunkName", ContentSHA: "h2", Content: "x", Vec: []float32{0, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	chunkHits, err := st.FindSymbol(ctx, "ChunkName", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunkHits) != 1 || chunkHits[0].Path != "b.go" {
+		t.Errorf("chunks lookup should win when present; got %+v", chunkHits)
+	}
+}
+
 func TestFindSymbolCandidates(t *testing.T) {
 	st, ctx := newStore(t)
 	now := time.Now()
