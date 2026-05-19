@@ -812,15 +812,9 @@ func cmdStatus(ctx context.Context, args []string) error {
 		return err
 	}
 	rest := fs.Args()
-	em := newEmbedClient()
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	embedOK := em.Health(checkCtx) == nil
-	if embedOK {
-		fmt.Printf("embed  %s  %s  ok\n", em.BaseURL, em.Model)
-	} else {
-		fmt.Printf("embed  %s  %s  UNREACHABLE\n", em.BaseURL, em.Model)
-	}
+	printEndpoints(checkCtx)
 	fmt.Printf("mcsearch %s\n", mcp.Version)
 
 	base, err := indexDir()

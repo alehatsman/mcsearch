@@ -4,14 +4,115 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/mcp"
 	"github.com/alehatsman/mcsearch/internal/store"
 )
+
+// endpointProbe captures one configured backend for `mcsearch status` to
+// report. health is nil for probes that aren't reachable to begin with
+// (unset opt-in URL, summary inheriting chat) — those skip the HTTP call
+// and use the pre-set status string.
+type endpointProbe struct {
+	name   string
+	url    string
+	model  string
+	health func(context.Context) error
+	status string // ok | UNREACHABLE | not configured | inherits chat
+}
+
+// collectEndpoints builds the probe list the status command displays.
+// Mirrors the env wiring in main.go: embed/chat always present (they
+// have defaults); rerank/compress/draft are opt-in; summary falls back
+// to chat when MCSEARCH_SUMMARY_URL is unset.
+func collectEndpoints() []endpointProbe {
+	probes := []endpointProbe{}
+
+	em := newEmbedClient()
+	probes = append(probes, endpointProbe{name: "embed", url: em.BaseURL, model: em.Model, health: em.Health})
+
+	cc := newChatClient()
+	probes = append(probes, endpointProbe{name: "chat", url: cc.BaseURL, model: cc.Model, health: cc.Health})
+
+	if rc := newRerankClient(); rc != nil {
+		probes = append(probes, endpointProbe{name: "rerank", url: rc.Endpoint(), model: rc.ModelName(), health: rc.Health})
+	} else {
+		probes = append(probes, endpointProbe{name: "rerank", status: "not configured"})
+	}
+
+	if c := newCompressClient(); c != nil {
+		probes = append(probes, endpointProbe{name: "compress", url: c.BaseURL, model: c.Model, health: c.Health})
+	} else {
+		probes = append(probes, endpointProbe{name: "compress", status: "not configured"})
+	}
+
+	if c := newDraftClient(); c != nil {
+		probes = append(probes, endpointProbe{name: "draft", url: c.BaseURL, model: c.Model, health: c.Health})
+	} else {
+		probes = append(probes, endpointProbe{name: "draft", status: "not configured"})
+	}
+
+	// summary inherits chat unless MCSEARCH_SUMMARY_URL is set explicitly;
+	// we report it as its own row so users can see which leg indexing uses.
+	if os.Getenv("MCSEARCH_SUMMARY_URL") == "" {
+		probes = append(probes, endpointProbe{name: "summary", status: "inherits chat"})
+	} else {
+		sc := newSummaryClient()
+		probes = append(probes, endpointProbe{name: "summary", url: sc.BaseURL, model: sc.Model, health: sc.Health})
+	}
+
+	return probes
+}
+
+// printEndpoints fans out concurrent health checks for every probe with
+// a configured URL, then renders an aligned table.
+func printEndpoints(ctx context.Context) {
+	probes := collectEndpoints()
+
+	var wg sync.WaitGroup
+	for i := range probes {
+		if probes[i].health == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(p *endpointProbe) {
+			defer wg.Done()
+			if err := p.health(ctx); err != nil {
+				p.status = "UNREACHABLE"
+			} else {
+				p.status = "ok"
+			}
+		}(&probes[i])
+	}
+	wg.Wait()
+
+	nameW, urlW, modelW := 0, 0, 0
+	for _, p := range probes {
+		nameW = max(nameW, len(p.name))
+		urlW = max(urlW, len(displayCell(p.url)))
+		modelW = max(modelW, len(displayCell(p.model)))
+	}
+	for _, p := range probes {
+		fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+			nameW, p.name,
+			urlW, displayCell(p.url),
+			modelW, displayCell(p.model),
+			p.status)
+	}
+}
+
+func displayCell(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
 
 // queryJSONHit is the wire shape for `mcsearch query --format=json`.
 // Mirrors mcp.SearchHit so the two CLI/MCP surfaces stay aligned.
