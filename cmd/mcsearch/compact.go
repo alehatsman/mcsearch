@@ -24,6 +24,9 @@ import (
 
 func cmdCompact(_ context.Context, args []string) (err error) {
 	flags := flag.NewFlagSet("compact", flag.ContinueOnError)
+	setHelp(flags,
+		"Concatenate indexable files under <path> with ===== headers — for pasting into LLM prompts. Honors .gitignore + secret/binary filters. (alias: bundle)",
+		"mcsearch compact [flags] <path>")
 	out := flags.String("out", "", "write to file instead of stdout")
 	maxBytes := flags.Int64("max-bytes", 1<<20, "skip individual files larger than N bytes")
 	strip := flags.Bool("strip", false, "drop line comments (// and #), blank lines, and trailing whitespace")

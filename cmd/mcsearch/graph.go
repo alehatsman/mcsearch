@@ -33,7 +33,7 @@ func cmdGraph(ctx context.Context, args []string) error {
   mcsearch graph export <path>        dump nodes/edges as JSONL
 
 flags:
-  mcsearch graph export <path> [--output=<dir>] [--format=jsonl]
+  mcsearch graph export <path> [--output=<dir>]
 
 note:
   'graph index' is gone — use 'mcsearch index --graph=only <path>'.
@@ -103,17 +103,16 @@ func reportGraphStats(project string, stats *graph.Stats, format string) error {
 
 func cmdGraphExport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph export", flag.ContinueOnError)
+	setHelp(fs,
+		"Dump graph_nodes/graph_edges as JSONL.",
+		"mcsearch graph export [--output=<dir>] <path>")
 	output := fs.String("output", "", "output directory (default: <project>/.mcsearch/graph)")
-	format := fs.String("format", "jsonl", "output format: jsonl (dot lands in a follow-up PR)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
 		return fmt.Errorf("graph export needs exactly one path argument")
-	}
-	if *format != "jsonl" {
-		return fmt.Errorf("unsupported --format=%s (this PR ships jsonl only)", *format)
 	}
 
 	base, err := indexDir()

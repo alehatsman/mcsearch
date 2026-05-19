@@ -117,6 +117,9 @@ func resolveEnv(vars []envVar) []effVar {
 
 func cmdEnv(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
+	setHelp(fs,
+		"Print effective MCSEARCH_* configuration with sources (env|default|disabled|unset).",
+		"mcsearch env [--all] [--doc] [--format=text|json]")
 	format := fs.String("format", "text", "output format: text | json")
 	showAll := fs.Bool("all", false, "include tuning knobs (default: core/chat/rerank/compress/draft only)")
 	doc := fs.Bool("doc", false, "include doc strings in text output")

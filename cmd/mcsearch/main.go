@@ -2,16 +2,20 @@
 //
 // Subcommands:
 //
-//	index <path>             Build or refresh the per-project index (chunk + graph).
-//	query <path> <query...>  Search an existing index from the terminal.
-//	generate <path> <prompt> Generate code grounded in the project's index.
-//	status [<path>]          Show endpoint health and indexed projects.
-//	nuke <path>              Delete the on-disk index for a project.
-//	watch <path>             Keep the index fresh as files change.
-//	clone <src> <dst>        Seed dst's index from src's (worktrees).
-//	graph export <path>      Dump nodes/edges as JSONL.
-//	mcp                      Run as an MCP server over stdio.
-//	version                  Print the build version.
+//	index <path>              Build or refresh the per-project index (chunk + graph).
+//	query <path> <query...>   Search an existing index from the terminal.
+//	context <path> <q...>     One-shot context router (semantic + symbol + graph).
+//	generate <path> <prompt>  Generate code grounded in the project's index.
+//	status [<path>]           Show endpoint health and indexed projects.
+//	env                       Print effective env-var configuration with sources.
+//	compact <path>            Concatenate indexable files for LLM prompts (alias: bundle).
+//	nuke <path>               Delete the on-disk index for a project.
+//	reindex <path>|--all      Drop and re-embed (one project, or every known project).
+//	watch <path>              Keep the index fresh as files change.
+//	clone <src> <dst>         Seed dst's index from src's (worktrees).
+//	graph export <path>       Dump nodes/edges as JSONL.
+//	mcp                       Run as an MCP server over stdio.
+//	version                   Print the build version.
 package main
 
 import (
@@ -67,7 +71,7 @@ func main() {
 		err = cmdStatus(ctx, args)
 	case "env":
 		err = cmdEnv(ctx, args)
-	case "compact":
+	case "compact", "bundle":
 		err = cmdCompact(ctx, args)
 	case "nuke":
 		err = cmdNuke(ctx, args)
@@ -160,6 +164,27 @@ flags:
   mcsearch query --rerank=off <path> "..."     skip rerank for this call
   mcsearch query --format=json <path> "..."    emit hits as JSON
   mcsearch query --explain <path> "..."        show per-chunk score breakdown and stage timings`)
+}
+
+// setHelp wires `<cmd> -h` to print a one-line summary, a usage pattern
+// showing positional args, and the auto-generated flag defaults. The
+// default flag.FlagSet usage prints only flags and omits everything
+// the user actually needs to invoke the command.
+func setHelp(fs *flag.FlagSet, oneLiner, usagePattern string) {
+	fs.Usage = func() {
+		out := fs.Output()
+		fmt.Fprintln(out, oneLiner)
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "usage:")
+		fmt.Fprintln(out, "  "+usagePattern)
+		hasFlags := false
+		fs.VisitAll(func(*flag.Flag) { hasFlags = true })
+		if hasFlags {
+			fmt.Fprintln(out)
+			fmt.Fprintln(out, "flags:")
+			fs.PrintDefaults()
+		}
+	}
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────
@@ -363,11 +388,14 @@ func rerankPool() int {
 
 func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
+	setHelp(fs,
+		"Build or refresh the per-project index (chunks + Go static graph).",
+		"mcsearch index [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_CHAT_URL is set)")
+	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_SUMMARY_URL is set)")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
-	format := fs.String("format", "text", "output format: text|json (json only emitted by --graph=only for now, to mirror the old `graph index --format=json` shape)")
+	format := fs.String("format", "text", "output format: text|json")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -375,6 +403,11 @@ func cmdIndex(ctx context.Context, args []string) error {
 	case "on", "off", "only":
 	default:
 		return fmt.Errorf("invalid --graph=%s (want on|off|only)", *graphMode)
+	}
+	switch *format {
+	case "text", "json":
+	default:
+		return fmt.Errorf("unknown --format=%s (want text|json)", *format)
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
@@ -407,7 +440,12 @@ func cmdIndex(ctx context.Context, args []string) error {
 			return err
 		}
 		opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
-		if *summarize || os.Getenv("MCSEARCH_CHAT_URL") != "" || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
+		// Auto-enable summarize when a dedicated summary endpoint is
+		// configured. MCSEARCH_CHAT_URL is NOT a trigger — users often
+		// set it for generate/ask_codebase without wanting per-chunk
+		// chat calls on every index. Set --summarize or
+		// MCSEARCH_SUMMARY_URL explicitly to opt in.
+		if *summarize || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
 			opts.Summarize = true
 			opts.Chat = newSummaryClient()
 			opts.SummaryConcurrency = envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4)
@@ -449,6 +487,9 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if *format == "json" {
+		return reportIndexResult(p.Root, stats, gstats)
+	}
 	fmt.Printf("✓ indexed %s\n", p.Root)
 	fmt.Printf("  chunks: %d  files: %d  dim: %d\n", stats.Chunks, stats.Files, stats.Dim)
 	if gstats != nil {
@@ -457,10 +498,49 @@ func cmdIndex(ctx context.Context, args []string) error {
 	return nil
 }
 
+// indexResult is the JSON payload emitted by `index --format=json`
+// (combined chunk + graph stats). The Graph field is omitted when
+// the graph phase was skipped or failed.
+type indexResult struct {
+	Project string            `json:"project"`
+	Chunks  int               `json:"chunks"`
+	Files   int               `json:"files"`
+	Dim     int               `json:"dim"`
+	Graph   *graphIndexResult `json:"graph,omitempty"`
+}
+
+func reportIndexResult(project string, s store.Stats, g *graph.Stats) error {
+	out := indexResult{
+		Project: project,
+		Chunks:  s.Chunks,
+		Files:   s.Files,
+		Dim:     s.Dim,
+	}
+	if g != nil {
+		out.Graph = &graphIndexResult{
+			Project:    project,
+			Packages:   g.Packages,
+			Nodes:      g.NodesUpserted,
+			Edges:      g.EdgesUpserted,
+			Pruned:     g.NodesPruned,
+			PrunedEdge: g.EdgesPruned,
+			Linked:     g.LinkedToChunks,
+			ElapsedMS:  g.Elapsed.Milliseconds(),
+			Warnings:   g.Warnings,
+		}
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(out)
+}
+
 // ─── query ─────────────────────────────────────────────────────────────────
 
 func cmdQuery(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("query", flag.ContinueOnError)
+	setHelp(fs,
+		"Search an existing index from the terminal (top-k chunks for a query).",
+		"mcsearch query [flags] <path> <query...>")
 	k := fs.Int("k", 8, "number of results to return")
 	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -563,38 +643,6 @@ func cmdQuery(ctx context.Context, args []string) error {
 	}
 }
 
-// queryJSONHit is the wire shape for `mcsearch query --format=json`.
-// Mirrors mcp.SearchHit so the two CLI/MCP surfaces stay aligned.
-type queryJSONHit struct {
-	Path        string  `json:"path"`
-	Kind        string  `json:"kind"`
-	StartLine   int     `json:"start_line"`
-	EndLine     int     `json:"end_line"`
-	Score       float32 `json:"score"`
-	BM25Score   float32 `json:"bm25_score,omitempty"`
-	RRFScore    float32 `json:"rrf_score,omitempty"`
-	RerankScore float32 `json:"rerank_score,omitempty"`
-	Content     string  `json:"content"`
-}
-
-func hitsToJSON(hits []store.Hit) []queryJSONHit {
-	out := make([]queryJSONHit, len(hits))
-	for i, h := range hits {
-		out[i] = queryJSONHit{
-			Path:        h.Path,
-			Kind:        h.Kind,
-			StartLine:   h.StartLine,
-			EndLine:     h.EndLine,
-			Score:       h.Score,
-			BM25Score:   h.BM25Score,
-			RRFScore:    h.RRFScore,
-			RerankScore: h.RerankScore,
-			Content:     h.Content,
-		}
-	}
-	return out
-}
-
 // ─── context ──────────────────────────────────────────────────────────────
 
 // cmdContext mirrors the `mcsearch_context` MCP tool so agents and
@@ -603,6 +651,9 @@ func hitsToJSON(hits []store.Hit) []queryJSONHit {
 // when an agent is offline.
 func cmdContext(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("context", flag.ContinueOnError)
+	setHelp(fs,
+		"One-shot context router — composes semantic + symbol + graph; emit suggested_reads + next_action. Use this BEFORE grep loops.",
+		"mcsearch context [flags] <path> <question...>")
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -626,11 +677,7 @@ func cmdContext(ctx context.Context, args []string) error {
 		return err
 	}
 
-	s := &mcp.Server{
-		EmbedClient: newEmbedClient(),
-		IndexDir:    base,
-		StoreOpts:   storeOpts(),
-	}
+	s, _ := newServerFromEnv(base)
 	_, out, err := s.ContextRouter(ctx, mcp.ContextInput{
 		Project:  p.Root,
 		Question: question,
@@ -655,139 +702,13 @@ func cmdContext(ctx context.Context, args []string) error {
 	}
 }
 
-// printContextText emits a human-readable rendering of a ContextOutput.
-// Mirrors the layout cmdQuery uses for hits so the two surfaces feel
-// like the same tool.
-func printContextText(out mcp.ContextOutput) {
-	if out.Status != "ok" {
-		fmt.Fprintf(os.Stderr, "status: %s\n", out.Status)
-		if out.Hint != "" {
-			fmt.Fprintf(os.Stderr, "hint:   %s\n", out.Hint)
-		}
-		if out.Endpoint != "" {
-			fmt.Fprintf(os.Stderr, "endpoint: %s\n", out.Endpoint)
-		}
-		return
-	}
-	fmt.Printf("intent: %s  project: %s\n", out.Intent, out.Project)
-	if out.Stale {
-		fmt.Println("⚠ index is stale — refresh recommended")
-	}
-	if out.Hint != "" {
-		fmt.Printf("hint: %s\n", out.Hint)
-	}
-	fmt.Println()
-
-	if len(out.SuggestedReads) > 0 {
-		fmt.Println("Suggested reads:")
-		for i, r := range out.SuggestedReads {
-			loc := r.Path
-			if r.StartLine > 0 || r.EndLine > 0 {
-				loc = fmt.Sprintf("%s:%d-%d", r.Path, r.StartLine, r.EndLine)
-			}
-			fmt.Printf("  %d. %s\n     reason: %s\n", i+1, loc, r.Reason)
-			if r.Content != "" {
-				for line := range strings.SplitSeq(strings.TrimRight(r.Content, "\n"), "\n") {
-					fmt.Printf("     │ %s\n", line)
-				}
-				if r.Truncated {
-					fmt.Println("     │ … (truncated; Read the file for the rest)")
-				}
-			}
-		}
-		fmt.Println()
-	}
-
-	if len(out.Symbols) > 0 {
-		fmt.Println("Relevant symbols:")
-		for _, sym := range out.Symbols {
-			loc := sym.Path
-			if sym.StartLine > 0 {
-				loc = fmt.Sprintf("%s:%d", sym.Path, sym.StartLine)
-			}
-			fmt.Printf("  - %s  (%s)  %s\n", sym.QualifiedName, sym.Kind, loc)
-			if sym.Signature != "" {
-				fmt.Printf("      sig: %s\n", sym.Signature)
-			}
-			if sym.Doc != "" {
-				for line := range strings.SplitSeq(sym.Doc, "\n") {
-					fmt.Printf("      doc: %s\n", line)
-				}
-			}
-		}
-		fmt.Println()
-	}
-
-	if len(out.References) > 0 {
-		fmt.Println("References:")
-		for _, r := range out.References {
-			fmt.Printf("  - %s:%d  %s\n", r.Path, r.Line, r.Snippet)
-		}
-		fmt.Println()
-	}
-
-	if len(out.Annotations) > 0 {
-		fmt.Println("Annotations:")
-		for path, meta := range out.Annotations {
-			fmt.Printf("  %s\n", path)
-			if meta.LastCommit != "" {
-				fmt.Printf("    last:    %s  %s\n", meta.LastCommit, meta.LastAuthor)
-			}
-			if len(meta.Owners) > 0 {
-				fmt.Printf("    owners:  %s\n", strings.Join(meta.Owners, " "))
-			}
-			if meta.NearestDoc != "" {
-				fmt.Printf("    doc:     %s\n", meta.NearestDoc)
-			}
-			if len(meta.Tests) > 0 {
-				fmt.Printf("    tests:   %s\n", strings.Join(meta.Tests, " "))
-			}
-			if meta.BuildTags != "" {
-				fmt.Printf("    build:   %s\n", meta.BuildTags)
-			}
-			if meta.Package != "" {
-				fmt.Printf("    package: %s\n", meta.Package)
-			}
-		}
-		fmt.Println()
-	}
-
-	if len(out.SemanticHits) > 0 {
-		fmt.Println("Semantic hits:")
-		for i, h := range out.SemanticHits {
-			loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
-			fmt.Printf("  %d. %s  score=%.4f", i+1, loc, h.Score)
-			if h.Reason != "" {
-				fmt.Printf("  (%s)", h.Reason)
-			}
-			fmt.Println()
-		}
-		fmt.Println()
-	}
-
-	if out.Graph != nil && (len(out.Graph.Nodes) > 0 || len(out.Graph.Edges) > 0) {
-		fmt.Println("Graph:")
-		for _, n := range out.Graph.Nodes {
-			fmt.Printf("  node  %-12s  %s\n", n.Kind, n.ID)
-		}
-		for _, e := range out.Graph.Edges {
-			fmt.Printf("  edge  %-12s  %s → %s\n", e.Kind, e.From, e.To)
-		}
-		fmt.Println()
-	}
-
-	if out.NextAction != "" {
-		fmt.Printf("Next action:\n  %s\n\n", out.NextAction)
-	}
-	if out.Avoid != "" {
-		fmt.Printf("Avoid:\n  %s\n", out.Avoid)
-	}
-}
-
 // ─── generate ──────────────────────────────────────────────────────────────
 
 func cmdGenerate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
+	setHelp(fs,
+		"Generate code grounded in the project's index (RAG: top-k chunks → chat endpoint).",
+		"mcsearch generate [flags] <path> <prompt...>")
 	k := fs.Int("k", 8, "number of RAG chunks to retrieve as context")
 	noRAG := fs.Bool("no-rag", false, "skip retrieval; send prompt to the chat endpoint without project context")
 	system := fs.String("system", "", "override the default system prompt")
@@ -880,23 +801,13 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	return nil
 }
 
-func truncate(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	// Snap to a UTF-8 boundary so we don't cut a multi-byte rune in
-	// half and emit invalid UTF-8 to the terminal.
-	cut := n
-	for cut > 0 && (s[cut]&0xC0) == 0x80 {
-		cut--
-	}
-	return s[:cut] + "\n…(truncated)"
-}
-
 // ─── status ────────────────────────────────────────────────────────────────
 
 func cmdStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	setHelp(fs,
+		"Show endpoint health and project stats (chunks/files/graph). Optional path narrows to one project.",
+		"mcsearch status [<path>]")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -939,8 +850,12 @@ func cmdStatus(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
+		nodes, edges, gerr := st.GraphStats(ctx)
 		fmt.Printf("\n%s\n", p.Root)
 		fmt.Printf("  %d chunks  %d files  dim=%d\n", stats.Chunks, stats.Files, stats.Dim)
+		if gerr == nil && (nodes > 0 || edges > 0) {
+			fmt.Printf("  %d graph nodes  %d graph edges\n", nodes, edges)
+		}
 		if stats.LastIndex.IsZero() {
 			fmt.Println("  last indexed: unknown (run mcsearch index to refresh)")
 		} else if time.Since(stats.LastIndex) > 24*time.Hour {
@@ -966,6 +881,8 @@ func cmdStatus(ctx context.Context, args []string) error {
 		root    string
 		chunks  int
 		files   int
+		nodes   int64
+		edges   int64
 		last    time.Time
 		corrupt bool
 		empty   bool
@@ -988,11 +905,12 @@ func cmdStatus(ctx context.Context, args []string) error {
 			defer func() { <-sem }()
 			st, err := store.Open(ctx, path)
 			if err != nil {
-				results[idx] = row{root: name[:min(12, len(name))], corrupt: true}
+				results[idx] = row{root: fmt.Sprintf("(corrupt cache: %s)", name), corrupt: true}
 				return
 			}
 			stats, _ := st.Stats(ctx)
 			root, _ := st.ProjectRoot(ctx)
+			nodes, edges, _ := st.GraphStats(ctx)
 			st.Close()
 			if stats.Chunks == 0 {
 				results[idx] = row{empty: true}
@@ -1005,6 +923,8 @@ func cmdStatus(ctx context.Context, args []string) error {
 				root:   root,
 				chunks: stats.Chunks,
 				files:  stats.Files,
+				nodes:  nodes,
+				edges:  edges,
 				last:   stats.LastIndex,
 			}
 		}(i, e.Name(), dbPath)
@@ -1055,6 +975,10 @@ func cmdStatus(ctx context.Context, args []string) error {
 		}
 		fmt.Printf("  %-*s  %5d chunks  %4d files  %s\n",
 			maxRoot, r.root, r.chunks, r.files, when)
+		if r.nodes > 0 || r.edges > 0 {
+			fmt.Printf("  %-*s  %5d nodes   %4d edges (graph)\n",
+				maxRoot, "", r.nodes, r.edges)
+		}
 	}
 	if empties > 0 {
 		noun := "index"
@@ -1066,31 +990,13 @@ func cmdStatus(ctx context.Context, args []string) error {
 	return nil
 }
 
-// relativeTime formats a timestamp as a human-friendly relative string
-// ("just now", "5m ago", "2h ago", "3d ago", or a date for old entries).
-func relativeTime(t time.Time) string {
-	if t.IsZero() {
-		return "never"
-	}
-	d := time.Since(t)
-	switch {
-	case d < time.Minute:
-		return "just now"
-	case d < time.Hour:
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh ago", int(d.Hours()))
-	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
-	default:
-		return t.Format("2006-01-02")
-	}
-}
-
 // ─── nuke ──────────────────────────────────────────────────────────────────
 
 func cmdNuke(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("nuke", flag.ContinueOnError)
+	setHelp(fs,
+		"Delete the on-disk index for a project (irreversible).",
+		"mcsearch nuke <path>")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1124,6 +1030,9 @@ func cmdNuke(_ context.Context, args []string) error {
 
 func cmdReindex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
+	setHelp(fs,
+		"Drop and re-embed a project from scratch (or every known project with --all --yes).",
+		"mcsearch reindex [flags] <path>  |  mcsearch reindex --all --yes")
 	all := fs.Bool("all", false, "drop and re-index every known project under MCSEARCH_INDEX_DIR")
 	yes := fs.Bool("yes", false, "confirm the destructive sweep required by --all")
 	verbose := fs.Bool("v", false, "verbose")
@@ -1270,6 +1179,9 @@ func knownProjectRoots(ctx context.Context, base string) ([]string, error) {
 
 func cmdWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
+	setHelp(fs,
+		"Keep the index fresh as files change (foreground; runs chunk + graph after each debounce).",
+		"mcsearch watch [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
@@ -1331,8 +1243,11 @@ func cmdWatch(ctx context.Context, args []string) error {
 // at the same path with the same content in dst; differing files get
 // reconciled on the next `mcsearch index <dst>` (incremental — only
 // changed chunks are re-embedded).
-func cmdClone(_ context.Context, args []string) error {
+func cmdClone(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
+	setHelp(fs,
+		"Seed dst's index from src's (e.g. for a new git worktree). Follow with `mcsearch index <dst>` to reconcile.",
+		"mcsearch clone [flags] <src-path> <dst-path>")
 	force := fs.Bool("force", false, "overwrite dst's index if it already exists")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -1378,9 +1293,28 @@ func cmdClone(_ context.Context, args []string) error {
 	if err := copyFile(src.DBPath, dst.DBPath); err != nil {
 		return fmt.Errorf("copy index: %w", err)
 	}
+	// Re-tag project_root so `reindex --all` / status see this cache
+	// as belonging to dst, not src. A subsequent `mcsearch index <dst>`
+	// would also do this, but tagging now keeps the cache discoverable
+	// even before the first reconcile.
+	if err := retagProjectRoot(ctx, dst.DBPath, dst.Root); err != nil {
+		return fmt.Errorf("retag project root: %w", err)
+	}
 	fmt.Printf("✓ cloned %s → %s\n", src.Root, dst.Root)
 	fmt.Printf("  next: `mcsearch index %s` will reconcile any files that differ between the two trees (incremental — only changed chunks are re-embedded).\n", dst.Root)
 	return nil
+}
+
+// retagProjectRoot opens the cloned DB just long enough to overwrite
+// the project_root meta key, so the dst cache no longer claims to be
+// src's index.
+func retagProjectRoot(ctx context.Context, dbPath, root string) error {
+	st, err := store.Open(ctx, dbPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	return st.SetProjectRoot(ctx, root)
 }
 
 func copyFile(srcPath, dstPath string) error {
@@ -1408,6 +1342,9 @@ func copyFile(srcPath, dstPath string) error {
 
 func cmdMCP(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
+	setHelp(fs,
+		"Run mcsearch as an MCP server over stdio (canonical entrypoint for Claude Code).",
+		"mcsearch mcp")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1418,11 +1355,20 @@ func cmdMCP(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	// Build the rerank client once and share it with both the Server
-	// (for `status` health reporting) and Store.Options (for the
-	// query-time rerank stage). storeOpts() would call newRerankClient
-	// internally, but reusing one instance avoids the redundant HTTP
-	// client allocation.
+	srv, _ := newServerFromEnv(base)
+	return srv.RunStdio(ctx)
+}
+
+// newServerFromEnv builds a fully-wired *mcp.Server from the current
+// environment. Used by both `cmdMCP` (stdio server) and `cmdContext`
+// (one-shot CLI invocation of the context router). The HTTP clients
+// are lazy — they don't dial until invoked — so wiring all of them
+// is cheap even when the context router only uses Embed.
+//
+// Returns the shared rerank client as the second value so callers
+// that need it for separate purposes (e.g. health reporting) don't
+// have to redundantly construct another instance.
+func newServerFromEnv(base string) (*mcp.Server, rerank.HealthChecker) {
 	rerankClient := newRerankClient()
 	opts := storeOpts()
 	if rerankClient != nil {
@@ -1437,5 +1383,5 @@ func cmdMCP(ctx context.Context, args []string) error {
 		IndexDir:       base,
 		StoreOpts:      opts,
 	}
-	return srv.RunStdio(ctx)
+	return srv, rerankClient
 }
