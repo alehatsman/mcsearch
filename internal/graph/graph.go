@@ -239,6 +239,13 @@ func (g *Indexer) Run(ctx context.Context) (*Stats, error) {
 	if err != nil {
 		return nil, fmt.Errorf("extract: %w", err)
 	}
+	yamlRes, err := ExtractYAML(ctx, g.project.Root)
+	if err != nil {
+		return nil, fmt.Errorf("extract yaml: %w", err)
+	}
+	result.Nodes = append(result.Nodes, yamlRes.Nodes...)
+	result.Edges = append(result.Edges, yamlRes.Edges...)
+	result.Warnings = append(result.Warnings, yamlRes.Warnings...)
 	if g.opts.Verbose {
 		g.log.Info("graph extracted",
 			"packages", result.Packages,

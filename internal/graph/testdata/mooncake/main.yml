@@ -1,0 +1,4 @@
+- vars.load: ./shared/variables.yml
+- vars.load: "./machines/main/vars.yml"
+- import: ./machines/main/index.yml
+- import: ./shared/missing.yml  # dangling — should be skipped

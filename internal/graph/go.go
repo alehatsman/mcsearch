@@ -6,12 +6,33 @@ import (
 	"go/ast"
 	"go/token"
 	"go/types"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"golang.org/x/tools/go/packages"
 )
+
+// hasGoModule walks up from start looking for a go.mod (or go.work).
+// packages.Load("./...") emits a confusing "directory prefix . does not
+// contain main module" warning when neither exists; short-circuit to
+// keep the warnings list useful on non-Go projects.
+func hasGoModule(start string) bool {
+	dir := start
+	for {
+		for _, name := range []string{"go.mod", "go.work"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+				return true
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return false
+		}
+		dir = parent
+	}
+}
 
 // ExtractResult is the output of a single Go-graph extraction pass.
 // Warnings collects per-package load errors so the CLI can surface
@@ -38,6 +59,9 @@ type ExtractResult struct {
 // per-package errors in pkg.Errors, which become Warnings. Only a
 // top-level Load failure (config / build system) is returned as err.
 func ExtractGo(ctx context.Context, projectRoot string) (*ExtractResult, error) {
+	if !hasGoModule(projectRoot) {
+		return &ExtractResult{}, nil
+	}
 	cfg := &packages.Config{
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
 			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedImports |
