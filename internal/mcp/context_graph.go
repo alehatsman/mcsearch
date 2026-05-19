@@ -1,4 +1,4 @@
-// Graph integration for mcsearch_context.
+// Package mcp provides graph integration for mcsearch_context.
 //
 // Layer 1 of internal/graph supplies nodes (package/file/function/
 // method/type/struct/interface/field/import) and structural edges
@@ -6,16 +6,16 @@
 // emit `calls` edges — so the callers/callees intents still degrade
 // to a semantic + symbol fallback. The intents that benefit today:
 //
-//   symbol_lookup     — neighbors of the matched symbol (sibling
-//                       methods, fields, embedded types) so the agent
-//                       sees the whole "shape" of a type without
-//                       reading the file.
-//   editing_context   — same neighborhood, plus the enclosing type
-//                       so refactors know what else uses the type.
-//   architecture      — package/type roll-up for packages surfaced
-//                       by the semantic lane.
-//   package_topology  — import edges between packages in the
-//                       semantic neighborhood.
+//	symbol_lookup     — neighbors of the matched symbol (sibling
+//	                    methods, fields, embedded types) so the agent
+//	                    sees the whole "shape" of a type without
+//	                    reading the file.
+//	editing_context   — same neighborhood, plus the enclosing type
+//	                    so refactors know what else uses the type.
+//	architecture      — package/type roll-up for packages surfaced
+//	                    by the semantic lane.
+//	package_topology  — import edges between packages in the
+//	                    semantic neighborhood.
 //
 // Loader strategy: a single in-memory view per request. With the
 // current scale (~800 nodes for this repo) that's a few hundred KB;
@@ -35,10 +35,10 @@ import (
 // same underlying node/edge slices so memory cost is one slice copy.
 type graphView struct {
 	nodesByID        map[string]graphNode
-	nodesByName      map[string][]graphNode  // bare name → matching nodes
-	nodesByQualified map[string][]graphNode  // qualified name → matching nodes
-	nodesByPackage   map[string][]graphNode  // package path → all nodes in pkg
-	nodesByPath      map[string][]graphNode  // file path → all nodes in file
+	nodesByName      map[string][]graphNode // bare name → matching nodes
+	nodesByQualified map[string][]graphNode // qualified name → matching nodes
+	nodesByPackage   map[string][]graphNode // package path → all nodes in pkg
+	nodesByPath      map[string][]graphNode // file path → all nodes in file
 	edgesBySrc       map[string][]graphEdge
 	edgesByDst       map[string][]graphEdge
 	edgesByKind      map[graph.EdgeKind][]graphEdge

@@ -84,7 +84,7 @@ var (
 	// `change` / `update` deliberately omitted — they fire on questions
 	// like "when X changes" or "update the timestamp on Y" that are
 	// really behavior_search, not editing_context.
-	reEditing      = regexp.MustCompile(`\b(edit|modify|refactor|rename|extend|fix|patch|implement|add)\b`)
+	reEditing = regexp.MustCompile(`\b(edit|modify|refactor|rename|extend|fix|patch|implement|add)\b`)
 )
 
 // ─── tool: mcsearch_context ───────────────────────────────────────────────
@@ -201,7 +201,7 @@ type SuggestedRead struct {
 	// common case. Capped per-read and totaled across reads — see
 	// inlineSuggestedReads. Empty when no_inline=true, when the file
 	// cannot be opened, or when the caller hit the total byte budget.
-	Content   string `json:"content,omitempty"`
+	Content string `json:"content,omitempty"`
 	// Truncated is set when the per-read line/byte cap clipped the
 	// content before reaching EndLine. The caller can still issue a
 	// regular Read for the rest if needed.
@@ -209,18 +209,18 @@ type SuggestedRead struct {
 }
 
 type ContextOutput struct {
-	Status         string              `json:"status"` // ok | no-index | embedding-service-unreachable | error
-	Hint           string              `json:"hint,omitempty"`
-	Endpoint       string              `json:"endpoint,omitempty"` // populated when embed is unreachable
-	Project        string              `json:"project,omitempty"`
-	Intent         string              `json:"intent,omitempty"`
-	Stale          bool                `json:"stale,omitempty"`
-	SemanticHits   []SemHit            `json:"semantic_hits,omitempty"`
-	Symbols        []SymbolHit         `json:"symbols,omitempty"`
-	Graph          *GraphResult        `json:"graph,omitempty"`
-	SuggestedReads []SuggestedRead     `json:"suggested_reads,omitempty"`
-	NextAction     string              `json:"next_action,omitempty"`
-	Avoid          string              `json:"avoid,omitempty"`
+	Status         string          `json:"status"` // ok | no-index | embedding-service-unreachable | error
+	Hint           string          `json:"hint,omitempty"`
+	Endpoint       string          `json:"endpoint,omitempty"` // populated when embed is unreachable
+	Project        string          `json:"project,omitempty"`
+	Intent         string          `json:"intent,omitempty"`
+	Stale          bool            `json:"stale,omitempty"`
+	SemanticHits   []SemHit        `json:"semantic_hits,omitempty"`
+	Symbols        []SymbolHit     `json:"symbols,omitempty"`
+	Graph          *GraphResult    `json:"graph,omitempty"`
+	SuggestedReads []SuggestedRead `json:"suggested_reads,omitempty"`
+	NextAction     string          `json:"next_action,omitempty"`
+	Avoid          string          `json:"avoid,omitempty"`
 	// References is the ripgrep-backed reference list. Populated for
 	// callers/callees intents when at least one SymbolHit is present.
 	// Stand-in for the deferred `calls` graph edges.
@@ -273,7 +273,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		out.Hint = fmt.Sprintf("open index: %v", err)
 		return nil, out, nil
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	if stats, statsErr := st.Stats(ctx); statsErr == nil && !stats.LastIndex.IsZero() && time.Since(stats.LastIndex) > 24*time.Hour {
 		out.Stale = true
@@ -849,7 +849,7 @@ func readLineRange(path string, start, end, maxLines, maxBytes int) (string, boo
 	if err != nil {
 		return "", false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	// Lift the default 64 KB line cap so minified files don't bail —
@@ -888,4 +888,3 @@ func readLineRange(path string, start, end, maxLines, maxBytes int) (string, boo
 	// that's not truncation by the cap — leave truncated as-is.
 	return buf.String(), truncated, nil
 }
-

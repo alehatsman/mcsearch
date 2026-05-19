@@ -22,7 +22,7 @@ import (
 	"github.com/alehatsman/mcsearch/internal/ignore"
 )
 
-func cmdCompact(_ context.Context, args []string) error {
+func cmdCompact(_ context.Context, args []string) (err error) {
 	flags := flag.NewFlagSet("compact", flag.ContinueOnError)
 	out := flags.String("out", "", "write to file instead of stdout")
 	maxBytes := flags.Int64("max-bytes", 1<<20, "skip individual files larger than N bytes")
@@ -51,16 +51,28 @@ func cmdCompact(_ context.Context, args []string) error {
 		return err
 	}
 
+	osRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = osRoot.Close() }()
+
 	var w io.Writer = os.Stdout
 	if *out != "" {
-		f, err := os.Create(*out)
-		if err != nil {
-			return err
+		f, ferr := os.Create(*out)
+		if ferr != nil {
+			return ferr
 		}
-		defer f.Close()
 		bw := bufio.NewWriter(f)
-		defer bw.Flush()
 		w = bw
+		defer func() {
+			if ferr := bw.Flush(); ferr != nil && err == nil {
+				err = ferr
+			}
+			if ferr := f.Close(); ferr != nil && err == nil {
+				err = ferr
+			}
+		}()
 	}
 
 	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -94,7 +106,7 @@ func cmdCompact(_ context.Context, args []string) error {
 			fmt.Fprintf(os.Stderr, "skip %s (%d bytes > --max-bytes=%d)\n", rel, fi.Size(), *maxBytes)
 			return nil
 		}
-		data, rerr := os.ReadFile(path)
+		data, rerr := osRoot.ReadFile(rel)
 		if rerr != nil {
 			return rerr
 		}

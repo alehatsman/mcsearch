@@ -7,15 +7,15 @@
 //
 // Gating matrix (driven by intent):
 //
-//   leg                | always | callers/callees | editing_context | architecture / package_topology
-//   ───────────────────┼────────┼─────────────────┼─────────────────┼─────────────────────────────────
-//   signatures + docs  |   ✓    |                 |                 |
-//   tests pairing      |   ✓    |                 |                 |
-//   nearest doc        |   ✓    |                 |                 |
-//   references         |        |        ✓        |                 |
-//   git blame          |        |                 |        ✓        |
-//   CODEOWNERS         |        |                 |        ✓        |
-//   build tags / pkg   |        |                 |        ✓        |              ✓
+//	leg                | always | callers/callees | editing_context | architecture / package_topology
+//	───────────────────┼────────┼─────────────────┼─────────────────┼─────────────────────────────────
+//	signatures + docs  |   ✓    |                 |                 |
+//	tests pairing      |   ✓    |                 |                 |
+//	nearest doc        |   ✓    |                 |                 |
+//	references         |        |        ✓        |                 |
+//	git blame          |        |                 |        ✓        |
+//	CODEOWNERS         |        |                 |        ✓        |
+//	build tags / pkg   |        |                 |        ✓        |              ✓
 //
 // All legs are best-effort: any failure (missing git binary, no
 // CODEOWNERS file, unreadable source) leaves the relevant field empty
@@ -38,8 +38,8 @@ import (
 const (
 	maxDocLines      = 10
 	maxDocBytes      = 600
-	maxRefHits       = 30  // total RefHits returned across all symbols
-	maxRefsPerSymbol = 20  // per-symbol cap before fanning to next symbol
+	maxRefHits       = 30 // total RefHits returned across all symbols
+	maxRefsPerSymbol = 20 // per-symbol cap before fanning to next symbol
 	blameTimeout     = 600 * time.Millisecond
 	rgTimeout        = 2 * time.Second
 )
@@ -80,7 +80,7 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 	if err != nil {
 		return "", ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
@@ -458,7 +458,7 @@ func loadCodeowners(projectRoot string) []codeownersRule {
 	if err != nil {
 		return nil
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var rules []codeownersRule
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -551,7 +551,7 @@ func readBuildTagsAndPackage(path string) (tags, pkg string) {
 	if err != nil {
 		return "", ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 	for n := 0; n < 20 && sc.Scan(); n++ {
