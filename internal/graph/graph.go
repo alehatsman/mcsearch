@@ -41,16 +41,17 @@ const (
 )
 
 // EdgeKind enumerates the structural relationships extracted in layer 1.
-// `calls`, `references`, `implements`, `returns`, and `parameter` are
-// reserved for follow-up layers but not emitted here.
+// `calls`, `references`, `returns`, and `parameter` are reserved for
+// follow-up layers but not emitted here.
 type EdgeKind string
 
 const (
-	EdgeContains  EdgeKind = "contains"
-	EdgeImports   EdgeKind = "imports"
-	EdgeHasMethod EdgeKind = "has_method"
-	EdgeHasField  EdgeKind = "has_field"
-	EdgeEmbeds    EdgeKind = "embeds"
+	EdgeContains   EdgeKind = "contains"
+	EdgeImports    EdgeKind = "imports"
+	EdgeHasMethod  EdgeKind = "has_method"
+	EdgeHasField   EdgeKind = "has_field"
+	EdgeEmbeds     EdgeKind = "embeds"
+	EdgeImplements EdgeKind = "implements"
 )
 
 // Node is a structural symbol persisted in graph_nodes.

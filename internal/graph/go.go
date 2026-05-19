@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -134,6 +135,8 @@ func extractPackage(p *packages.Package, projectRoot, modulePath string, nodes *
 	for _, file := range p.Syntax {
 		extractFile(p, file, fset, pkgID, projectRoot, modulePath, nodes, edges)
 	}
+
+	extractImplements(p, modulePath, nodes, edges)
 }
 
 func extractFile(
@@ -492,6 +495,62 @@ func extractInterfaceMethods(
 				FilePath:  rel,
 				StartLine: startLine,
 				EndLine:   endLine,
+			})
+		}
+	}
+}
+
+// extractImplements uses type-checker info to emit implements edges for
+// every concrete type in the package that satisfies a same-package interface.
+// Both value (T) and pointer (*T) are tested so pointer-receiver method sets
+// are correctly matched against interfaces.
+func extractImplements(p *packages.Package, modulePath string, _ *nodeSet, edges *edgeSet) {
+	if p.TypesInfo == nil || p.Types == nil {
+		return
+	}
+	scope := p.Types.Scope()
+
+	var concretes []*types.Named
+	var ifaces []*types.Named
+	for _, name := range scope.Names() {
+		obj, ok := scope.Lookup(name).(*types.TypeName)
+		if !ok {
+			continue
+		}
+		named, ok := obj.Type().(*types.Named)
+		if !ok {
+			continue
+		}
+		if named.TypeParams() != nil {
+			continue // skip generics
+		}
+		if _, ok := named.Underlying().(*types.Interface); ok {
+			ifaces = append(ifaces, named)
+		} else {
+			concretes = append(concretes, named)
+		}
+	}
+
+	for _, conc := range concretes {
+		concType := conc.Obj().Type()
+		ptrType := types.NewPointer(concType)
+		for _, iface := range ifaces {
+			ifaceT, ok := iface.Underlying().(*types.Interface)
+			if !ok {
+				continue
+			}
+			if !types.Implements(concType, ifaceT) && !types.Implements(ptrType, ifaceT) {
+				continue
+			}
+			concName := conc.Obj().Name()
+			ifaceName := iface.Obj().Name()
+			concID := NodeID(modulePath, p.PkgPath, NodeType, concName)
+			ifaceID := NodeID(modulePath, p.PkgPath, NodeType, ifaceName)
+			edges.add(Edge{
+				ID:    EdgeID(concID, EdgeImplements, ifaceID, "", 0),
+				Kind:  EdgeImplements,
+				SrcID: concID,
+				DstID: ifaceID,
 			})
 		}
 	}

@@ -172,6 +172,12 @@ func TestExtractGoFixture(t *testing.T) {
 	if findEdge(res.Edges, EdgeEmbeds, rcID, readerID) == nil {
 		t.Errorf("missing embeds edge ReadCloser → Reader")
 	}
+
+	// implements: *Impl satisfies Reader — edge is from the named type Impl.
+	implID := NodeID(modulePathOf(res), "example.com/simple/store", NodeType, "Impl")
+	if findEdge(res.Edges, EdgeImplements, implID, readerID) == nil {
+		t.Errorf("missing implements edge Impl → Reader; edges=%v", edgeKinds(res.Edges, EdgeImplements))
+	}
 }
 
 // modulePathOf re-derives the module path from a result so tests
@@ -200,6 +206,16 @@ func nodesOfKind(nodes []Node, kind NodeKind) []string {
 	for _, n := range nodes {
 		if n.Kind == kind {
 			out = append(out, n.QualifiedName)
+		}
+	}
+	return out
+}
+
+func edgeKinds(edges []Edge, kind EdgeKind) []string {
+	var out []string
+	for _, e := range edges {
+		if e.Kind == kind {
+			out = append(out, e.SrcID+" → "+e.DstID)
 		}
 	}
 	return out

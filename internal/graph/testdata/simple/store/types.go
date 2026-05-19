@@ -36,3 +36,13 @@ type ReadCloser interface {
 	Reader
 	Close() error
 }
+
+// Impl is a concrete type whose pointer receiver implements Reader,
+// used to assert the implements edge in graph tests.
+type Impl struct {
+	name string
+	data map[string]string
+}
+
+func (im *Impl) Get(key string) string { return im.data[key] }
+func (im *Impl) NameOf() string        { return im.name }
