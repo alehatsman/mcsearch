@@ -461,7 +461,21 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 // TouchSeen bumps last_seen_at for an already-present (path, sha) pair and
 // backfills the name column — so chunks indexed before the name column was
 // added get their names populated on the next walk without re-embedding.
-func (s *Store) TouchSeen(ctx context.Context, path, contentSHA, name string, now time.Time) error {
+//
+// When startLine > 0, also refreshes start_line/end_line. Required for
+// the chunker fast-path: a chunk's content can stay byte-identical
+// (same SHA) while its position in the file shifts because some earlier
+// chunk in the same file grew or shrank. Without this update, find_symbol
+// returns the chunk's ORIGINAL line range even after the file was edited
+// above it. Callers that don't have line info (file/package/repo summary
+// touches) pass 0 to skip the position update.
+func (s *Store) TouchSeen(ctx context.Context, path, contentSHA, name string, startLine, endLine int, now time.Time) error {
+	if startLine > 0 {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE chunks SET last_seen_at=?, name=?, start_line=?, end_line=? WHERE path=? AND content_sha1=?`,
+			now.UnixNano(), name, startLine, endLine, path, contentSHA)
+		return err
+	}
 	_, err := s.db.ExecContext(ctx,
 		`UPDATE chunks SET last_seen_at=?, name=? WHERE path=? AND content_sha1=?`,
 		now.UnixNano(), name, path, contentSHA)

@@ -82,7 +82,7 @@ func TestPruneUnseen(t *testing.T) {
 	}, t0)
 	// Advance: touch only `live.go`.
 	t1 := t0.Add(time.Millisecond)
-	if err := st.TouchSeen(ctx, "live.go", "h2", "", t1); err != nil {
+	if err := st.TouchSeen(ctx, "live.go", "h2", "", 0, 0, t1); err != nil {
 		t.Fatal(err)
 	}
 	n, err := st.PruneUnseen(ctx, t1)
@@ -663,6 +663,49 @@ func TestPersistsDimAcrossOpen(t *testing.T) {
 	stats, _ := st2.Stats(ctx)
 	if stats.Dim != 4 {
 		t.Errorf("dim not persisted: got %d", stats.Dim)
+	}
+}
+
+func TestTouchSeenRefreshesPositions(t *testing.T) {
+	// TouchSeen is called when a chunk's SHA already exists. If the
+	// caller passes new start_line/end_line, those must be persisted —
+	// the chunk's content can stay the same while its position in the
+	// file shifts (something above grew/shrank). Without this, find_
+	// symbol returns the ORIGINAL line range across edits.
+	st, ctx := newStore(t)
+	now := time.Now()
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a.go", Kind: "fn", Name: "F", ContentSHA: "h1", Content: "x",
+			StartLine: 10, EndLine: 20, Vec: []float32{1, 0, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+
+	// File edited above: F's content didn't change but it moved down 24 lines.
+	later := now.Add(time.Second)
+	if err := st.TouchSeen(ctx, "a.go", "h1", "F", 34, 44, later); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := st.FindSymbol(ctx, "F", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 1 {
+		t.Fatalf("got %d hits, want 1", len(hits))
+	}
+	if hits[0].StartLine != 34 || hits[0].EndLine != 44 {
+		t.Errorf("position not refreshed; got %d-%d, want 34-44", hits[0].StartLine, hits[0].EndLine)
+	}
+
+	// Sentinel startLine=0 leaves positions alone (summary callers).
+	later2 := later.Add(time.Second)
+	if err := st.TouchSeen(ctx, "a.go", "h1", "F", 0, 0, later2); err != nil {
+		t.Fatal(err)
+	}
+	hits, _ = st.FindSymbol(ctx, "F", 5)
+	if hits[0].StartLine != 34 || hits[0].EndLine != 44 {
+		t.Errorf("sentinel 0,0 should preserve positions; got %d-%d", hits[0].StartLine, hits[0].EndLine)
 	}
 }
 

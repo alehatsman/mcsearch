@@ -260,7 +260,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		for _, c := range sf.chunks {
 			sha := chunkSHA(c.Content)
 			if existing[sha] {
-				if err := ix.Store.TouchSeen(ctx, sf.rel, sha, c.Name, startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, sf.rel, sha, c.Name, c.StartLine, c.EndLine, startTime); err != nil {
 					return err
 				}
 				continue
@@ -286,7 +286,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				pkgFiles[dir] = append(pkgFiles[dir], pkgFileEntry{path: sf.rel, fileSHA: fileSHA})
 			}
 			if existing[fileSHA] {
-				if err := ix.Store.TouchSeen(ctx, sf.rel, fileSHA, "", startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, sf.rel, fileSHA, "", 0, 0, startTime); err != nil {
 					return err
 				}
 				seen++
@@ -338,7 +338,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				}
 				sumSHA := chunkSHA(chunk.KindChunkSummary + ":" + c.Content)
 				if existing[sumSHA] {
-					if err := ix.Store.TouchSeen(ctx, sf.rel, sumSHA, "", startTime); err != nil {
+					if err := ix.Store.TouchSeen(ctx, sf.rel, sumSHA, "", 0, 0, startTime); err != nil {
 						return err
 					}
 					seen++
@@ -458,7 +458,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			sort.Strings(shas)
 			pkgSHA := chunkSHA(strings.Join(shas, ":"))
 			if existingBatch[dir][pkgSHA] {
-				if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", 0, 0, startTime); err != nil {
 					return err
 				}
 				continue
@@ -522,7 +522,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		if err == nil && len(pkgSummaries) > 0 {
 			repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
 			if existingBatch["."][repoSHA] {
-				if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", startTime); err != nil {
+				if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", 0, 0, startTime); err != nil {
 					return err
 				}
 			} else {
