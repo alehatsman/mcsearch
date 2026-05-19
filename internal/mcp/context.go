@@ -729,7 +729,7 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit) 
 			for _, r := range reads {
 				parts = append(parts, fmt.Sprintf("%s lines %d-%d", r.Path, r.StartLine, r.EndLine))
 			}
-			return "Skim " + strings.Join(parts, "; ") + " for the structural overview before editing."
+			return "Skim " + strings.Join(parts, "; ") + " for the structural overview, then re-call with intent=symbol_lookup to drill into specific types, or intent=editing_context for files you want to modify."
 		}
 	case IntentEditingContext:
 		if len(reads) > 0 {

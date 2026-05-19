@@ -221,6 +221,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		for d := range dirSet {
 			allPaths = append(allPaths, d)
 		}
+		allPaths = append(allPaths, ".") // repo-level summary cache entry
 	}
 	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, allPaths)
 	if err != nil {
@@ -467,6 +468,42 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		}
 	}
 
+	// Pass 6: repository summary — one per project, generated from all
+	// package summaries. Runs after Pass 5 so package_summary rows are
+	// committed. Stored with path="." so PruneUnseen leaves it alone.
+	if pkgFiles != nil && ctx.Err() == nil {
+		pkgSummaries, err := ix.Store.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+		if err == nil && len(pkgSummaries) > 0 {
+			repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
+			if existingBatch["."][repoSHA] {
+				if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", startTime); err != nil {
+					return err
+				}
+			} else {
+				summary, err := summarizeRepo(ctx, ix.Options.Chat, pkgSummaries)
+				if err != nil {
+					ix.Options.Logger.Warn("repo summarize failed", "err", err)
+				} else if strings.TrimSpace(summary) != "" {
+					vecs, err := ix.Embed.Embed(ctx, []string{chunk.KindRepoSummary + "\n" + summary})
+					if err != nil {
+						ix.Options.Logger.Warn("repo summary embed failed", "err", err)
+					} else {
+						rows := []store.PendingChunk{{
+							Path:       ".",
+							Kind:       chunk.KindRepoSummary,
+							ContentSHA: repoSHA,
+							Content:    summary,
+							Vec:        vecs[0],
+						}}
+						if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
+							return err
+						}
+					}
+				}
+			}
+		}
+	}
+
 	pruned, err := ix.Store.PruneUnseen(ctx, startTime)
 	if err != nil {
 		return err
@@ -505,7 +542,7 @@ func chunkSHA(content string) string {
 // prose summary.
 func isStructural(kind string) bool {
 	switch kind {
-	case chunk.KindWindow, chunk.KindOrphan, chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary:
+	case chunk.KindWindow, chunk.KindOrphan, chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary, chunk.KindRepoSummary:
 		return false
 	default:
 		return true
@@ -547,6 +584,26 @@ func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSumm
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}, chat.Options{MaxTokens: 300})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
+// summarizeRepo asks the chat endpoint for a top-level overview of the
+// whole repository, built from the per-package summaries. Stored once per
+// project and re-generated only when any package summary changes.
+func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) (string, error) {
+	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
+		"write 3-5 sentences describing what the repository does overall. " +
+		"Name the top-level packages and their roles. Describe the main data flow or pipeline. " +
+		"Note any architectural constraints or key invariants. " +
+		"No prose padding, no apologies, no restating the prompt."
+	user := fmt.Sprintf("PACKAGE SUMMARIES:\n%s", strings.Join(pkgSummaries, "\n\n---\n\n"))
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, chat.Options{MaxTokens: 400})
 	if err != nil {
 		return "", err
 	}

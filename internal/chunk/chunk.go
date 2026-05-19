@@ -48,6 +48,7 @@ const (
 	KindFileSummary    = "file_summary"
 	KindChunkSummary   = "chunk_summary"
 	KindPackageSummary = "package_summary"
+	KindRepoSummary    = "repo_summary"
 )
 
 // LineCount returns the number of lines in data. A trailing newline is

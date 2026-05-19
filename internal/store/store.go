@@ -638,10 +638,31 @@ func (s *Store) FileSummariesForPaths(ctx context.Context, paths []string) ([]st
 	return out, rows.Err()
 }
 
+// AllSummariesByKind returns the content of every chunk with the given kind,
+// ordered by path. Used by the indexer to aggregate lower-level summaries
+// into a higher-level one (e.g. package summaries → repo summary).
+func (s *Store) AllSummariesByKind(ctx context.Context, kind string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT content FROM chunks WHERE kind = ? ORDER BY path`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return nil, err
+		}
+		out = append(out, content)
+	}
+	return out, rows.Err()
+}
+
 // SearchSummaries runs a semantic search restricted to summary-kind chunks
-// (file_summary, package_summary). Fetches a larger candidate pool than k
-// to compensate for summaries being sparse relative to code chunks, then
-// filters and trims to k.
+// (file_summary, package_summary, repo_summary). Fetches a larger candidate
+// pool than k to compensate for summaries being sparse relative to code
+// chunks, then filters and trims to k.
 func (s *Store) SearchSummaries(ctx context.Context, queryVec []float32, queryText string, k int) ([]Hit, error) {
 	candidates := k * 20
 	if candidates < 50 {
@@ -653,7 +674,7 @@ func (s *Store) SearchSummaries(ctx context.Context, queryVec []float32, queryTe
 	}
 	out := hits[:0]
 	for _, h := range hits {
-		if h.Kind == "file_summary" || h.Kind == "package_summary" {
+		if h.Kind == "file_summary" || h.Kind == "package_summary" || h.Kind == "repo_summary" {
 			out = append(out, h)
 			if len(out) == k {
 				break
