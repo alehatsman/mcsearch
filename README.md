@@ -1,8 +1,11 @@
 # mcsearch
 
-Local semantic code-search MCP server for Claude (and a CLI). Tree-sitter
-chunks → self-hosted embeddings → SQLite vector store + Go static graph.
-Source never leaves your machine.
+Local semantic code-search and summarization MCP server for Claude (and
+a CLI). Tree-sitter chunks → self-hosted embeddings (+ optional
+chat-model file/chunk summaries) → SQLite (vectors + BM25 FTS) with
+hybrid RRF retrieval and an optional cross-encoder rerank, plus a Go
+static graph from `go/packages` + `go/types`. Source never leaves your
+machine.
 
 ```console
 $ mcsearch query ./ "where is filesystem event debouncing handled"
