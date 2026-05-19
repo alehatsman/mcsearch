@@ -61,7 +61,6 @@ batch throughput.
 
 | Variable                     | Default      | Notes                                                                                                                                                                     |
 | ---------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MCSEARCH_DISABLE_VEC_CACHE` | unset        | Set `1` to skip the in-RAM vector cache and use the per-row SQL hot path. Slower; bounded RAM for very large indexes.                                                     |
 | `MCSEARCH_DISABLE_BM25`      | unset        | Set `1` to skip the BM25 leg of hybrid search and rank by cosine similarity alone.                                                                                        |
 | `MCSEARCH_MAX_HITS_PER_FILE` | unset (no cap) | Positive integer caps how many search hits come from a single file. Promotes result diversity.                                                                          |
 | `MCSEARCH_ALLOW_PATHS`       | unset        | Colon-separated path prefixes (`:` on POSIX, `;` on Windows) that `index`/`watch` accept even when the target isn't inside a git work tree. Entries support `~` / `$HOME`. |

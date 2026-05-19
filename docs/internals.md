@@ -2,17 +2,22 @@
 
 Technical details that don't belong on the README's front page. The
 [README](../README.md) covers the user-facing surface; this file covers
-storage, retrieval math, the vector cache, the multi-worktree workflow,
+storage, retrieval math, the vector index, the multi-worktree workflow,
 and the embedding contract.
 
 ## Storage
 
-One SQLite per project at `$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`:
+One SQLite per project at `$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`.
+The driver is `mattn/go-sqlite3` built with the `sqlite_fts5` tag, and
+the [sqlite-vec](https://github.com/asg017/sqlite-vec) extension is
+linked in statically via `asg017/sqlite-vec-go-bindings/cgo` — no
+separate `.so` to ship.
 
 ```
 meta(key, value)                                                              -- dim, last_indexed_at, project_root
 chunks(id, path, kind, name, start_line, end_line, content_sha1, content,
        vec BLOB, last_seen_at)                                                -- UNIQUE(path, content_sha1)
+chunk_vecs(rowid, embedding FLOAT[dim] distance_metric=cosine)                -- sqlite-vec vec0 KNN index
 graph_nodes(id, kind, name, qualified_name, package_path, file_path,
             start_line, end_line, chunk_id, metadata_json, content_hash,
             last_seen_at)                                                     -- Go static graph
@@ -20,12 +25,21 @@ graph_edges(id, kind, src_id, dst_id, file_path, start_line, end_line,
             metadata_json, content_hash, last_seen_at)
 ```
 
-Vectors are packed `float32` BLOBs. A virtual `chunks_fts` table mirrors
-`content` for FTS5/BM25 lookups, kept in sync via AFTER triggers so
-upsert cost is unchanged. `graph_*` tables are written by the graph
-phase of `mcsearch index` (skipped only with `--graph=off`); chunk-side
-code never reads them. `last_seen_at` is Unix nanoseconds so two index
-runs in the same millisecond still prune correctly.
+`chunks.vec` is the canonical packed `float32` BLOB. `chunk_vecs` is
+the sqlite-vec `vec0` virtual table that serves KNN queries — created
+lazily once `dim` is known (either from `meta.dim` at open or from the
+first `UpsertMany`) and kept in sync with `chunks.vec` via AFTER
+INSERT / UPDATE / DELETE triggers, the same pattern `chunks_fts` uses
+for FTS5. A virtual `chunks_fts` table mirrors `content` for FTS5/BM25.
+`graph_*` tables are written by the graph phase of `mcsearch index`
+(skipped only with `--graph=off`); chunk-side code never reads them.
+`last_seen_at` is Unix nanoseconds so two index runs in the same
+millisecond still prune correctly.
+
+**Auto-migration**: opening an index built before sqlite-vec backfills
+`chunk_vecs` with one `INSERT INTO chunk_vecs(rowid, embedding) SELECT
+id, vec FROM chunks`. One-shot; subsequent opens see a populated table
+and skip the backfill.
 
 ## Incremental re-index
 
@@ -56,7 +70,7 @@ Fusion (Cormack et al., 2009):
   lists the chunk appeared in.
 
 Semantic alone catches paraphrase ("debounce filesystem events") but
-misses rare literal tokens (`MCSEARCH_DISABLE_VEC_CACHE`,
+misses rare literal tokens (`MCSEARCH_DISABLE_BM25`,
 `compileDoubleStar`). BM25 alone is the inverse failure. RRF is
 scale-free — no per-corpus tuning. Set `MCSEARCH_DISABLE_BM25=1` (or
 pass an empty query text) to get pre-hybrid semantic ranking.
@@ -72,35 +86,33 @@ to enable; design and migration notes live in
 `MCSEARCH_DISABLE_RERANK=1`. Reranker outages never break search —
 on unreachable, results fall back to the pre-rerank fused order silently.
 
-## Vector cache
+## Vector index
 
-On first `Search`, every chunk vector is decoded once into a flat
-`[]float32` slab + precomputed `|v|` norms. Subsequent queries score
-against the slab with zero hot-path allocations and one small `SELECT`
-to fetch content for the top-k IDs. Mutating operations
-(`UpsertMany`, `DeletePath`, `DeletePathPrefix`, `PruneUnseen`)
-invalidate the slab.
+`semantic_search` is a single SQL query against `chunk_vecs`:
 
-Brute-force cosine post-cache, measured on a Ryzen 9 9950X:
+```sql
+SELECT rowid, distance FROM chunk_vecs
+ WHERE embedding MATCH :query_blob AND k = :pool
+ ORDER BY distance
+```
 
-| Chunks | Dim  | Search (top-k=8) |
-|-------:|-----:|-----------------:|
-|   1 k  |   16 | 0.1 ms           |
-|   5 k  | 1024 | 2.7 ms           |
-|  20 k  | 1024 | 12 ms            |
-| 100 k* | 1024 | ~60 ms           |
-| 100 k* | 2560 | ~150 ms          |
-| 200 k* | 2560 | ~300 ms          |
+The query vector is serialized as little-endian float32 (the same
+format we already store on disk). sqlite-vec returns cosine distance
+ascending; the store flips it to similarity (`1 - distance`) so
+callers keep the "larger = better" convention shared with the BM25
+leg. The hybrid path issues this query at the fused pool size
+(`max(5·k, 30)`, capped by `MCSEARCH_RERANK_POOL` if a reranker is
+wired). BM25-only fused hits get their cosine score backfilled with
+one `vec_distance_cosine()` round-trip so `Hit.Score` stays populated
+for every result.
 
-(* extrapolated from measured rows — see `internal/store/bench_test.go`.)
+`RelatedChunks` runs the same query with the source chunk's BLOB and
+`k+1`, then drops the self-hit.
 
-At realistic project sizes (<50 k chunks) search is never the
-bottleneck — per-query embed round-trip dominates. The ceiling is
-**RAM**: slab is `chunks × dim × 4 B`, so 100 k chunks at 2560 dim is
-~1 GB. Memory-constrained: `MCSEARCH_DISABLE_VEC_CACHE=1` (slower
-per-row SQL path, bounded RAM). Past ~500 k chunks or sub-50 ms p99
-goals, swap in a real ANN index (HNSW via `coder/hnsw`, `sqlite-vec`,
-LanceDB) — the rest of the store stays unchanged.
+At v0.1.6, sqlite-vec's default storage is flat (brute-force inside
+SQL with SIMD-friendly layout); the API stays the same when HNSW
+storage lands. Search has not been the bottleneck at any realistic
+project size — per-query embed round-trip dominates.
 
 ## Multi-worktree workflow
 

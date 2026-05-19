@@ -90,6 +90,12 @@ make install        # ~/.local/bin, no sudo; atomic rename-swap so it's
 Or via the [`mcsearch` dotfiles component](https://github.com/alehatsman/dotfiles/tree/main/components/mcsearch) —
 which wires the embedding endpoint, SSH tunnel, and MCP registration.
 
+mcsearch needs CGO (tree-sitter grammars + the embedded sqlite-vec
+extension) and the `sqlite_fts5` build tag (FTS5 powers the BM25 leg).
+The Makefile, Taskfile, and Dockerfile already pass both — use them. If
+you invoke `go build` / `go install` directly, add `-tags sqlite_fts5`
+and ensure `CGO_ENABLED=1` plus a C toolchain are available.
+
 ## CLI
 
 ```bash
@@ -130,10 +136,11 @@ cache toggles) — see [docs/tuning.md](docs/tuning.md).
 Tree-sitter parses source into named structural chunks (functions,
 methods, types, classes). Each chunk hits a self-hosted
 `/v1/embeddings` endpoint (ollama, vLLM, or TEI; local or
-SSH-tunneled). At query time, cosine similarity and BM25 are fused via
-RRF; an optional cross-encoder rerank reorders the fused pool.
+SSH-tunneled). Embeddings land in a `sqlite-vec` (`vec0`) virtual
+table; at query time, vec0 cosine KNN and SQLite FTS5/BM25 are fused
+via RRF, with an optional cross-encoder rerank over the fused pool.
 Architecture diagram: [docs/architecture.md](docs/architecture.md).
-Storage schema, RRF math, vector cache, multi-worktree workflow,
+Storage schema, RRF math, vec0 KNN, multi-worktree workflow,
 embedding contract, code-gen details: [docs/internals.md](docs/internals.md).
 
 ## Go static graph

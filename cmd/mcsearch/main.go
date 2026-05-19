@@ -272,10 +272,9 @@ func indexDir() (string, error) {
 // path that opens a Store sees the same configuration.
 func storeOpts() store.Options {
 	opts := store.Options{
-		DisableVecCache: os.Getenv("MCSEARCH_DISABLE_VEC_CACHE") == "1",
-		DisableBM25:     os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
-		RerankPool:      rerankPool(),
-		MaxHitsPerFile:  maxHitsPerFile(),
+		DisableBM25:    os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
+		RerankPool:     rerankPool(),
+		MaxHitsPerFile: maxHitsPerFile(),
 	}
 	// Assign through a typed-nil check: a (*rerank.Client)(nil) stored
 	// in the Reranker interface field would still compare != nil, and

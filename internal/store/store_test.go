@@ -198,14 +198,13 @@ func TestSearchCacheInvalidation(t *testing.T) {
 	}
 }
 
-// TestEnsureCacheLargeIndex is a regression for the slice-bounds panic
-// ensureCache used to hit on any index with >1024 chunks. The old
-// implementation preallocated `vecs` with cap=1024*dim and grew it via
-// `vecs[:base+dim]`, which panics once base exceeds the cap. The
-// fixed path pre-sizes via SELECT COUNT(*) and uses append.
-func TestEnsureCacheLargeIndex(t *testing.T) {
+// TestSearchLargeIndex confirms search keeps working past the size at
+// which the legacy in-RAM slab cache used to fail. The slab is gone —
+// vec0 handles arbitrary row counts — but the assertion is still cheap
+// to keep as a smoke test against future regressions.
+func TestSearchLargeIndex(t *testing.T) {
 	st, ctx := newStore(t)
-	const n = 1100 // > 1024 (the broken cap)
+	const n = 1100
 	pending := make([]PendingChunk, n)
 	for i := range n {
 		pending[i] = PendingChunk{
@@ -218,8 +217,6 @@ func TestEnsureCacheLargeIndex(t *testing.T) {
 	if err := st.UpsertMany(ctx, pending, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	// Search forces ensureCache. Pre-fix this would panic with
-	// `slice bounds out of range [:N*dim] with capacity 1024*dim`.
 	hits, err := st.Search(ctx, []float32{1, 0, 0, 0}, "", 5)
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -229,12 +226,12 @@ func TestEnsureCacheLargeIndex(t *testing.T) {
 	}
 }
 
-// TestCrossProcessCacheInvalidation simulates what happens when a long-lived
-// Store (e.g. the MCP server) has its cache built, then a separate process
-// runs `mcsearch index` and adds new chunks. The Store must detect the
-// changed last_indexed_at and rebuild its cache before the next Search so
-// the new chunks appear in results.
-func TestCrossProcessCacheInvalidation(t *testing.T) {
+// TestCrossProcessVisibility simulates what happens when a long-lived
+// Store (e.g. the MCP server) is running and a separate process runs
+// `mcsearch index` and adds new chunks. With the slab cache gone the
+// reader hits chunk_vecs directly each Search, so SQLite WAL alone has
+// to make the new rows visible — no client-side invalidation required.
+func TestCrossProcessVisibility(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	ctx := context.Background()
 	now := time.Now()
@@ -293,14 +290,13 @@ func pathOrNone(hits []Hit) string {
 	return hits[0].Path
 }
 
-// TestSearchDisabledCache exercises the fallback hot path used when
-// the caller (or the user via MCSEARCH_DISABLE_VEC_CACHE=1) explicitly
-// asks Store not to hold decoded vectors in RAM. Top-k results must
-// match the cached path's ordering exactly.
-func TestSearchDisabledCache(t *testing.T) {
+// TestSearchAfterDeletePath verifies the vec0 trigger drops a chunk's
+// embedding when its row leaves the chunks table, so deleted paths
+// disappear from search results without a manual cache flush.
+func TestSearchAfterDeletePath(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	ctx := context.Background()
-	st, err := OpenWith(ctx, dbPath, Options{DisableVecCache: true})
+	st, err := Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -326,8 +322,6 @@ func TestSearchDisabledCache(t *testing.T) {
 	if hits[1].Path != "c.go" {
 		t.Errorf("second hit = %q, want c.go", hits[1].Path)
 	}
-	// Mutate; cached path also re-invalidates here but we don't care —
-	// just verify the no-cache path stays consistent after an update.
 	if err := st.DeletePath(ctx, "a.go"); err != nil {
 		t.Fatal(err)
 	}

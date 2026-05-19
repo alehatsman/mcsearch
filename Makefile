@@ -3,6 +3,10 @@
 
 BINARY := mcsearch
 
+# Build tags required by mattn/go-sqlite3 to enable FTS5 (used by chunks_fts)
+# and the sqlite-vec extension via asg017/sqlite-vec-go-bindings.
+GO_TAGS := sqlite_fts5
+
 # Default to the per-user XDG bin dir. Two reasons:
 #  1. It's on most users' PATH ahead of /usr/local/bin, so plain
 #     `make install` is actually visible to the next `mcsearch` call.
@@ -14,7 +18,7 @@ INSTALL_TMP  := $(INSTALL_PATH)/$(BINARY).new
 build:
 	@echo "Building $(BINARY)..."
 	@go mod download
-	@go build -trimpath -ldflags "-s -w" -o $(BINARY) ./cmd/mcsearch
+	@go build -trimpath -tags '$(GO_TAGS)' -ldflags "-s -w" -o $(BINARY) ./cmd/mcsearch
 	@echo "✓ Built ./$(BINARY)"
 
 # Install via cp-then-rename. A direct cp over a running binary fails
@@ -31,7 +35,7 @@ install: build
 	@echo "✓ Installed $(INSTALL_PATH)/$(BINARY)"
 
 test:
-	@go test ./...
+	@go test -tags '$(GO_TAGS)' ./...
 
 vet:
 	@go vet ./...

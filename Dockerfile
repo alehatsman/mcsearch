@@ -14,7 +14,7 @@ RUN go mod download
 
 COPY . .
 RUN CGO_ENABLED=1 GOOS=linux \
-    go build -trimpath \
+    go build -trimpath -tags 'sqlite_fts5' \
         -ldflags '-s -w -extldflags "-static"' \
         -o /out/mcsearch ./cmd/mcsearch
 

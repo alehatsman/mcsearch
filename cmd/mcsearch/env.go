@@ -73,7 +73,6 @@ var allEnvVars = []envVar{
 	{"MCSEARCH_SUMMARY_CONCURRENCY", "4", "Parallel chunk-summary chat calls per file during indexing.", "tuning", false},
 	{"MCSEARCH_CHUNK_SUMMARY_MIN_LINES", "30", "Minimum chunk size (lines) eligible for a per-chunk summary. Raise to cut summary volume.", "tuning", false},
 	{"MCSEARCH_DISABLE_RERANK", "", "Set 1 to short-circuit rerank even when URL is set.", "tuning", false},
-	{"MCSEARCH_DISABLE_VEC_CACHE", "", "Set 1 to skip the in-RAM vector cache.", "tuning", false},
 	{"MCSEARCH_DISABLE_BM25", "", "Set 1 to disable the BM25 leg.", "tuning", false},
 	{"MCSEARCH_MAX_HITS_PER_FILE", "", "Cap hits per file in search results (0 = no cap).", "tuning", false},
 	{"MCSEARCH_ALLOW_PATHS", "", "Colon-separated path prefixes accepted outside git work trees.", "tuning", false},

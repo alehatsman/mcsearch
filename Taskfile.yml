@@ -12,6 +12,9 @@ version: '3'
 vars:
   PKG: ./...
   BIN: mcsearch
+  # mattn/go-sqlite3 ships FTS5 only with this tag enabled; the project's
+  # chunks_fts virtual table and hybrid BM25 leg require it.
+  GO_TAGS: sqlite_fts5
 
 tasks:
 
@@ -70,7 +73,7 @@ tasks:
     desc: Build the mcsearch binary
     cmds:
       - go mod download
-      - go build -trimpath -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
 
   install:
     desc: Build, install mcsearch to ~/.local/bin, and restart any running instances
@@ -101,12 +104,12 @@ tasks:
   test:
     desc: Run go test ./...
     cmds:
-      - go test {{.PKG}}
+      - go test -tags '{{.GO_TAGS}}' {{.PKG}}
 
   test-race:
     desc: Run go test -race ./...
     cmds:
-      - go test -race {{.PKG}}
+      - go test -race -tags '{{.GO_TAGS}}' {{.PKG}}
 
   fmt:
     desc: Format all Go files with gofmt
@@ -251,13 +254,13 @@ tasks:
     internal: true
     cmds:
       - 'echo "[1/7] build"'
-      - go build -trimpath -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
 
   ci:test:
     internal: true
     cmds:
       - 'echo "[2/7] test"'
-      - go test {{.PKG}}
+      - go test -tags '{{.GO_TAGS}}' {{.PKG}}
 
   ci:lint:
     internal: true

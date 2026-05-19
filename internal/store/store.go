@@ -1,9 +1,10 @@
 // Package store persists per-project chunks + embedding vectors.
 //
-// One SQLite file per project. Vectors are stored as packed little-endian
-// float32 BLOBs. Search is brute-force cosine similarity in Go — fast
-// enough for <100 k chunks per project. Swap the search path for an HNSW
-// index later without changing the rest of the codebase.
+// One SQLite file per project. Vectors live in a sqlite-vec `vec0`
+// virtual table (`chunk_vecs`) and KNN runs natively in SQL — cosine
+// distance with a serialized float32 BLOB query. The chunks table
+// still holds the raw vec BLOB so chunk_vecs can be rebuilt and so
+// vec_distance_cosine() can score BM25-only hits cheaply.
 //
 // Timestamps (last_seen_at, last_indexed_at) are stored as Unix
 // nanoseconds rather than milliseconds, so two index runs that complete
@@ -22,13 +23,19 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/rerank"
-	_ "modernc.org/sqlite" // register sqlite driver
+	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
+	_ "github.com/mattn/go-sqlite3" // register sqlite3 driver
 )
+
+func init() {
+	// Register the sqlite-vec extension so every new connection opened
+	// by mattn/go-sqlite3 has vec0 / vec_distance_cosine available.
+	sqlite_vec.Auto()
+}
 
 const (
 	metaDim           = "dim"
@@ -38,14 +45,8 @@ const (
 
 // Options influence the runtime behaviour of an opened Store.
 // All fields are optional; the zero value matches the default
-// (vector cache enabled, hybrid BM25+semantic search enabled).
+// (hybrid BM25+semantic search enabled).
 type Options struct {
-	// DisableVecCache turns off the in-RAM decoded-vector slab.
-	// Search falls back to per-row SQL scans (slower; bounded RAM).
-	// Useful for very large indexes where dim×chunks×4 bytes of
-	// cache exceeds available memory.
-	DisableVecCache bool
-
 	// DisableBM25 turns off the lexical (FTS5/BM25) leg of hybrid
 	// search. Useful for ablation / debugging the semantic ranking,
 	// or for indexes built before the chunks_fts migration on a
@@ -73,25 +74,6 @@ type Store struct {
 	db   *sql.DB
 	dim  atomic.Int64 // vector dimension; set once on first upsert, read concurrently
 	opts Options      // immutable after Open
-
-	// Search-side vector cache. Lazily populated on first Search and
-	// invalidated by any mutating call (UpsertMany, DeletePath,
-	// DeletePathPrefix, PruneUnseen). Holding decoded vectors in RAM
-	// trades up to ~dim*4 bytes per chunk for a 5–10× speedup and a
-	// ~30× allocation reduction on Search — the typical MCP server
-	// runs many queries against the same Store, so the load cost
-	// amortizes immediately.
-	//
-	// Memory: for a 100k-chunk index at 1024 dim, this is ~400 MB.
-	// Acceptable for our target "one project per server" deployment;
-	// callers worried about footprint can set Options.DisableVecCache
-	// to fall back to the per-row SQL hot path.
-	cacheMu        sync.RWMutex
-	cacheLoaded    bool
-	cacheIndexedAt int64 // last_indexed_at (nanoseconds) when the cache was built
-	cacheIDs       []int64
-	cacheVecs      []float32 // flat [len(cacheIDs) * dim]
-	cacheNorms     []float32 // precomputed |v| per row, zero-norm rows skipped at load time
 }
 
 // Open opens or creates the SQLite file at path with default
@@ -101,19 +83,19 @@ func Open(ctx context.Context, path string) (*Store, error) {
 }
 
 // OpenWith is like Open but lets the caller adjust runtime behaviour
-// (e.g. disable the in-RAM vector cache).
+// (e.g. disable the BM25 leg of hybrid search).
 //
-// `busy_timeout(5000)` lets concurrent writers (e.g. `mcsearch index`
+// `_busy_timeout=5000` lets concurrent writers (e.g. `mcsearch index`
 // fired while `mcsearch watch` is also re-indexing) wait up to 5 s for
 // the writer lock instead of immediately returning SQLITE_BUSY. Without
 // it, racing index runs both crash with a leaked DDL error.
 func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
-	db, err := sql.Open("sqlite",
+	db, err := sql.Open("sqlite3",
 		"file:"+path+
-			"?_pragma=journal_mode(WAL)"+
-			"&_pragma=synchronous(NORMAL)"+
-			"&_pragma=busy_timeout(5000)"+
-			"&_pragma=foreign_keys(1)")
+			"?_journal_mode=WAL"+
+			"&_synchronous=NORMAL"+
+			"&_busy_timeout=5000"+
+			"&_foreign_keys=1")
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
@@ -134,6 +116,13 @@ func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 	default:
 		dim, _ := strconv.ParseInt(v, 10, 64)
 		s.dim.Store(dim)
+	}
+	// Materialize the vec0 table now if we know the dim — covers both
+	// brand-new opens (no chunks yet, dim known from a prior run) and
+	// pre-vec0 indexes that need a one-shot backfill from chunks.vec.
+	if err := s.ensureVecTable(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("ensure vec table: %w", err)
 	}
 	return s, nil
 }
@@ -263,6 +252,66 @@ func (s *Store) migrate(ctx context.Context) error {
 			`INSERT INTO meta(key, value) VALUES('name_col_added', '1')
 			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
 			return fmt.Errorf("migrate: name_col flag: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureVecTable materializes the sqlite-vec vec0 virtual table and the
+// triggers that keep it in sync with `chunks`. The dim is fixed at CREATE
+// time, so this is a no-op until s.dim is known (either recovered from
+// meta.dim on Open or set on the first UpsertMany).
+//
+// On first creation against a pre-vec0 index (chunks already populated),
+// it backfills chunk_vecs from chunks.vec in one INSERT...SELECT. Cheap
+// because vec0 takes the BLOB format we already store on disk (packed
+// little-endian float32).
+func (s *Store) ensureVecTable(ctx context.Context) error {
+	dim := s.dim.Load()
+	if dim <= 0 {
+		return nil
+	}
+	stmts := []string{
+		// vec0 keeps the embedding in its own storage; cosine distance
+		// lets the rest of the search code keep treating "larger score =
+		// better" (we return 1 - distance for callers).
+		fmt.Sprintf(`CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vecs USING vec0(
+		   embedding FLOAT[%d] distance_metric=cosine
+		 )`, dim),
+		// Mirror chunks.vec into chunk_vecs.embedding. We piggyback on
+		// chunks.id (== rowid) as the join key, matching the FTS5 pattern
+		// already in use for chunks_fts.
+		`CREATE TRIGGER IF NOT EXISTS chunks_vec_ai AFTER INSERT ON chunks BEGIN
+		   INSERT INTO chunk_vecs(rowid, embedding) VALUES (new.id, new.vec);
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS chunks_vec_ad AFTER DELETE ON chunks BEGIN
+		   DELETE FROM chunk_vecs WHERE rowid = old.id;
+		 END`,
+		`CREATE TRIGGER IF NOT EXISTS chunks_vec_au AFTER UPDATE OF vec ON chunks BEGIN
+		   DELETE FROM chunk_vecs WHERE rowid = new.id;
+		   INSERT INTO chunk_vecs(rowid, embedding) VALUES (new.id, new.vec);
+		 END`,
+	}
+	for _, q := range stmts {
+		if _, err := s.db.ExecContext(ctx, q); err != nil {
+			return fmt.Errorf("ensure vec table: %w (%s)", err, q)
+		}
+	}
+	// One-shot backfill for indexes that pre-date sqlite-vec. Triggers
+	// only fire on future writes, so any chunks already on disk need to
+	// be pushed into chunk_vecs explicitly. Cheap and idempotent: if
+	// chunk_vecs is already populated, the SELECT yields zero new rows.
+	var vecRows, chunkRows int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunk_vecs`).Scan(&vecRows); err != nil {
+		return fmt.Errorf("ensure vec table: count chunk_vecs: %w", err)
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&chunkRows); err != nil {
+		return fmt.Errorf("ensure vec table: count chunks: %w", err)
+	}
+	if vecRows == 0 && chunkRows > 0 {
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO chunk_vecs(rowid, embedding) SELECT id, vec FROM chunks`); err != nil {
+			return fmt.Errorf("ensure vec table: backfill: %w", err)
 		}
 	}
 	return nil
@@ -418,6 +467,12 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 			strconv.FormatInt(s.dim.Load(), 10)); err != nil {
 			return err
 		}
+		// First write to a fresh index — now we know the dim, so create
+		// the vec0 table + triggers. After this, every INSERT/UPDATE on
+		// chunks mirrors into chunk_vecs via the triggers.
+		if err := s.ensureVecTable(ctx); err != nil {
+			return err
+		}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -454,7 +509,6 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.invalidateCache()
 	return nil
 }
 
@@ -506,11 +560,7 @@ func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error
 	if err != nil {
 		return 0, err
 	}
-	n, err := res.RowsAffected()
-	if err == nil && n > 0 {
-		s.invalidateCache()
-	}
-	return n, err
+	return res.RowsAffected()
 }
 
 // DeletePath drops all chunks for a single relative path.
@@ -518,7 +568,6 @@ func (s *Store) DeletePath(ctx context.Context, path string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE path=?`, path); err != nil {
 		return err
 	}
-	s.invalidateCache()
 	return nil
 }
 
@@ -534,7 +583,6 @@ func (s *Store) DeletePathPrefix(ctx context.Context, prefix string) error {
 		escapeLike(prefix)+`%`); err != nil {
 		return err
 	}
-	s.invalidateCache()
 	return nil
 }
 
@@ -745,20 +793,17 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 	if k <= 0 {
 		k = 8
 	}
-	semScores, err := s.scoreSemantic(ctx, queryVec)
-	if err != nil {
-		return nil, err
-	}
 	useBM25 := !s.opts.DisableBM25 && strings.TrimSpace(queryText) != ""
 
 	if !useBM25 {
-		// Semantic-only path. Sort + cap before fetching content.
+		// Semantic-only path. vec0 already returns rows sorted by
+		// similarity desc, so no client-side sort needed.
+		semScores, err := s.scoreSemantic(ctx, queryVec, k)
+		if err != nil {
+			return nil, err
+		}
 		if len(semScores) == 0 {
 			return nil, nil
-		}
-		sort.Slice(semScores, func(i, j int) bool { return semScores[i].score > semScores[j].score })
-		if len(semScores) > k {
-			semScores = semScores[:k]
 		}
 		return s.fetchHits(ctx, semScores, scoreContext{})
 	}
@@ -775,11 +820,10 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 		pool = s.opts.RerankPool
 	}
 
-	// Semantic top-pool.
-	semSorted := semScores
-	sort.Slice(semSorted, func(i, j int) bool { return semSorted[i].score > semSorted[j].score })
-	if len(semSorted) > pool {
-		semSorted = semSorted[:pool]
+	// Semantic top-pool — sqlite-vec KNN, already sorted desc by similarity.
+	semSorted, err := s.scoreSemantic(ctx, queryVec, pool)
+	if err != nil {
+		return nil, err
 	}
 	semCosine := make(map[int64]float32, len(semSorted))
 	semRank := make(map[int64]int, len(semSorted))
@@ -800,6 +844,22 @@ func (s *Store) searchRaw(ctx context.Context, queryVec []float32, queryText str
 	for i, sc := range bm25Scores {
 		bm25Rank[sc.id] = i + 1
 		bm25Score[sc.id] = sc.score
+	}
+
+	// Fill cosine for BM25-only fused IDs so Hit.Score stays populated
+	// for every result, not just semantic-leg ones. The set is bounded
+	// by `pool` and usually small in practice (high lexical/semantic
+	// overlap), so the extra round-trip is cheap.
+	var missing []int64
+	for id := range bm25Rank {
+		if _, ok := semCosine[id]; !ok {
+			missing = append(missing, id)
+		}
+	}
+	if filled, err := s.scoreSemanticForIDs(ctx, queryVec, missing); err == nil {
+		for id, sim := range filled {
+			semCosine[id] = sim
+		}
 	}
 
 	// Fuse via RRF.
@@ -906,81 +966,88 @@ func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k 
 	return reranked, rerankScore, nil
 }
 
-// scoreSemantic computes cosine similarity for every chunk against
-// queryVec. Returns one scored row per chunk (unsorted). Uses the
-// in-RAM cache when enabled, else streams from SQL.
-func (s *Store) scoreSemantic(ctx context.Context, queryVec []float32) ([]scored, error) {
+// scoreSemantic returns up to `limit` chunks ranked by cosine similarity
+// to queryVec, best first. Runs as a single KNN query against the
+// sqlite-vec `chunk_vecs` virtual table; vec0 returns rows sorted by
+// distance ascending, which is similarity descending — no client-side
+// sort needed.
+func (s *Store) scoreSemantic(ctx context.Context, queryVec []float32, limit int) ([]scored, error) {
 	if d := s.dim.Load(); d != 0 && int64(len(queryVec)) != d {
 		return nil, fmt.Errorf("query dim %d != index dim %d", len(queryVec), d)
 	}
-	qNorm := norm(queryVec)
-	if qNorm == 0 {
+	// Reject all-zero queries up front. vec0's cosine path would otherwise
+	// produce NaN distances on a zero vector and surface nonsense rankings.
+	// Done before the empty-index early-return so callers get a clear error
+	// even when there's nothing to search yet.
+	allZero := true
+	for _, x := range queryVec {
+		if x != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
 		return nil, fmt.Errorf("query vector is zero")
 	}
-
-	if s.opts.DisableVecCache {
-		rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
-		if err != nil {
-			return nil, err
-		}
-		defer rows.Close()
-		out := make([]scored, 0, 1024)
-		var vbuf []float32
-		for rows.Next() {
-			var id int64
-			var blob []byte
-			if err := rows.Scan(&id, &blob); err != nil {
-				return nil, err
-			}
-			if len(blob)%4 != 0 {
-				return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
-			}
-			need := len(blob) / 4
-			if cap(vbuf) < need {
-				vbuf = make([]float32, need)
-			} else {
-				vbuf = vbuf[:need]
-			}
-			for i := range vbuf {
-				vbuf[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-			}
-			dot := float32(0)
-			var vNormSq float32
-			for i, qv := range queryVec {
-				vi := vbuf[i]
-				dot += qv * vi
-				vNormSq += vi * vi
-			}
-			if vNormSq == 0 {
-				continue
-			}
-			out = append(out, scored{id, dot / (qNorm * float32(math.Sqrt(float64(vNormSq))))})
-		}
-		return out, rows.Err()
-	}
-
-	if err := s.ensureCache(ctx); err != nil {
-		return nil, err
-	}
-	s.cacheMu.RLock()
-	ids := s.cacheIDs
-	vecs := s.cacheVecs
-	norms := s.cacheNorms
-	dim := int(s.dim.Load())
-	s.cacheMu.RUnlock()
-	if len(ids) == 0 || dim == 0 {
+	if limit <= 0 || s.dim.Load() == 0 {
 		return nil, nil
 	}
-	out := make([]scored, len(ids))
-	for i, id := range ids {
-		off := i * dim
-		dot := float32(0)
-		for j, qv := range queryVec {
-			dot += qv * vecs[off+j]
-		}
-		out[i] = scored{id, dot / (qNorm * norms[i])}
+	qBlob := encodeVec(queryVec)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT rowid, distance FROM chunk_vecs
+		 WHERE embedding MATCH ? AND k = ?
+		 ORDER BY distance`,
+		qBlob, limit)
+	if err != nil {
+		return nil, err
 	}
-	return out, nil
+	defer rows.Close()
+	out := make([]scored, 0, limit)
+	for rows.Next() {
+		var id int64
+		var dist float64
+		if err := rows.Scan(&id, &dist); err != nil {
+			return nil, err
+		}
+		// Cosine distance ∈ [0, 2]; convert to similarity ∈ [-1, 1] so
+		// callers can keep the "larger = better" convention shared with
+		// the BM25 leg (which flips bm25() sign for the same reason).
+		out = append(out, scored{id, float32(1 - dist)})
+	}
+	return out, rows.Err()
+}
+
+// scoreSemanticForIDs fills in cosine similarity for a specific set of
+// chunk IDs that the vec0 top-K query missed (BM25-only fused hits).
+// Uses sqlite-vec's scalar vec_distance_cosine() so we can keep Hit.Score
+// populated even for hits that surfaced purely through the lexical leg.
+// Returns a partial map; callers must tolerate missing entries.
+func (s *Store) scoreSemanticForIDs(ctx context.Context, queryVec []float32, ids []int64) (map[int64]float32, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, encodeVec(queryVec))
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, vec_distance_cosine(?, vec) FROM chunks WHERE id IN (`+inPlaceholders(len(ids))+`)`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[int64]float32, len(ids))
+	for rows.Next() {
+		var id int64
+		var dist float64
+		if err := rows.Scan(&id, &dist); err != nil {
+			return nil, err
+		}
+		out[id] = float32(1 - dist)
+	}
+	return out, rows.Err()
 }
 
 // scoreBM25 runs the FTS5 / BM25 leg of hybrid search. Returns the
@@ -1238,19 +1305,20 @@ func (s *Store) FindSymbolCandidates(ctx context.Context, query string, k int) (
 }
 
 // RelatedChunks returns the top-k chunks most similar to the chunk at
-// (path, startLine), excluding the source chunk itself. Uses the in-RAM
-// vector cache for speed. Returns an error if no chunk is found at the
-// given location.
+// (path, startLine), excluding the source chunk itself. Issues one vec0
+// KNN query with k+1 candidates so we can drop the source (which always
+// ranks first at distance 0). Returns an error if no chunk is found at
+// the given location.
 func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k int) ([]Hit, error) {
 	if k <= 0 {
 		k = 8
 	}
 	var blob []byte
 	var sourceID int64
-	row := s.db.QueryRowContext(ctx,
+	err := s.db.QueryRowContext(ctx,
 		`SELECT id, vec FROM chunks WHERE path = ? AND start_line = ?`,
-		path, startLine)
-	if err := row.Scan(&sourceID, &blob); err != nil {
+		path, startLine).Scan(&sourceID, &blob)
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("no chunk at %s:%d", path, startLine)
 		}
@@ -1259,158 +1327,34 @@ func (s *Store) RelatedChunks(ctx context.Context, path string, startLine int, k
 	if len(blob)%4 != 0 {
 		return nil, fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
 	}
-	dim := len(blob) / 4
-	queryVec := make([]float32, dim)
-	for i := range dim {
-		queryVec[i] = math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-	}
-	if err := s.ensureCache(ctx); err != nil {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT rowid, distance FROM chunk_vecs
+		 WHERE embedding MATCH ? AND k = ?
+		 ORDER BY distance`,
+		blob, k+1)
+	if err != nil {
 		return nil, err
 	}
-	s.cacheMu.RLock()
-	ids := s.cacheIDs
-	vecs := s.cacheVecs
-	norms := s.cacheNorms
-	cDim := int(s.dim.Load())
-	s.cacheMu.RUnlock()
-	qNorm := norm(queryVec)
-	if qNorm == 0 {
-		return nil, fmt.Errorf("source chunk has zero-norm vector")
-	}
-	scores := make([]scored, 0, len(ids))
-	for i, id := range ids {
+	defer rows.Close()
+	scores := make([]scored, 0, k)
+	for rows.Next() {
+		var id int64
+		var dist float64
+		if err := rows.Scan(&id, &dist); err != nil {
+			return nil, err
+		}
 		if id == sourceID {
 			continue
 		}
-		off := i * cDim
-		var dot float32
-		for j, qv := range queryVec {
-			dot += qv * vecs[off+j]
+		scores = append(scores, scored{id, float32(1 - dist)})
+		if len(scores) >= k {
+			break
 		}
-		scores = append(scores, scored{id, dot / (qNorm * norms[i])})
-	}
-	sort.Slice(scores, func(i, j int) bool { return scores[i].score > scores[j].score })
-	if len(scores) > k {
-		scores = scores[:k]
-	}
-	return s.fetchHits(ctx, scores, scoreContext{})
-}
-
-// ensureCache lazily loads (id, vec) for every chunk into a flat
-// in-RAM slab plus a parallel slice of precomputed norms. Subsequent
-// Search calls work entirely off this slab — no SQL on the hot path.
-//
-// Cross-process staleness: if another process (e.g. `mcsearch index`)
-// wrote new chunks since the cache was built, last_indexed_at in the meta
-// table will have advanced. We detect this with a cheap scalar query and
-// invalidate before rebuilding, so long-lived MCP server processes always
-// serve fresh results without a restart.
-func (s *Store) ensureCache(ctx context.Context) error {
-	var currentIndexedAt int64
-	row := s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaLastIndexedAt+`'`)
-	var raw string
-	if err := row.Scan(&raw); err == nil {
-		currentIndexedAt, _ = strconv.ParseInt(raw, 10, 64)
-	}
-
-	s.cacheMu.RLock()
-	loaded := s.cacheLoaded && s.cacheIndexedAt == currentIndexedAt
-	s.cacheMu.RUnlock()
-	if loaded {
-		return nil
-	}
-	s.cacheMu.Lock()
-	defer s.cacheMu.Unlock()
-	if s.cacheLoaded && s.cacheIndexedAt == currentIndexedAt {
-		return nil
-	}
-	// Invalidate stale cache before rebuild.
-	s.cacheLoaded = false
-	s.cacheIDs = nil
-	s.cacheVecs = nil
-	s.cacheNorms = nil
-	// Pre-size all three slices to the actual chunk count so the load
-	// path never reallocates. Cheap (one COUNT(*) round-trip) and
-	// avoids the slice-bounds panic the old `vecs[:base+dim]` re-slice
-	// hit on any index with >1024 chunks (the old hardcoded cap).
-	var rowCount int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks`).Scan(&rowCount); err != nil {
-		return err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id, vec FROM chunks`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	ids := make([]int64, 0, rowCount)
-	norms := make([]float32, 0, rowCount)
-	dim := int(s.dim.Load())
-	var vecs []float32
-	if dim > 0 {
-		vecs = make([]float32, 0, rowCount*dim)
-	}
-	for rows.Next() {
-		var id int64
-		var blob []byte
-		if err := rows.Scan(&id, &blob); err != nil {
-			return err
-		}
-		if len(blob)%4 != 0 {
-			return fmt.Errorf("vec blob length %d not divisible by 4", len(blob))
-		}
-		n := len(blob) / 4
-		if dim == 0 {
-			dim = n
-			vecs = make([]float32, 0, rowCount*dim)
-		} else if n != dim {
-			return fmt.Errorf("vec dim mismatch in cache: got %d, want %d", n, dim)
-		}
-		// Decode directly into vecs; skip zero-norm vectors (they can't score).
-		base := len(vecs)
-		var sq float32
-		for i := range dim {
-			f := math.Float32frombits(binary.LittleEndian.Uint32(blob[i*4:]))
-			vecs = append(vecs, f)
-			sq += f * f
-		}
-		if sq == 0 {
-			vecs = vecs[:base] // discard zero-norm row
-			continue
-		}
-		ids = append(ids, id)
-		norms = append(norms, float32(math.Sqrt(float64(sq))))
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
-	if dim != 0 && s.dim.Load() == 0 {
-		s.dim.Store(int64(dim))
-	}
-	s.cacheIDs = ids
-	s.cacheVecs = vecs
-	s.cacheNorms = norms
-	s.cacheIndexedAt = currentIndexedAt
-	s.cacheLoaded = true
-	return nil
-}
-
-// invalidateCache marks the in-RAM slab stale. Cheap: we just drop the
-// references and let the next Search rebuild. Called by every mutator.
-func (s *Store) invalidateCache() {
-	s.cacheMu.Lock()
-	s.cacheLoaded = false
-	s.cacheIDs = nil
-	s.cacheVecs = nil
-	s.cacheNorms = nil
-	s.cacheMu.Unlock()
-}
-
-func norm(v []float32) float32 {
-	var s float32
-	for _, x := range v {
-		s += x * x
-	}
-	return float32(math.Sqrt(float64(s)))
+	return s.fetchHits(ctx, scores, scoreContext{})
 }
 
 func encodeVec(v []float32) []byte {
