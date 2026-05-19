@@ -27,6 +27,55 @@ Drop [`docs/claude-md-snippet.md`](docs/claude-md-snippet.md) into your
 `CLAUDE.md` to route the agent here before its grep/Read reflex kicks
 in.
 
+### When to call it via MCP
+
+Reach for `mcsearch_context` whenever you'd otherwise start with a
+broad grep, a speculative Read, or a "find references" fan-out. One
+MCP call collapses the loop: intent routing + semantic top-k + symbol
+hits + (where available) call-site references, each carrying enough
+inline content that you usually don't need a follow-up Read.
+
+**Example 1 — free-text behaviour search.** Question:
+*"where is filesystem event debouncing handled?"* Intent auto-routes
+to `behavior_search`. The response pins the file from the question
+alone:
+
+```jsonc
+"suggested_reads": [
+  { "path": "internal/watch/watch.go", "start_line": 1, "end_line": 215,
+    "reason": "top semantic match",
+    "content": "Implements a Watcher that re-indexes a project on
+                fsnotify events using debounced timers..." }
+],
+"next_action": "Read internal/watch/watch.go to ground your answer.",
+"avoid":       "Do not read entire files; the suggested ranges cover
+                the relevant context."
+```
+
+No grep, no exploratory Read — Claude jumps straight to the named
+range with a file-level summary already in hand.
+
+**Example 2 — symbol with an explicit verb.** Question:
+*"callers of buildNextAction"*. Intent auto-routes to `callers` and
+the bundle ships call sites pre-resolved by a ripgrep pass, so Claude
+never has to run one itself:
+
+```jsonc
+"symbols":    [{ "path": "internal/mcp/context.go", "qualified_name": "buildNextAction",
+                 "start_line": 766, "end_line": 815 }],
+"references": [
+  { "path": "internal/mcp/context.go",      "line": 341,
+    "snippet": "out.NextAction = buildNextAction(intent, out.SuggestedReads, ...)" },
+  { "path": "internal/mcp/context_test.go", "line": 597,
+    "snippet": "got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem)" }
+],
+"avoid": "Do not grep for the identifier — the `references` field
+          already lists usages."
+```
+
+The declaration and all three usages come back in a single round-trip;
+the `avoid` line tells Claude not to second-guess it with grep.
+
 ## Install
 
 ```bash
