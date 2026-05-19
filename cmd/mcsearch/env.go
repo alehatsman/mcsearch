@@ -55,6 +55,11 @@ var allEnvVars = []envVar{
 	{"MCSEARCH_DRAFT_URL", "", "Speculative-draft /v1/chat/completions server.", "draft", true},
 	{"MCSEARCH_DRAFT_MODEL", "<MCSEARCH_CHAT_MODEL>", "Model for the draft leg.", "draft", false},
 
+	// summary — optional override for the chat leg used during indexing
+	// (file / chunk / package / repo summaries). Defaults to MCSEARCH_CHAT_*.
+	{"MCSEARCH_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to MCSEARCH_CHAT_URL).", "summary", true},
+	{"MCSEARCH_SUMMARY_MODEL", "<MCSEARCH_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
+
 	// tuning — hidden unless --all. Most installs leave these alone.
 	{"MCSEARCH_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
 	{"MCSEARCH_EMBED_TIMEOUT", "60s", "HTTP timeout per embed call.", "tuning", false},
@@ -64,6 +69,9 @@ var allEnvVars = []envVar{
 	{"MCSEARCH_RERANK_TIMEOUT", "5s", "HTTP timeout per rerank call.", "tuning", false},
 	{"MCSEARCH_RERANK_POOL", "40", "Candidates fed to the reranker. Clamped to [1, 100].", "tuning", false},
 	{"MCSEARCH_RERANK_CONCURRENCY", "4", "Parallel rerank goroutines (chat style only).", "tuning", false},
+	{"MCSEARCH_SUMMARY_TIMEOUT", "120s", "HTTP timeout per index-time summary call.", "tuning", false},
+	{"MCSEARCH_SUMMARY_CONCURRENCY", "4", "Parallel chunk-summary chat calls per file during indexing.", "tuning", false},
+	{"MCSEARCH_CHUNK_SUMMARY_MIN_LINES", "30", "Minimum chunk size (lines) eligible for a per-chunk summary. Raise to cut summary volume.", "tuning", false},
 	{"MCSEARCH_DISABLE_RERANK", "", "Set 1 to short-circuit rerank even when URL is set.", "tuning", false},
 	{"MCSEARCH_DISABLE_VEC_CACHE", "", "Set 1 to skip the in-RAM vector cache.", "tuning", false},
 	{"MCSEARCH_DISABLE_BM25", "", "Set 1 to disable the BM25 leg.", "tuning", false},

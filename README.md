@@ -138,21 +138,19 @@ mcsearch watch <path>            # keep the index fresh as files change (fsnotif
 mcsearch clone <src> <dst>       # seed dst's index from src's (e.g. for a new
                                  # git worktree); follow with `mcsearch index
                                  # <dst>` to reconcile any chunks that differ
-mcsearch graph index <path>      # build the Go static graph (packages, files,
-                                 # functions, methods, types, fields, imports)
-                                 # alongside the chunk index
 mcsearch graph export <path>     # dump nodes.jsonl + edges.jsonl
                                  #   --output=<dir>        default <path>/.mcsearch/graph
+                                 # (the graph itself is built by `mcsearch index`)
 mcsearch version                 # print the build version
 ```
 
 ## Go static graph
 
-`mcsearch graph index` adds a Go-specific structural layer on top of the
-existing chunk/vector index. Where semantic search answers *"where does
-auth happen"*, the graph answers *structural* questions: *"what methods
-belong to (*Store)"*, *"which packages import internal/store"*, *"what
-does this struct embed"*.
+`mcsearch index` adds a Go-specific structural layer on top of the
+chunk/vector index by default. Where semantic search answers *"where
+does auth happen"*, the graph answers *structural* questions: *"what
+methods belong to (*Store)"*, *"which packages import internal/store"*,
+*"what does this struct embed"*.
 
 It is built on `go/packages` + `go/types` (not regex / not tree-sitter),
 so type-resolved symbol names are accurate. Layer 1 (this release)
@@ -162,9 +160,8 @@ emits:
   interface / other), `field`, `import`.
 - **Edges:** `contains`, `imports`, `has_method`, `has_field`, `embeds`.
 
-`calls`, `references`, and interface `implements` edges land in
-follow-up releases, along with `mcsearch graph query|callers|callees`
-and matching MCP tools.
+`calls` and `references` edges land in follow-up releases, along with
+`mcsearch graph query|callers|callees` and matching MCP tools.
 
 Storage reuses the per-project SQLite — two new tables (`graph_nodes`,
 `graph_edges`) sit alongside `chunks` in `~/.cache/mcsearch/<id>/
@@ -174,9 +171,8 @@ single SQL join surfaces *graph neighborhood + source code* for any
 hit.
 
 ```console
-$ mcsearch graph index .
-✓ graph indexed /home/aleh/projects/mcsearch
-  packages: 12  nodes: 797  edges: 866  linked: 144  pruned: 0/0  elapsed: 1.86s
+$ mcsearch index --graph=only .
+  graph: 12 packages  797 nodes  866 edges  144 linked  pruned 0/0  in 1.86s
 
 $ mcsearch graph export --output=/tmp/g .
 ✓ graph exported to /tmp/g
@@ -187,15 +183,16 @@ $ jq -r 'select(.qualified_name == "(*Store).Search") | "\(.file_path):\(.start_
 internal/store/store.go:624
 ```
 
-`mcsearch graph index` is **explicit-only** — it does not run as part
-of `mcsearch index`. The two commands write to the same SQLite file
-but otherwise act independently; the existing chunk/vector index is
-unaffected by graph indexing, and vice versa.
+Graph extraction runs as a default phase of `mcsearch index`. Use
+`--graph=off` to skip it (handy when iterating on chunking) or
+`--graph=only` to refresh just the graph layer without re-embedding.
+A failure in the graph phase warns and continues; the chunk/vector
+index is independently usable.
 
 The graph is incremental on the same prune-by-cutoff discipline as
-chunks: rerunning `graph index` on an unchanged tree upserts every row
-with a fresh `last_seen_at` and prunes zero. Removing a file drops the
-rows that came from it on the next run.
+chunks: rerunning `index` on an unchanged tree upserts every row with
+a fresh `last_seen_at` and prunes zero. Removing a file drops the rows
+that came from it on the next run.
 
 ## Demo
 
@@ -323,7 +320,7 @@ chunks(id, path, kind, name, start_line, end_line, content_sha1, content,
        vec BLOB, last_seen_at)                                              -- UNIQUE(path, content_sha1)
 graph_nodes(id PK, kind, name, qualified_name, package_path, file_path,
             start_line, end_line, chunk_id, metadata_json, content_hash,
-            last_seen_at)                                                   -- written by `mcsearch graph index`
+            last_seen_at)                                                   -- written by the graph phase of `mcsearch index`
 graph_edges(id PK, kind, src_id, dst_id, file_path, start_line, end_line,
             metadata_json, content_hash, last_seen_at)
 ```
@@ -332,7 +329,8 @@ Vectors are stored as packed `float32` BLOBs. A second virtual table,
 `chunks_fts`, indexes the same `content` for FTS5/BM25 lookups —
 external-content style, kept in sync with `chunks` via AFTER triggers
 so it costs nothing extra at upsert time. The `graph_*` tables are
-empty until `mcsearch graph index` runs; the chunk side never reads
+empty until the graph phase of `mcsearch index` runs (skipped only
+with `--graph=off`); the chunk side never reads
 them.
 
 ### Incremental re-index

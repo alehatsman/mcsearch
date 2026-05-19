@@ -2,14 +2,13 @@
 //
 // Subcommands:
 //
-//	index <path>             Build or refresh the per-project index.
+//	index <path>             Build or refresh the per-project index (chunk + graph).
 //	query <path> <query...>  Search an existing index from the terminal.
 //	generate <path> <prompt> Generate code grounded in the project's index.
 //	status [<path>]          Show endpoint health and indexed projects.
 //	nuke <path>              Delete the on-disk index for a project.
 //	watch <path>             Keep the index fresh as files change.
 //	clone <src> <dst>        Seed dst's index from src's (worktrees).
-//	graph index <path>       Build or refresh the Go static graph index.
 //	graph export <path>      Dump nodes/edges as JSONL.
 //	mcp                      Run as an MCP server over stdio.
 //	version                  Print the build version.
@@ -34,6 +33,7 @@ import (
 
 	"github.com/alehatsman/mcsearch/internal/chat"
 	"github.com/alehatsman/mcsearch/internal/embed"
+	"github.com/alehatsman/mcsearch/internal/graph"
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/index"
 	"github.com/alehatsman/mcsearch/internal/mcp"
@@ -113,6 +113,9 @@ func main() {
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage:
   mcsearch index <path>             build or refresh the index for a project
+                                    (runs chunk+embed AND Go static graph phases;
+                                    use --graph=off to skip graph, --graph=only
+                                    to refresh just the graph layer)
   mcsearch query <path> <query>     return top-k chunks for a query
   mcsearch context <path> <question>  one-shot router: picks intent, fuses
                                     semantic + symbol (+ graph when it lands)
@@ -142,11 +145,9 @@ func usage() {
                                     new git worktree); follow with
                                     `+"`mcsearch index <dst>`"+` to reconcile
                                     any chunks that differ between the two.
-  mcsearch graph index <path>       extract Go packages/files/functions/methods/
-                                    types/imports into a structural graph stored
-                                    alongside the chunk index
   mcsearch graph export <path>      dump graph_nodes/graph_edges as JSONL
                                     (--output=<dir> defaults to <path>/.mcsearch/graph)
+                                    (the graph itself is built by `+"`mcsearch index`"+`)
 
 env:
   Run `+"`mcsearch env`"+` for the effective configuration. The 5 vars that
@@ -313,6 +314,35 @@ func newDraftClient() *chat.Client {
 		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
 }
 
+// newSummaryClient builds the chat client used for index-time
+// summaries (file / chunk / package / repo). Per-chunk and per-file
+// summaries are short (≤ 400 tokens) and dominated by call count, so
+// users typically point this at a smaller, faster model than the main
+// chat leg used by generate / ask_codebase. Falls back to the main
+// chat client when MCSEARCH_SUMMARY_URL is unset.
+func newSummaryClient() *chat.Client {
+	if os.Getenv("MCSEARCH_SUMMARY_URL") == "" {
+		return newChatClient()
+	}
+	return chatClientFromEnv("MCSEARCH_SUMMARY_URL", "MCSEARCH_SUMMARY_MODEL", "MCSEARCH_SUMMARY_TIMEOUT",
+		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
+}
+
+// envInt reads a positive integer env var with a default.
+// Non-positive or unparsable values fall back to def with a warning.
+func envInt(name string, def int) int {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "warning: %s=%q is not a non-negative integer; using %d\n", name, raw, def)
+		return def
+	}
+	return n
+}
+
 // rerankPool reads the candidate-pool cap from the environment.
 // Default 40, clamped to [1, 100]. Larger = better recall but slower
 // cross-encoder call. Only consulted when a Reranker is wired.
@@ -336,8 +366,15 @@ func cmdIndex(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_CHAT_URL is set)")
+	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
+	format := fs.String("format", "text", "output format: text|json (json only emitted by --graph=only for now, to mirror the old `graph index --format=json` shape)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	switch *graphMode {
+	case "on", "off", "only":
+	default:
+		return fmt.Errorf("invalid --graph=%s (want on|off|only)", *graphMode)
 	}
 	rest := fs.Args()
 	if len(rest) != 1 {
@@ -362,21 +399,51 @@ func cmdIndex(ctx context.Context, args []string) error {
 		return err
 	}
 	defer st.Close()
-	ig, err := ignore.New(p.Root)
-	if err != nil {
-		return err
-	}
-	opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
-	if *summarize || os.Getenv("MCSEARCH_CHAT_URL") != "" {
-		opts.Summarize = true
-		opts.Chat = newChatClient()
-	}
-	ix := index.New(p, st, newEmbedClient(), ig, opts)
-	if err := ix.Run(ctx); err != nil {
-		return err
+
+	// Phase 1: chunk + embed (skipped when --graph=only).
+	if *graphMode != "only" {
+		ig, err := ignore.New(p.Root)
+		if err != nil {
+			return err
+		}
+		opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
+		if *summarize || os.Getenv("MCSEARCH_CHAT_URL") != "" || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
+			opts.Summarize = true
+			opts.Chat = newSummaryClient()
+			opts.SummaryConcurrency = envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4)
+			opts.ChunkSummaryMinLines = envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0)
+		}
+		ix := index.New(p, st, newEmbedClient(), ig, opts)
+		if err := ix.Run(ctx); err != nil {
+			return err
+		}
 	}
 	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
 		return err
+	}
+
+	// Phase 2: graph extraction (skipped when --graph=off).
+	// In --graph=only mode the user explicitly asked for the graph, so a
+	// failure is hard. In default mode the chunk phase has already
+	// succeeded, so we warn-and-continue — losing the graph shouldn't
+	// invalidate a fresh embed pass.
+	var gstats *graph.Stats
+	if *graphMode != "off" {
+		s, gerr := runGraphPhase(ctx, p, st, *verbose)
+		if gerr != nil {
+			if *graphMode == "only" {
+				return gerr
+			}
+			fmt.Fprintf(os.Stderr, "⚠ graph phase failed: %v (chunk index is still usable)\n", gerr)
+		} else {
+			gstats = s
+		}
+	}
+
+	if *graphMode == "only" {
+		// Mirror the old `graph index` output shape so existing scripts
+		// piping --format=json keep parsing.
+		return reportGraphStats(p.Root, gstats, *format)
 	}
 	stats, err := st.Stats(ctx)
 	if err != nil {
@@ -384,6 +451,9 @@ func cmdIndex(ctx context.Context, args []string) error {
 	}
 	fmt.Printf("✓ indexed %s\n", p.Root)
 	fmt.Printf("  chunks: %d  files: %d  dim: %d\n", stats.Chunks, stats.Files, stats.Dim)
+	if gstats != nil {
+		_ = reportGraphStats(p.Root, gstats, "text")
+	}
 	return nil
 }
 
@@ -1139,12 +1209,19 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
 		return err
 	}
+	gstats, gerr := runGraphPhase(ctx, p, st, verbose)
+	if gerr != nil {
+		fmt.Fprintf(os.Stderr, "⚠ graph phase failed for %s: %v (chunk index is still usable)\n", p.Root, gerr)
+	}
 	stats, err := st.Stats(ctx)
 	if err != nil {
 		return err
 	}
 	fmt.Printf("✓ reindexed %s\n", p.Root)
 	fmt.Printf("  chunks: %d  files: %d  dim: %d\n", stats.Chunks, stats.Files, stats.Dim)
+	if gstats != nil {
+		_ = reportGraphStats(p.Root, gstats, "text")
+	}
 	return nil
 }
 
@@ -1228,7 +1305,19 @@ func cmdWatch(ctx context.Context, args []string) error {
 	}
 	logger := cliLogger()
 	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger})
-	w := watch.New(ix, ig, p.Root, watch.Options{Debounce: *debounce, Verbose: *verbose, Logger: logger})
+	// Refresh the Go static graph after each chunk-index flush. The
+	// graph layer lives in the same SQLite file, so the chunk run has
+	// already released the writer when this fires.
+	afterIndex := func(c context.Context) error {
+		_, err := runGraphPhase(c, p, st, *verbose)
+		return err
+	}
+	w := watch.New(ix, ig, p.Root, watch.Options{
+		Debounce:   *debounce,
+		Verbose:    *verbose,
+		Logger:     logger,
+		AfterIndex: afterIndex,
+	})
 	fmt.Fprintf(os.Stderr, "mcsearch watching %s (debounce=%s)\n", p.Root, *debounce)
 	return w.Run(ctx)
 }

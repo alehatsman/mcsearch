@@ -29,6 +29,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alehatsman/mcsearch/internal/chunk"
 	"github.com/alehatsman/mcsearch/internal/embed"
 	"github.com/alehatsman/mcsearch/internal/store"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -520,6 +521,10 @@ func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question s
 	}
 	out := make([]SemHit, 0, len(hits))
 	for _, h := range hits {
+		// Summary chunks store synthesized prose in Content. Use it
+		// directly — the line range points at the underlying source
+		// file (or a directory for package_summary) and would yield
+		// raw source or nothing if re-read from disk.
 		out = append(out, SemHit{
 			Path:      h.Path,
 			StartLine: h.StartLine,
@@ -527,6 +532,7 @@ func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question s
 			Score:     h.Score,
 			Kind:      h.Kind,
 			Reason:    h.Name,
+			Content:   h.Content,
 		})
 	}
 	return out
@@ -575,6 +581,13 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 		if score == 0 && h.RRFScore > 0 {
 			score = h.RRFScore
 		}
+		// Summary-kind rows hold synthesized prose in Content; surface it
+		// directly so the inliner doesn't re-read the underlying file
+		// and clobber the summary with raw source.
+		var content string
+		if chunk.IsSummaryKind(h.Kind) {
+			content = h.Content
+		}
 		out = append(out, SemHit{
 			Path:      h.Path,
 			StartLine: h.StartLine,
@@ -582,6 +595,7 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 			Kind:      h.Kind,
 			Score:     score,
 			Reason:    h.Name,
+			Content:   content,
 		})
 	}
 	return out, false
@@ -746,6 +760,7 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 			StartLine: r.hit.StartLine,
 			EndLine:   r.hit.EndLine,
 			Reason:    reason,
+			Content:   r.hit.Content,
 		})
 		if len(out) >= maxReads {
 			return out
@@ -830,7 +845,7 @@ func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndex
 		return "Do not trust the symbols list as exhaustive — `calls` edges are not yet extracted, so caller/callee coverage is best-effort. Verify with grep on the symbol name."
 	}
 	if !graphIndexed {
-		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch graph index <project>` for richer structural context."
+		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch index <project>` to refresh both layers (graph extraction is part of the default index run)."
 	}
 	// Exploration intents — the user is forming a mental model, so
 	// the failure mode to discourage is breadth (enumerating files,
@@ -930,6 +945,13 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemH
 		if budget <= 0 {
 			return
 		}
+		// Entries with pre-populated Content (summary kinds carrying
+		// synthesized prose) skip disk I/O but still charge the byte
+		// budget so the total response size stays bounded.
+		if reads[i].Content != "" {
+			budget -= len(reads[i].Content)
+			continue
+		}
 		content, truncated, charged := fetch(reads[i].Path, reads[i].StartLine, reads[i].EndLine)
 		if content == "" && !truncated {
 			continue
@@ -943,6 +965,10 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemH
 	for i := range sem {
 		if budget <= 0 {
 			return
+		}
+		if sem[i].Content != "" {
+			budget -= len(sem[i].Content)
+			continue
 		}
 		content, truncated, charged := fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)
 		if content == "" && !truncated {

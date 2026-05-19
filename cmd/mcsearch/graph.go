@@ -11,6 +11,7 @@ import (
 
 	"github.com/alehatsman/mcsearch/internal/graph"
 	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/mcsearch/internal/store"
 )
 
 // cmdGraph dispatches `mcsearch graph <subcommand>`. Sub-subcommands
@@ -19,29 +20,31 @@ import (
 // the root switch.
 func cmdGraph(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("graph needs a subcommand: index|export")
+		return fmt.Errorf("graph needs a subcommand: export (graph index is now `mcsearch index --graph=only`)")
 	}
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "index":
-		return cmdGraphIndex(ctx, rest)
+		return fmt.Errorf("`graph index` has been folded into `index` — use `mcsearch index --graph=only <path>` (or just `mcsearch index <path>`, which runs both phases)")
 	case "export":
 		return cmdGraphExport(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stderr, `usage:
-  mcsearch graph index  <path>        build or refresh the Go static graph
   mcsearch graph export <path>        dump nodes/edges as JSONL
 
 flags:
-  mcsearch graph index <path> [-v] [--format=json]
-  mcsearch graph export <path> [--output=<dir>] [--format=jsonl]`)
+  mcsearch graph export <path> [--output=<dir>] [--format=jsonl]
+
+note:
+  'graph index' is gone — use 'mcsearch index --graph=only <path>'.
+  Plain 'mcsearch index <path>' runs both chunk and graph phases.`)
 		return nil
 	default:
-		return fmt.Errorf("unknown graph subcommand: %s (have: index, export)", sub)
+		return fmt.Errorf("unknown graph subcommand: %s (have: export)", sub)
 	}
 }
 
-// graphIndexResult is the JSON payload emitted by `graph index --format=json`.
+// graphIndexResult is the JSON payload emitted by `index --graph=only --format=json`.
 type graphIndexResult struct {
 	Project    string   `json:"project"`
 	Packages   int      `json:"packages"`
@@ -54,55 +57,24 @@ type graphIndexResult struct {
 	Warnings   []string `json:"warnings,omitempty"`
 }
 
-func cmdGraphIndex(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("graph index", flag.ContinueOnError)
-	verbose := fs.Bool("v", false, "verbose")
-	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	format := fs.String("format", "text", "output format: text | json")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("graph index needs exactly one path argument")
-	}
-
-	base, err := indexDir()
-	if err != nil {
-		return err
-	}
-	p, err := proj.Resolve(rest[0], base)
-	if err != nil {
-		return err
-	}
-	if err := proj.CheckIndexable(p, *force); err != nil {
-		return err
-	}
-	if err := p.EnsureCacheDir(); err != nil {
-		return err
-	}
-	st, err := openStore(ctx, p.DBPath)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-
+// runGraphPhase extracts the Go static graph for p and upserts into st.
+// Shared by `index` (Phase 2) and `index --graph=only`.
+func runGraphPhase(ctx context.Context, p *proj.Project, st *store.Store, verbose bool) (*graph.Stats, error) {
 	gx := graph.New(p, graph.NewStoreAdapter(st), graph.Options{
-		Verbose: *verbose,
+		Verbose: verbose,
 		Logger:  cliLogger(),
 	})
-	stats, err := gx.Run(ctx)
-	if err != nil {
-		return err
-	}
-	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
-		return err
-	}
+	return gx.Run(ctx)
+}
 
-	switch *format {
+// reportGraphStats prints either a text summary or a JSON blob matching
+// the old `graph index --format=json` schema, so existing scripts can
+// migrate to `index --graph=only --format=json` without a payload change.
+func reportGraphStats(project string, stats *graph.Stats, format string) error {
+	switch format {
 	case "json":
 		out := graphIndexResult{
-			Project:    p.Root,
+			Project:    project,
 			Packages:   stats.Packages,
 			Nodes:      stats.NodesUpserted,
 			Edges:      stats.EdgesUpserted,
@@ -116,8 +88,7 @@ func cmdGraphIndex(ctx context.Context, args []string) error {
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
 	default:
-		fmt.Printf("✓ graph indexed %s\n", p.Root)
-		fmt.Printf("  packages: %d  nodes: %d  edges: %d  linked: %d  pruned: %d/%d  elapsed: %s\n",
+		fmt.Printf("  graph: %d packages  %d nodes  %d edges  %d linked  pruned %d/%d  in %s\n",
 			stats.Packages, stats.NodesUpserted, stats.EdgesUpserted,
 			stats.LinkedToChunks, stats.NodesPruned, stats.EdgesPruned, stats.Elapsed)
 		if len(stats.Warnings) > 0 {
@@ -155,7 +126,7 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 	}
 	if _, err := os.Stat(p.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no index at %s — run `mcsearch graph index %s` first", p.DBPath, p.Root)
+			return fmt.Errorf("no index at %s — run `mcsearch index %s` first", p.DBPath, p.Root)
 		}
 		return err
 	}

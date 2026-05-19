@@ -21,6 +21,7 @@ import (
 	"github.com/alehatsman/mcsearch/internal/ignore"
 	"github.com/alehatsman/mcsearch/internal/proj"
 	"github.com/alehatsman/mcsearch/internal/store"
+	"golang.org/x/sync/errgroup"
 )
 
 // summarizeCap bounds the slice we send to the chat endpoint per file.
@@ -46,6 +47,15 @@ type Options struct {
 	// chat round-trip per file.
 	Summarize bool
 	Chat      *chat.Client
+	// SummaryConcurrency caps in-flight chat calls for per-chunk
+	// summaries within a single file. <=1 = sequential (preserves
+	// existing behaviour). Set higher to overlap inference with HTTP
+	// RTT on a local Ollama/vLLM that can serve concurrent requests.
+	SummaryConcurrency int
+	// ChunkSummaryMinLines overrides the package default
+	// (chunkSummaryMinLines). 0 = use default. Raise to cut chunk-summary
+	// volume on large repos by skipping medium-sized functions too.
+	ChunkSummaryMinLines int
 }
 
 // Indexer is the entry point.
@@ -304,13 +314,26 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			}
 		}
 		// Per-chunk summary, opt-in. Only structural chunks (functions,
-		// methods, classes) with ≥ chunkSummaryMinLines lines get summaries;
+		// methods, classes) with ≥ minLines lines get summaries;
 		// tiny helpers, windows, and orphans aren't worth the round-trip.
 		// SHA is keyed on the chunk source text so cache invalidation is
 		// automatic when the function body changes.
 		if ix.Options.Summarize && ix.Options.Chat != nil {
+			minLines := ix.Options.ChunkSummaryMinLines
+			if minLines <= 0 {
+				minLines = chunkSummaryMinLines
+			}
+			// Cache-hit handling stays serial (cheap UPDATE). New chunks
+			// are queued and dispatched through a bounded worker pool so
+			// HTTP RTT to the chat endpoint can overlap with inference
+			// on the previous request.
+			type chunkJob struct {
+				c   chunk.Chunk
+				sha string
+			}
+			var jobs []chunkJob
 			for _, c := range sf.chunks {
-				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < chunkSummaryMinLines {
+				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < minLines {
 					continue
 				}
 				sumSHA := chunkSHA(chunk.KindChunkSummary + ":" + c.Content)
@@ -321,26 +344,49 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					seen++
 					continue
 				}
-				summary, err := summarizeChunk(ctx, ix.Options.Chat, sf.rel, c)
-				if err != nil {
-					ix.Options.Logger.Warn("chunk summarize failed", "path", sf.rel, "start", c.StartLine, "err", err)
-					continue
+				jobs = append(jobs, chunkJob{c: c, sha: sumSHA})
+			}
+			if len(jobs) > 0 {
+				conc := ix.Options.SummaryConcurrency
+				if conc < 1 {
+					conc = 1
 				}
-				if strings.TrimSpace(summary) == "" {
-					continue
+				results := make([]*pending, len(jobs))
+				eg, egctx := errgroup.WithContext(ctx)
+				eg.SetLimit(conc)
+				for i := range jobs {
+					eg.Go(func() error {
+						summary, err := summarizeChunk(egctx, ix.Options.Chat, sf.rel, jobs[i].c)
+						if err != nil {
+							ix.Options.Logger.Warn("chunk summarize failed", "path", sf.rel, "start", jobs[i].c.StartLine, "err", err)
+							return nil
+						}
+						if strings.TrimSpace(summary) == "" {
+							return nil
+						}
+						results[i] = &pending{
+							rel: sf.rel,
+							chunk: chunk.Chunk{
+								Path:      sf.rel,
+								Kind:      chunk.KindChunkSummary,
+								StartLine: jobs[i].c.StartLine,
+								EndLine:   jobs[i].c.EndLine,
+								Content:   summary,
+							},
+							sha: jobs[i].sha,
+						}
+						return nil
+					})
 				}
-				toEmbed = append(toEmbed, pending{
-					rel: sf.rel,
-					chunk: chunk.Chunk{
-						Path:      sf.rel,
-						Kind:      chunk.KindChunkSummary,
-						StartLine: c.StartLine,
-						EndLine:   c.EndLine,
-						Content:   summary,
-					},
-					sha: sumSHA,
-				})
-				seen++
+				if err := eg.Wait(); err != nil {
+					return err
+				}
+				for _, p := range results {
+					if p != nil {
+						toEmbed = append(toEmbed, *p)
+						seen++
+					}
+				}
 			}
 		}
 		// Old rows for this file whose SHA disappeared get pruned at the

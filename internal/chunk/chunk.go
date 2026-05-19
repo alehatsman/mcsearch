@@ -51,6 +51,18 @@ const (
 	KindRepoSummary    = "repo_summary"
 )
 
+// IsSummaryKind reports whether kind is one of the chat-synthesized
+// summary kinds. The chunk row's Content for these holds prose, not a
+// file slice — readers should surface it directly instead of re-reading
+// the underlying file by line range.
+func IsSummaryKind(kind string) bool {
+	switch kind {
+	case KindFileSummary, KindChunkSummary, KindPackageSummary, KindRepoSummary:
+		return true
+	}
+	return false
+}
+
 // LineCount returns the number of lines in data. A trailing newline is
 // treated as a line terminator, not the start of an empty line, so a
 // typical POSIX file ending in '\n' reports the same count as an editor

@@ -186,7 +186,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		   VALUES (new.id, new.content, new.path, new.kind);
 		 END`,
 		// graph_nodes / graph_edges hold the structural index produced by
-		// `mcsearch graph index`. The schema is intentionally string-keyed
+		// the graph phase of `mcsearch index`. The schema is intentionally string-keyed
 		// (id TEXT) so node identities are stable across re-extraction and
 		// independent of SQLite's rowid. chunk_id links back to chunks.id
 		// for callers that want code text plus structural neighborhood;

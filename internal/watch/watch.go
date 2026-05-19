@@ -30,6 +30,12 @@ type Options struct {
 	Debounce time.Duration // quiet window before re-indexing; default 500ms
 	Verbose  bool
 	Logger   *slog.Logger // destination for log output; nil = io.Discard
+	// AfterIndex, if non-nil, is invoked after each successful indexer
+	// flush. Used by `mcsearch watch` to refresh the Go static graph in
+	// lockstep with the chunk index. Returning an error is logged but
+	// does not stop the watch loop — the chunk side is already committed
+	// and the next event can retry.
+	AfterIndex func(context.Context) error
 }
 
 type Watcher struct {
@@ -158,8 +164,15 @@ func (w *Watcher) flush(ctx context.Context) {
 			if !errors.Is(err, context.Canceled) {
 				w.opts.Logger.Error("re-index failed", "err", err)
 			}
-		} else if w.opts.Verbose {
-			w.opts.Logger.Info("re-indexed", "elapsed", time.Since(start).Round(time.Millisecond))
+		} else {
+			if w.opts.Verbose {
+				w.opts.Logger.Info("re-indexed", "elapsed", time.Since(start).Round(time.Millisecond))
+			}
+			if w.opts.AfterIndex != nil {
+				if hookErr := w.opts.AfterIndex(ctx); hookErr != nil && !errors.Is(hookErr, context.Canceled) {
+					w.opts.Logger.Warn("post-index hook failed", "err", hookErr)
+				}
+			}
 		}
 
 		// If events landed during the run, re-flush in the same goroutine

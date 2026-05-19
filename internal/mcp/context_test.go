@@ -616,7 +616,7 @@ func TestBuildAvoid(t *testing.T) {
 	}{
 		{"callers always warns", IntentCallers, sem, syms, true, "`calls` edges are not yet extracted"},
 		{"callers without graph still warns", IntentCallers, sem, syms, false, "`calls` edges are not yet extracted"},
-		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `mcsearch graph index"},
+		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `mcsearch index"},
 		{"symbol_lookup with graph: don't grep", IntentSymbolLookup, sem, syms, true, "Do not grep"},
 		{"behavior + both lanes", IntentBehaviorSearch, sem, syms, true, "Do not grep for the identifier"},
 		{"behavior + symbols only", IntentBehaviorSearch, nil, syms, true, "Do not grep for the identifier"},
@@ -624,7 +624,7 @@ func TestBuildAvoid(t *testing.T) {
 		{"behavior + nothing", IntentBehaviorSearch, nil, nil, true, ""},
 		// behavior_search without graph now also gets the index nag —
 		// graph enrichment runs on every intent.
-		{"behavior without graph nudges to index", IntentBehaviorSearch, sem, syms, false, "Run `mcsearch graph index"},
+		{"behavior without graph nudges to index", IntentBehaviorSearch, sem, syms, false, "Run `mcsearch index"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -716,11 +716,11 @@ func TestContextRouterSymbolLookup(t *testing.T) {
 	if !strings.Contains(out.NextAction, "Read") {
 		t.Errorf("next_action should be a Read directive: %q", out.NextAction)
 	}
-	// Without a graph indexed, avoid nudges toward `mcsearch graph index`.
+	// Without a graph indexed, avoid nudges toward `mcsearch index`.
 	// With graph indexed it would say "Do not grep". Either is acceptable
 	// here; the symbol_lookup path is exercised either way.
-	if !strings.Contains(out.Avoid, "Do not grep") && !strings.Contains(out.Avoid, "mcsearch graph index") {
-		t.Errorf("avoid should mention either don't-grep or graph-index nudge: %q", out.Avoid)
+	if !strings.Contains(out.Avoid, "Do not grep") && !strings.Contains(out.Avoid, "mcsearch index") {
+		t.Errorf("avoid should mention either don't-grep or index nudge: %q", out.Avoid)
 	}
 }
 
