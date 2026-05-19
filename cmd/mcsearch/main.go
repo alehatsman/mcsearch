@@ -500,7 +500,11 @@ func cmdIndex(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
+		opts := index.Options{
+			Verbose:     *verbose,
+			Logger:      cliLogger(),
+			Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0),
+		}
 		// Auto-enable summarize when a dedicated summary endpoint is
 		// configured. MCSEARCH_CHAT_URL is NOT a trigger — users often
 		// set it for generate/ask_codebase without wanting per-chunk
@@ -1169,7 +1173,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 	if err != nil {
 		return err
 	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: verbose, Logger: cliLogger()})
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: verbose, Logger: cliLogger(), Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0)})
 	if err := ix.Run(ctx); err != nil {
 		return err
 	}
@@ -1274,7 +1278,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 		return err
 	}
 	logger := cliLogger()
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger})
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger, Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0)})
 	// Refresh the Go static graph after each chunk-index flush. The
 	// graph layer lives in the same SQLite file, so the chunk run has
 	// already released the writer when this fires.

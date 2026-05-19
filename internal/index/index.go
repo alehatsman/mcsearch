@@ -11,8 +11,11 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alehatsman/mcsearch/internal/chat"
@@ -56,6 +59,13 @@ type Options struct {
 	// (chunkSummaryMinLines). 0 = use default. Raise to cut chunk-summary
 	// volume on large repos by skipping medium-sized functions too.
 	ChunkSummaryMinLines int
+	// Concurrency caps the number of parallel file readers / chunkers in
+	// Pass 1. <=0 = runtime.GOMAXPROCS(0). The walker itself stays
+	// single-threaded (directory IO is cheap and serializes well with
+	// inline mtime fast-path UPDATEs); only the expensive per-file work —
+	// ReadFile, binary/secret detection, tree-sitter parse — runs on
+	// workers.
+	Concurrency int
 }
 
 // Indexer is the entry point.
@@ -97,10 +107,8 @@ type slowFile struct {
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	var (
-		toEmbed    []pending
-		seen       int
-		skipped    int
-		mtimeSkips int
+		toEmbed []pending
+		seen    int
 	)
 
 	prevStats, statsErr := ix.Store.Stats(ctx)
@@ -109,11 +117,88 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		lastIndexed = prevStats.LastIndex
 	}
 
-	// Pass 1: walk the tree. Files that hit the mtime fast-path are handled
-	// immediately (one UPDATE). Files that need SHA-level deduplication are
-	// collected into slowFiles for a single batch query after the walk.
+	// Pass 1: walk the tree.
+	//
+	// The walker (this goroutine) does only cheap work — directory
+	// traversal, ignore checks, symlink/extension/size filters, and the
+	// inline mtime fast-path (one SQL UPDATE per unchanged file).
+	// Keeping the fast-path inline avoids contending workers on the
+	// SQLite writer lock for what is already a serial bottleneck.
+	//
+	// Expensive per-file work — ReadFile, LooksBinary/LooksLikeSecret,
+	// tree-sitter Chunks — is fanned out to a pool of workers sized by
+	// Options.Concurrency (default GOMAXPROCS). Each worker holds its
+	// own tree-sitter parser via chunk.Chunks() so they don't share
+	// state. Order of slowFiles is non-deterministic; subsequent passes
+	// don't depend on it.
+	conc := ix.Options.Concurrency
+	if conc <= 0 {
+		conc = runtime.GOMAXPROCS(0)
+	}
+	type pathTask struct {
+		rel  string
+		path string
+	}
+	pathCh := make(chan pathTask, conc*4)
+	resultCh := make(chan slowFile, conc*4)
+	var (
+		skipped    atomic.Int64
+		mtimeSkips atomic.Int64
+	)
+
+	var workers sync.WaitGroup
+	for i := 0; i < conc; i++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for task := range pathCh {
+				data, err := os.ReadFile(task.path)
+				if err != nil {
+					continue
+				}
+				if ignore.LooksBinary(data) {
+					skipped.Add(1)
+					continue
+				}
+				// Skip files whose content matches a known secret
+				// pattern — but allow-list test fixtures, which
+				// routinely embed fake credentials as inputs to
+				// their own detection logic.
+				if !ignore.IsTestPath(task.rel) && ignore.LooksLikeSecret(data) {
+					ix.Options.Logger.Warn("skip (matches secret pattern)", "path", task.rel)
+					skipped.Add(1)
+					continue
+				}
+				chunks, err := chunk.Chunks(ctx, task.rel, data)
+				if err != nil {
+					if ix.Options.Verbose {
+						ix.Options.Logger.Info("chunk error", "path", task.rel, "err", err)
+					}
+					continue
+				}
+				select {
+				case resultCh <- slowFile{rel: task.rel, data: data, chunks: chunks}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	// Collector drains resultCh into slowFiles. Runs on its own
+	// goroutine so the walker can keep pushing into pathCh without
+	// deadlocking against a full resultCh.
 	var slowFiles []slowFile
-	err := filepath.WalkDir(ix.Proj.Root, func(path string, d fs.DirEntry, err error) error {
+	var collector sync.WaitGroup
+	collector.Add(1)
+	go func() {
+		defer collector.Done()
+		for sf := range resultCh {
+			slowFiles = append(slowFiles, sf)
+		}
+	}()
+
+	walkErr := filepath.WalkDir(ix.Proj.Root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if ix.Options.Verbose {
 				ix.Options.Logger.Info("walk error", "path", path, "err", err)
@@ -163,7 +248,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			return nil
 		}
 		if info.Size() > ix.Options.MaxFileSize {
-			skipped++
+			skipped.Add(1)
 			if ix.Options.Verbose {
 				ix.Options.Logger.Info("skip (too large)", "path", rel, "size", info.Size())
 			}
@@ -178,39 +263,24 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			rows, terr := ix.Store.TouchPath(ctx, rel, startTime)
 			if terr == nil && rows > 0 {
 				seen += int(rows)
-				mtimeSkips++
+				mtimeSkips.Add(1)
 				return nil
 			}
 			// rows==0: never indexed before, fall through to slow path.
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil
+		select {
+		case pathCh <- pathTask{rel: rel, path: path}:
+		case <-ctx.Done():
+			return ctx.Err()
 		}
-		if ignore.LooksBinary(data) {
-			skipped++
-			return nil
-		}
-		// Skip files whose content matches a known secret pattern —
-		// but allow-list test fixtures, which routinely embed fake
-		// credentials as inputs to their own detection logic.
-		if !ignore.IsTestPath(rel) && ignore.LooksLikeSecret(data) {
-			ix.Options.Logger.Warn("skip (matches secret pattern)", "path", rel)
-			skipped++
-			return nil
-		}
-		chunks, err := chunk.Chunks(ctx, rel, data)
-		if err != nil {
-			if ix.Options.Verbose {
-				ix.Options.Logger.Info("chunk error", "path", rel, "err", err)
-			}
-			return nil
-		}
-		slowFiles = append(slowFiles, slowFile{rel: rel, data: data, chunks: chunks})
 		return nil
 	})
-	if err != nil {
-		return fmt.Errorf("walk: %w", err)
+	close(pathCh)
+	workers.Wait()
+	close(resultCh)
+	collector.Wait()
+	if walkErr != nil {
+		return fmt.Errorf("walk: %w", walkErr)
 	}
 
 	// Pass 2: one batch query for all slow-path files instead of N per-file
@@ -563,10 +633,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	if ix.Options.Verbose {
 		ix.Options.Logger.Info("indexed",
 			"chunks_seen", seen,
-			"files_fast_path", mtimeSkips,
+			"files_fast_path", mtimeSkips.Load(),
 			"embedded", len(toEmbed),
 			"pruned", pruned,
-			"skipped", skipped)
+			"skipped", skipped.Load())
 	}
 	return nil
 }

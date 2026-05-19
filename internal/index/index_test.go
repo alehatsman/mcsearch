@@ -363,3 +363,60 @@ func TestChunkSummaryIndexing(t *testing.T) {
 			callsAfterSecond-callsAfterFirst)
 	}
 }
+
+// TestParallelWalkIndexesAllFiles asserts that the concurrent walk-and-chunk
+// pipeline produces a complete index when there are many more files than
+// workers. Catches regressions in producer/consumer plumbing — dropped
+// tasks, channel-close races, or missing waitgroup synchronization would
+// show up as a chunk count below the expected floor.
+func TestParallelWalkIndexesAllFiles(t *testing.T) {
+	srv := fakeEmbedServer(t)
+	defer srv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	const fileCount = 64
+	for i := 0; i < fileCount; i++ {
+		writeFile(t, filepath.Join(projDir, fmt.Sprintf("f%02d.go", i)),
+			fmt.Sprintf(`package main
+
+func F%d() string { return "f%d" }
+`, i, i))
+	}
+
+	ctx := context.Background()
+	p, err := proj.Resolve(projDir, cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(ctx, p.DBPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	em := embed.New(srv.URL, "fake", 16, 10*time.Second)
+	// Concurrency well above GOMAXPROCS to stress the channels.
+	ix := New(p, st, em, ig, Options{Concurrency: 8})
+
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.Files != fileCount {
+		t.Errorf("Files indexed = %d, want %d", stats.Files, fileCount)
+	}
+	if stats.Chunks < fileCount {
+		t.Errorf("Chunks indexed = %d, want >= %d (one func per file)", stats.Chunks, fileCount)
+	}
+}
