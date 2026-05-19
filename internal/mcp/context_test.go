@@ -678,6 +678,13 @@ func TestBuildNextAction(t *testing.T) {
 		want       string // substring match
 	}{
 		{IntentSymbolLookup, reads, syms, 0.8, 0, false, "Read x.go lines 10-30"},
+		// symbol_lookup ambiguous: 3 symbols across 3 distinct paths —
+		// next_action must signal the count, not say "the definition".
+		{IntentSymbolLookup, reads, []SymbolHit{
+			{QualifiedName: "Options", Path: "a.go"},
+			{QualifiedName: "Options", Path: "b.go"},
+			{QualifiedName: "Options", Path: "c.go"},
+		}, 0.8, 0, false, "3 definitions across files"},
 		// symbol_lookup with NO symbols but a strong semantic hit:
 		// next_action must not claim "the definition" — that lied
 		// when the symbol genuinely wasn't found. Soft fallback.

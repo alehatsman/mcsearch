@@ -923,6 +923,15 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 		// reads[0] without symbols is a semantic neighbor, not the
 		// definition the user asked about.
 		if len(symbols) > 0 && len(reads) > 0 {
+			// Multiple definitions across distinct paths is a real
+			// shape for ambiguous names (`Options` exists in chat,
+			// graph, index, store, watch). Signal that — singular
+			// "the definition" hides matches the agent should know
+			// about.
+			if distinctSymbolPaths(symbols) > 1 {
+				return fmt.Sprintf("%d definitions across files — closest is %s lines %d-%d; consult the full `symbols` array for the rest.",
+					distinctSymbolPaths(symbols), reads[0].Path, reads[0].StartLine, reads[0].EndLine)
+			}
 			return fmt.Sprintf("Read %s lines %d-%d to see the definition.", reads[0].Path, reads[0].StartLine, reads[0].EndLine)
 		}
 		if len(symbols) == 0 && len(reads) > 0 {
@@ -962,6 +971,22 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 		return fmt.Sprintf("Inspect %s in %s.", symbols[0].QualifiedName, symbols[0].Path)
 	}
 	return ""
+}
+
+// distinctSymbolPaths counts the number of unique paths across a
+// SymbolHit slice. Used by buildNextAction to signal when a single
+// identifier resolves to multiple definitions (e.g. `Options` exists
+// in chat, graph, index, store, watch packages) so the agent reads
+// the full symbols array rather than stopping at the first read.
+func distinctSymbolPaths(syms []SymbolHit) int {
+	seen := make(map[string]struct{}, len(syms))
+	for _, s := range syms {
+		if s.Path == "" {
+			continue
+		}
+		seen[s.Path] = struct{}{}
+	}
+	return len(seen)
 }
 
 // readsSkimDirective renders the multi-file skim hint used by
