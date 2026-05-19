@@ -335,7 +335,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	summarize := fs.Bool("summarize", false, "also generate a per-file summary via the chat endpoint (slow; opt-in)")
+	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_CHAT_URL is set)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -367,7 +367,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 		return err
 	}
 	opts := index.Options{Verbose: *verbose, Logger: cliLogger()}
-	if *summarize {
+	if *summarize || os.Getenv("MCSEARCH_CHAT_URL") != "" {
 		opts.Summarize = true
 		opts.Chat = newChatClient()
 	}

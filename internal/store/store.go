@@ -608,6 +608,61 @@ func dedupChunkSummaries(hits []Hit) []Hit {
 	return out
 }
 
+// FileSummariesForPaths returns the content of file_summary chunks for the
+// given relative file paths, ordered by path. Used by the indexer to collect
+// per-file prose when generating a package-level summary.
+func (s *Store) FileSummariesForPaths(ctx context.Context, paths []string) ([]string, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+	args := make([]any, len(paths)+1)
+	args[0] = "file_summary"
+	for i, p := range paths {
+		args[i+1] = p
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT content FROM chunks WHERE kind = ? AND path IN (`+inPlaceholders(len(paths))+`) ORDER BY path`,
+		args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var content string
+		if err := rows.Scan(&content); err != nil {
+			return nil, err
+		}
+		out = append(out, content)
+	}
+	return out, rows.Err()
+}
+
+// SearchSummaries runs a semantic search restricted to summary-kind chunks
+// (file_summary, package_summary). Fetches a larger candidate pool than k
+// to compensate for summaries being sparse relative to code chunks, then
+// filters and trims to k.
+func (s *Store) SearchSummaries(ctx context.Context, queryVec []float32, queryText string, k int) ([]Hit, error) {
+	candidates := k * 20
+	if candidates < 50 {
+		candidates = 50
+	}
+	hits, err := s.searchRaw(ctx, queryVec, queryText, candidates)
+	if err != nil || len(hits) == 0 {
+		return hits, err
+	}
+	out := hits[:0]
+	for _, h := range hits {
+		if h.Kind == "file_summary" || h.Kind == "package_summary" {
+			out = append(out, h)
+			if len(out) == k {
+				break
+			}
+		}
+	}
+	return out, nil
+}
+
 // scored holds one chunk's score during ranking. Used internally by
 // both the semantic and BM25 legs; the RRF fuser then walks both lists.
 type scored struct {

@@ -109,6 +109,7 @@ type SemHit struct {
 	StartLine int     `json:"start_line"`
 	EndLine   int     `json:"end_line"`
 	Score     float32 `json:"score"`
+	Kind      string  `json:"kind,omitempty"`
 	Reason    string  `json:"reason,omitempty"`
 	Content   string  `json:"content,omitempty"`
 	Truncated bool    `json:"truncated,omitempty"`
@@ -302,6 +303,10 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	if embedFailed {
 		out.Endpoint = s.EmbedClient.Endpoint()
 	}
+	if intent == IntentArchitecture || intent == IntentPackageTopology {
+		summaryHits := s.runSummaryLane(ctx, st, in.Question, k)
+		semHits = mergeSummaryHits(summaryHits, semHits, k)
+	}
 	out.SemanticHits = semHits
 
 	if len(out.Symbols) == 0 && len(out.SemanticHits) == 0 {
@@ -484,6 +489,47 @@ func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intent
 	return out, paths
 }
 
+// runSummaryLane runs a summary-only semantic search (file_summary +
+// package_summary chunks). Used by architecture/package_topology intents to
+// surface prose overviews that may not win the general top-k race against
+// higher-scoring code chunks.
+func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question string, k int) []SemHit {
+	vecs, err := s.EmbedClient.Embed(ctx, []string{question})
+	if err != nil {
+		return nil
+	}
+	hits, err := st.SearchSummaries(ctx, vecs[0], question, k)
+	if err != nil || len(hits) == 0 {
+		return nil
+	}
+	out := make([]SemHit, 0, len(hits))
+	for _, h := range hits {
+		out = append(out, SemHit{
+			Path:      h.Path,
+			StartLine: h.StartLine,
+			EndLine:   h.EndLine,
+			Score:     h.Score,
+			Kind:      h.Kind,
+			Reason:    h.Name,
+		})
+	}
+	return out
+}
+
+// mergeSummaryHits prepends summary hits before code hits, filling up to k
+// total slots. Summaries lead so agents see the prose overview first.
+func mergeSummaryHits(summaries, code []SemHit, k int) []SemHit {
+	out := make([]SemHit, 0, k)
+	out = append(out, summaries...)
+	for _, h := range code {
+		if len(out) >= k {
+			break
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
 // runSemanticLane embeds the question and runs Search. Returns
 // (hits, embedUnreachable). When embedUnreachable is true hits is nil
 // and the caller should surface the failure.
@@ -507,6 +553,7 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 			StartLine: h.StartLine,
 			EndLine:   h.EndLine,
 			Score:     h.Score,
+			Kind:      h.Kind,
 			Reason:    h.Name,
 		})
 	}

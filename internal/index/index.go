@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -203,14 +204,38 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	}
 
 	// Pass 2: one batch query for all slow-path files instead of N per-file
-	// queries. This is the main latency win on cold/partial-change runs.
+	// queries. Also include unique package dirs so we can check package
+	// summary cache without extra round-trips in Pass 5.
 	slowPaths := make([]string, len(slowFiles))
 	for i, sf := range slowFiles {
 		slowPaths[i] = sf.rel
 	}
-	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, slowPaths)
+	allPaths := slowPaths
+	if ix.Options.Summarize && ix.Options.Chat != nil {
+		dirSet := make(map[string]bool, len(slowFiles)/4)
+		for _, sf := range slowFiles {
+			if len(sf.chunks) > 0 {
+				dirSet[filepath.Dir(sf.rel)] = true
+			}
+		}
+		for d := range dirSet {
+			allPaths = append(allPaths, d)
+		}
+	}
+	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, allPaths)
 	if err != nil {
 		return fmt.Errorf("existing SHAs: %w", err)
+	}
+
+	// pkgFiles tracks per-directory file entries for package summary
+	// generation in Pass 5. Only populated when Summarize is on.
+	type pkgFileEntry struct {
+		path    string
+		fileSHA string
+	}
+	var pkgFiles map[string][]pkgFileEntry
+	if ix.Options.Summarize && ix.Options.Chat != nil {
+		pkgFiles = make(map[string][]pkgFileEntry, len(slowFiles)/4)
 	}
 
 	// Pass 3: process each slow-path file using the pre-fetched SHA sets.
@@ -245,6 +270,10 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				truncated = true
 			}
 			fileSHA := chunkSHA(string(slice))
+			if pkgFiles != nil {
+				dir := filepath.Dir(sf.rel)
+				pkgFiles[dir] = append(pkgFiles[dir], pkgFileEntry{path: sf.rel, fileSHA: fileSHA})
+			}
 			if existing[fileSHA] {
 				if err := ix.Store.TouchSeen(ctx, sf.rel, fileSHA, "", startTime); err != nil {
 					return err
@@ -363,6 +392,81 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		}
 	}
 
+	// Pass 5: package summaries — one per directory, generated from the
+	// file summaries stored in the previous passes. Runs after embedding
+	// so file_summary rows are already committed and queryable.
+	if len(pkgFiles) > 0 {
+		var pkgEmbed []pending
+		for dir, entries := range pkgFiles {
+			if ctx.Err() != nil {
+				break
+			}
+			// Stable cache key: SHA of sorted per-file SHAs.
+			shas := make([]string, len(entries))
+			filePaths := make([]string, len(entries))
+			for i, e := range entries {
+				shas[i] = e.fileSHA
+				filePaths[i] = e.path
+			}
+			sort.Strings(shas)
+			pkgSHA := chunkSHA(strings.Join(shas, ":"))
+			if existingBatch[dir][pkgSHA] {
+				if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", startTime); err != nil {
+					return err
+				}
+				continue
+			}
+			fileSummaries, err := ix.Store.FileSummariesForPaths(ctx, filePaths)
+			if err != nil || len(fileSummaries) == 0 {
+				continue
+			}
+			summary, err := summarizePackage(ctx, ix.Options.Chat, dir, fileSummaries)
+			if err != nil {
+				ix.Options.Logger.Warn("package summarize failed", "dir", dir, "err", err)
+				continue
+			}
+			if strings.TrimSpace(summary) == "" {
+				continue
+			}
+			pkgEmbed = append(pkgEmbed, pending{
+				rel: dir,
+				chunk: chunk.Chunk{
+					Path:    dir,
+					Kind:    chunk.KindPackageSummary,
+					Content: summary,
+				},
+				sha: pkgSHA,
+			})
+		}
+		if len(pkgEmbed) > 0 {
+			if ix.Options.Verbose {
+				ix.Options.Logger.Info("embedding package summaries", "count", len(pkgEmbed))
+			}
+			texts := make([]string, len(pkgEmbed))
+			for i, p := range pkgEmbed {
+				texts[i] = p.chunk.EmbedText()
+			}
+			vecs, err := ix.Embed.Embed(ctx, texts)
+			if err != nil {
+				ix.Options.Logger.Warn("package summary embed failed", "err", err)
+			} else {
+				rows := make([]store.PendingChunk, len(pkgEmbed))
+				for i, p := range pkgEmbed {
+					rows[i] = store.PendingChunk{
+						Path:       p.rel,
+						Kind:       p.chunk.Kind,
+						ContentSHA: p.sha,
+						Content:    p.chunk.Content,
+						Vec:        vecs[i],
+					}
+				}
+				if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
 	pruned, err := ix.Store.PruneUnseen(ctx, startTime)
 	if err != nil {
 		return err
@@ -401,7 +505,7 @@ func chunkSHA(content string) string {
 // prose summary.
 func isStructural(kind string) bool {
 	switch kind {
-	case chunk.KindWindow, chunk.KindOrphan, chunk.KindFileSummary, chunk.KindChunkSummary:
+	case chunk.KindWindow, chunk.KindOrphan, chunk.KindFileSummary, chunk.KindChunkSummary, chunk.KindPackageSummary:
 		return false
 	default:
 		return true
@@ -423,6 +527,26 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Ch
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
 	}, chat.Options{MaxTokens: 150})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(resp.Content), nil
+}
+
+// summarizePackage asks the chat endpoint for a package-level overview built
+// from the prose summaries of its constituent files. Returns the summary text
+// or an error if the chat call fails. Caller logs and skips on error.
+func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSummaries []string) (string, error) {
+	const system = "You are a code summarizer. Given prose summaries of all files in a code package or directory, " +
+		"write 2-4 sentences describing what the package does. " +
+		"Name the package path. Describe its public role in the system. " +
+		"Mention key exported types and functions. Note dependencies or notable constraints. " +
+		"No prose padding, no apologies, no restating the prompt."
+	user := fmt.Sprintf("PACKAGE: %s\n\nFILE SUMMARIES:\n%s", dir, strings.Join(fileSummaries, "\n\n---\n\n"))
+	resp, err := cc.Generate(ctx, []chat.Message{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}, chat.Options{MaxTokens: 300})
 	if err != nil {
 		return "", err
 	}

@@ -43,10 +43,11 @@ const WindowOverlap = 10
 
 // Kind values for Chunk.Kind.
 const (
-	KindWindow       = "window"
-	KindOrphan       = "orphan"
-	KindFileSummary  = "file_summary"
-	KindChunkSummary = "chunk_summary"
+	KindWindow         = "window"
+	KindOrphan         = "orphan"
+	KindFileSummary    = "file_summary"
+	KindChunkSummary   = "chunk_summary"
+	KindPackageSummary = "package_summary"
 )
 
 // LineCount returns the number of lines in data. A trailing newline is
