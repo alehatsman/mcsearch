@@ -695,6 +695,17 @@ func printContextText(out mcp.ContextOutput) {
 		fmt.Println()
 	}
 
+	if out.Graph != nil && (len(out.Graph.Nodes) > 0 || len(out.Graph.Edges) > 0) {
+		fmt.Println("Graph:")
+		for _, n := range out.Graph.Nodes {
+			fmt.Printf("  node  %-12s  %s\n", n.Kind, n.ID)
+		}
+		for _, e := range out.Graph.Edges {
+			fmt.Printf("  edge  %-12s  %s → %s\n", e.Kind, e.From, e.To)
+		}
+		fmt.Println()
+	}
+
 	if out.NextAction != "" {
 		fmt.Printf("Next action:\n  %s\n\n", out.NextAction)
 	}
