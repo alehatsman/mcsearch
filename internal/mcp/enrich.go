@@ -36,13 +36,39 @@ import (
 // ─── budgets ─────────────────────────────────────────────────────────────
 
 const (
-	maxDocLines      = 10
-	maxDocBytes      = 600
-	maxRefHits       = 30 // total RefHits returned across all symbols
-	maxRefsPerSymbol = 20 // per-symbol cap before fanning to next symbol
-	blameTimeout     = 600 * time.Millisecond
-	rgTimeout        = 2 * time.Second
+	maxDocLines = 10
+	maxDocBytes = 600
+	// References caps scale with the request's `k` so widening the
+	// per-lane hit count widens references too. defaultRefHits /
+	// defaultRefsPerSymbol act as floors (k=0 baseline), maxRefHits /
+	// maxRefsPerSymbol act as ceilings to bound rg work.
+	defaultRefHits       = 30
+	defaultRefsPerSymbol = 20
+	maxRefHits           = 100
+	maxRefsPerSymbol     = 60
+	blameTimeout         = 600 * time.Millisecond
+	rgTimeout            = 2 * time.Second
 )
+
+// refCapsFor returns (perSymbol, total) reference caps for the given
+// request k. Floors at the original defaults so a caller passing the
+// default k=8 sees no behavior change; ceilings keep rg work bounded
+// for the maximum k=30.
+func refCapsFor(k int) (perSym, total int) {
+	perSym = clampInt(k*3, defaultRefsPerSymbol, maxRefsPerSymbol)
+	total = clampInt(k*4, defaultRefHits, maxRefHits)
+	return
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
 
 // ─── leg 1: signature + doc extraction on SymbolHit ──────────────────────
 
@@ -65,15 +91,21 @@ func enrichSymbolsSigDoc(projectRoot string, syms []SymbolHit) {
 }
 
 // readSignatureAndDoc reads the file once and returns:
-//   - signature: the line at startLine (1-indexed), trimmed
+//   - signature: the declaration line at-or-just-after startLine, trimmed
 //   - doc: contiguous //-prefix (Go) or #-prefix (Python/shell) lines
-//     immediately above startLine, joined with newlines, capped
+//     attached to the declaration, joined with newlines, capped
 //
-// Both are returned empty when the line at startLine doesn't look
-// like a declaration — i.e. doesn't start with a recognized keyword
-// (`func`, `type`, `class`, `def`, ...). This is the staleness guard:
-// when the index hands out offsets that have shifted since reindex,
-// the line at the recorded position is almost never a declaration, so
+// The chunker stores startLine pointing at the first line of the chunk,
+// which for Go funcs+methods is the first doc-comment line, NOT the
+// `func` line. So we scan forward from startLine through contiguous
+// blanks/comments and treat the first non-comment line as the
+// declaration anchor. The forward-walked comments become the doc; if
+// there are none (chunk start lands on the decl itself), we fall back
+// to comments above startLine.
+//
+// Both fields come back empty when no declaration is found within a
+// small forward window. That's the staleness guard — when the index
+// drifts, the recorded offset rarely lands near a real decl, so
 // suppressing the fields is better than emitting nonsense.
 func readSignatureAndDoc(path string, startLine int) (string, string) {
 	f, err := os.Open(path)
@@ -85,10 +117,12 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 64*1024), 1024*1024)
 
-	// Buffer the last maxDocLines lines above startLine so we can walk
-	// backward at the end. Holds at most maxDocLines entries.
+	// `above` buffers up to maxDocLines lines preceding startLine for
+	// the doc-fallback when the chunk starts on the decl itself.
+	// `forward` buffers up to maxDocLines+1 lines starting at startLine
+	// so we can walk past leading comments to find the decl.
 	above := make([]string, 0, maxDocLines)
-	var sig string
+	forward := make([]string, 0, maxDocLines+1)
 	lineNum := 0
 	for sc.Scan() {
 		lineNum++
@@ -100,31 +134,56 @@ func readSignatureAndDoc(path string, startLine int) (string, string) {
 			above = append(above, line)
 			continue
 		}
-		if lineNum == startLine {
-			sig = strings.TrimSpace(sc.Text())
+		forward = append(forward, sc.Text())
+		if len(forward) > maxDocLines {
 			break
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return "", ""
 	}
-
-	// Staleness guard: if the line at startLine doesn't look like a
-	// declaration, the index is out of date and we'd be emitting noise.
-	// Better to leave the fields empty so the agent ignores them.
-	if !looksLikeDeclaration(sig) {
+	if len(forward) == 0 {
 		return "", ""
 	}
 
-	// Walk above from the bottom up, collecting contiguous comment
-	// lines. Stop at the first non-comment line.
-	var docLines []string
-	for i := len(above) - 1; i >= 0; i-- {
-		t := strings.TrimSpace(above[i])
-		if !isCommentLine(t) {
-			break
+	// Walk forward through blanks/comments to find the declaration.
+	declIdx := -1
+	for i, line := range forward {
+		t := strings.TrimSpace(line)
+		if t == "" || isCommentLine(t) {
+			continue
 		}
-		docLines = append([]string{t}, docLines...)
+		if looksLikeDeclaration(t) {
+			declIdx = i
+		}
+		break
+	}
+	if declIdx < 0 {
+		// Staleness guard: nothing decl-shaped in the forward window.
+		return "", ""
+	}
+
+	sig := strings.TrimSpace(forward[declIdx])
+
+	// Doc precedence: if the forward walk passed through comment lines,
+	// those ARE the doc (the chunk starts on the doc comment). Otherwise
+	// fall back to comments immediately above startLine.
+	var docLines []string
+	if declIdx > 0 {
+		for _, line := range forward[:declIdx] {
+			t := strings.TrimSpace(line)
+			if isCommentLine(t) {
+				docLines = append(docLines, t)
+			}
+		}
+	} else {
+		for i := len(above) - 1; i >= 0; i-- {
+			t := strings.TrimSpace(above[i])
+			if !isCommentLine(t) {
+				break
+			}
+			docLines = append([]string{t}, docLines...)
+		}
 	}
 	doc := strings.Join(docLines, "\n")
 	if len(doc) > maxDocBytes {
@@ -265,35 +324,36 @@ func findNearestDoc(projectRoot, relPath string) string {
 // runReferencesLane shells out to ripgrep for each symbol's bare name
 // and returns deduplicated RefHits. The definition line (filtered by
 // matching the SymbolHit's StartLine) is excluded so the list is
-// genuinely "uses of" rather than "appearances of". Capped at
-// maxRefHits total across all symbols.
+// genuinely "uses of" rather than "appearances of". Caps scale with
+// `k` via refCapsFor — defaults match the legacy 30/20 budget.
 //
 // If `rg` isn't on PATH or all invocations fail, returns nil — the
 // caller still has the deferred-graph `avoid` line to fall back on.
-func runReferencesLane(ctx context.Context, projectRoot string, symbols []SymbolHit) []RefHit {
+func runReferencesLane(ctx context.Context, projectRoot string, k int, symbols []SymbolHit) []RefHit {
 	if _, err := exec.LookPath("rg"); err != nil {
 		return nil
 	}
 
+	perSymCap, totalCap := refCapsFor(k)
 	seen := map[string]struct{}{} // path:line dedupe
 	var out []RefHit
 
 	for _, sym := range symbols {
-		if len(out) >= maxRefHits {
+		if len(out) >= totalCap {
 			break
 		}
 		bare := bareSymbolName(sym.QualifiedName)
 		if bare == "" {
 			continue
 		}
-		hits := ripgrepSymbol(ctx, projectRoot, bare, sym, seen)
+		hits := ripgrepSymbol(ctx, projectRoot, bare, perSymCap, sym, seen)
 		// Per-symbol cap before moving to the next, so a hot symbol
 		// can't starve the others.
-		if len(hits) > maxRefsPerSymbol {
-			hits = hits[:maxRefsPerSymbol]
+		if len(hits) > perSymCap {
+			hits = hits[:perSymCap]
 		}
 		for _, h := range hits {
-			if len(out) >= maxRefHits {
+			if len(out) >= totalCap {
 				break
 			}
 			out = append(out, h)
@@ -313,8 +373,9 @@ func bareSymbolName(qualified string) string {
 
 // ripgrepSymbol runs `rg -nw --max-count=<...> -e <symbol> <root>` and
 // parses its `path:line:text` output into RefHits, skipping the
-// definition line. Single subprocess, bounded by rgTimeout.
-func ripgrepSymbol(ctx context.Context, projectRoot, symbol string, defSym SymbolHit, seen map[string]struct{}) []RefHit {
+// definition line. Single subprocess, bounded by rgTimeout. perSymCap
+// caps per-file matches via rg's --max-count.
+func ripgrepSymbol(ctx context.Context, projectRoot, symbol string, perSymCap int, defSym SymbolHit, seen map[string]struct{}) []RefHit {
 	cctx, cancel := context.WithTimeout(ctx, rgTimeout)
 	defer cancel()
 
@@ -323,7 +384,7 @@ func ripgrepSymbol(ctx context.Context, projectRoot, symbol string, defSym Symbo
 	// --no-heading, --color=never: parseable single-line output.
 	cmd := exec.CommandContext(cctx, "rg",
 		"--word-regexp",
-		"--max-count="+fmt.Sprint(maxRefsPerSymbol),
+		"--max-count="+fmt.Sprint(perSymCap),
 		"--no-heading",
 		"--color=never",
 		"--line-number",
@@ -608,8 +669,10 @@ func uniquePaths(reads []SuggestedRead, syms []SymbolHit) []string {
 
 // enrich applies every leg appropriate for the given intent to the
 // output bundle in place. Each leg is best-effort; failures leave
-// fields empty rather than propagating errors.
-func enrich(ctx context.Context, projectRoot, intent string, out *ContextOutput) {
+// fields empty rather than propagating errors. `k` is the request's
+// per-lane cap; passed through to the references lane so wider
+// requests get proportionally wider reference lists.
+func enrich(ctx context.Context, projectRoot, intent string, k int, out *ContextOutput) {
 	// Symbol-level enrichment is always on when we have symbol hits.
 	if len(out.Symbols) > 0 {
 		enrichSymbolsSigDoc(projectRoot, out.Symbols)
@@ -654,6 +717,6 @@ func enrich(ctx context.Context, projectRoot, intent string, out *ContextOutput)
 
 	// References: callers/callees with at least one symbol hit.
 	if (intent == IntentCallers || intent == IntentCallees) && len(out.Symbols) > 0 {
-		out.References = runReferencesLane(ctx, projectRoot, out.Symbols)
+		out.References = runReferencesLane(ctx, projectRoot, k, out.Symbols)
 	}
 }

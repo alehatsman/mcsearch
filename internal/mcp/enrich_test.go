@@ -2,6 +2,9 @@ package mcp
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,6 +110,39 @@ func TestReadSignatureAndDoc(t *testing.T) {
 	_, doc2 := readSignatureAndDoc(path2, 3)
 	if doc2 != "" {
 		t.Errorf("doc=%q, want empty for func with no comment", doc2)
+	}
+}
+
+func TestReadSignatureAndDocCommentLeadingStartLine(t *testing.T) {
+	// The Go chunker stores StartLine at the first line of the chunk,
+	// which for funcs/methods with a doc comment is the comment line —
+	// not the `func` line. The reader must scan forward past blanks
+	// and contiguous comments to find the declaration, and treat those
+	// skipped comments as the doc.
+	root := t.TempDir()
+	src := strings.Join([]string{
+		"package x",
+		"",
+		"// Search returns the top-k chunks ranked by hybrid scoring with optional",
+		"// per-file diversity via Options.MaxHitsPerFile.",
+		"func (s *Store) Search(ctx context.Context) ([]Hit, error) {",
+		"  return nil, nil",
+		"}",
+		"",
+	}, "\n") + "\n"
+	path := filepath.Join(root, "s.go")
+	writeFile(t, path, src)
+
+	// StartLine = 3 (the first doc-comment line, mimicking the chunker).
+	sig, doc := readSignatureAndDoc(path, 3)
+	if !strings.HasPrefix(sig, "func (s *Store) Search") {
+		t.Errorf("sig=%q, want to start with `func (s *Store) Search`", sig)
+	}
+	if !strings.Contains(doc, "Search returns the top-k chunks") {
+		t.Errorf("doc=%q, want it to contain the docstring", doc)
+	}
+	if !strings.Contains(doc, "per-file diversity") {
+		t.Errorf("doc=%q, want both comment lines", doc)
 	}
 }
 
@@ -256,7 +292,7 @@ func TestEnrichEditingContext(t *testing.T) {
 		SuggestedReads: []SuggestedRead{{Path: "pkg/core.go", StartLine: 6, EndLine: 6}},
 		Symbols:        []SymbolHit{{QualifiedName: "Run", Path: "pkg/core.go", StartLine: 6, EndLine: 6}},
 	}
-	enrich(context.Background(), root, IntentEditingContext, out)
+	enrich(context.Background(), root, IntentEditingContext, 8, out)
 
 	if out.Symbols[0].Signature == "" {
 		t.Error("symbol signature should be populated")
@@ -301,7 +337,7 @@ func TestEnrichBehaviorSearchOmitsHeavyLegs(t *testing.T) {
 		SuggestedReads: []SuggestedRead{{Path: "x.go", StartLine: 3, EndLine: 3}},
 		Symbols:        []SymbolHit{{QualifiedName: "F", Path: "x.go", StartLine: 3, EndLine: 3}},
 	}
-	enrich(context.Background(), root, IntentBehaviorSearch, out)
+	enrich(context.Background(), root, IntentBehaviorSearch, 8, out)
 
 	meta, ok := out.Annotations["x.go"]
 	if !ok {
@@ -324,3 +360,82 @@ func TestEnrichBehaviorSearchOmitsHeavyLegs(t *testing.T) {
 	}
 }
 
+
+// ─── runReferencesLane: k drives the cap ─────────────────────────────────
+
+func TestRunReferencesLaneCapsScaleWithK(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("ripgrep not on PATH")
+	}
+	root := t.TempDir()
+	// Write 50 files each with a single usage of `Target` — that's
+	// well past the default 30/20 caps so we can observe k's effect.
+	for i := 0; i < 50; i++ {
+		path := filepath.Join(root, fmt.Sprintf("u%d.go", i))
+		body := "package x\n\nfunc _" + fmt.Sprint(i) + "() { Target() }\n"
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Definition lives in a separate file so it's filtered out, not counted.
+	if err := os.WriteFile(filepath.Join(root, "def.go"),
+		[]byte("package x\n\nfunc Target() {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	def := SymbolHit{
+		QualifiedName: "Target",
+		Path:          "def.go",
+		StartLine:     3,
+		EndLine:       3,
+	}
+
+	// With a single symbol the per-symbol cap dominates (the total cap
+	// never kicks in). At k=8: perSymCap=clamp(8*3,20,60)=24.
+	got8 := runReferencesLane(context.Background(), root, 8, []SymbolHit{def})
+	wantPerSym8, _ := refCapsFor(8)
+	if len(got8) != wantPerSym8 {
+		t.Errorf("k=8 produced %d refs, want %d (per-symbol cap)", len(got8), wantPerSym8)
+	}
+
+	// At k=30: perSymCap=60, total=100; the fixture has only 50 usages
+	// so all 50 surface. The point of the test is k=30 > k=8.
+	got30 := runReferencesLane(context.Background(), root, 30, []SymbolHit{def})
+	if len(got30) <= len(got8) {
+		t.Errorf("k=30 yielded %d refs, k=8 yielded %d; expected wider cap to surface more usages",
+			len(got30), len(got8))
+	}
+	if len(got30) != 50 {
+		t.Errorf("k=30 with 50 usages should surface all 50; got %d", len(got30))
+	}
+}
+
+func TestRefCapsFor(t *testing.T) {
+	cases := []struct {
+		k                          int
+		wantPerSym, wantTotal int
+	}{
+		{0, defaultRefsPerSymbol, defaultRefHits},
+		{8, defaultRefsPerSymbol, defaultRefHits}, // 8*3=24 > 20; 8*4=32 > 30; both should be > floor
+		{1, defaultRefsPerSymbol, defaultRefHits},
+		{30, maxRefsPerSymbol, maxRefHits},
+		{100, maxRefsPerSymbol, maxRefHits}, // clamp to ceiling
+	}
+	for _, tc := range cases {
+		perSym, total := refCapsFor(tc.k)
+		// For mid-range k, just sanity-check monotonicity and bounds.
+		if perSym < defaultRefsPerSymbol || perSym > maxRefsPerSymbol {
+			t.Errorf("k=%d perSym=%d out of [%d,%d]", tc.k, perSym, defaultRefsPerSymbol, maxRefsPerSymbol)
+		}
+		if total < defaultRefHits || total > maxRefHits {
+			t.Errorf("k=%d total=%d out of [%d,%d]", tc.k, total, defaultRefHits, maxRefHits)
+		}
+		// Endpoint asserts.
+		if tc.k == 0 && (perSym != tc.wantPerSym || total != tc.wantTotal) {
+			t.Errorf("k=0 want floors; got perSym=%d total=%d", perSym, total)
+		}
+		if tc.k >= 30 && (perSym != tc.wantPerSym || total != tc.wantTotal) {
+			t.Errorf("k=%d want ceilings; got perSym=%d total=%d", tc.k, perSym, total)
+		}
+	}
+}

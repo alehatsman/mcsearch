@@ -665,3 +665,54 @@ func TestPersistsDimAcrossOpen(t *testing.T) {
 		t.Errorf("dim not persisted: got %d", stats.Dim)
 	}
 }
+
+func TestFindSymbolCandidates(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	rows := []PendingChunk{
+		{Path: "a.go", Kind: "fn", Name: "Indexer", ContentSHA: "h1", Content: "x", Vec: []float32{1, 0, 0, 0}},
+		{Path: "b.go", Kind: "fn", Name: "IndexableExt", ContentSHA: "h2", Content: "x", Vec: []float32{0, 1, 0, 0}},
+		{Path: "c.go", Kind: "fn", Name: "indexBase", ContentSHA: "h3", Content: "x", Vec: []float32{0, 0, 1, 0}},
+		{Path: "d.go", Kind: "fn", Name: "cmdIndex", ContentSHA: "h4", Content: "x", Vec: []float32{0, 0, 0, 1}},
+		{Path: "e.go", Kind: "fn", Name: "Unrelated", ContentSHA: "h5", Content: "x", Vec: []float32{1, 1, 0, 0}},
+	}
+	if err := st.UpsertMany(ctx, rows, now); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := st.FindSymbolCandidates(ctx, "Index", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// All four names contain "Index" as substring; "Unrelated" does not.
+	want := map[string]bool{"Indexer": true, "IndexableExt": true, "indexBase": false, "cmdIndex": true}
+	// Note: SQLite LIKE is case-insensitive by default for ASCII, so
+	// `indexBase` also matches; we'll see all four.
+	for _, name := range got {
+		want[name] = true
+	}
+	if len(got) != 4 {
+		t.Errorf("want 4 candidates (substring of 'Index'); got %d: %v", len(got), got)
+	}
+
+	// Exact-match name should NOT come back in candidates (the caller
+	// already knows that one failed).
+	got2, _ := st.FindSymbolCandidates(ctx, "Indexer", 5)
+	for _, n := range got2 {
+		if n == "Indexer" {
+			t.Errorf("exact-match name %q should be excluded from candidates", n)
+		}
+	}
+
+	// Empty query → empty result.
+	got3, _ := st.FindSymbolCandidates(ctx, "", 5)
+	if len(got3) != 0 {
+		t.Errorf("empty query should yield 0 candidates; got %v", got3)
+	}
+
+	// k caps the output.
+	got4, _ := st.FindSymbolCandidates(ctx, "Index", 2)
+	if len(got4) != 2 {
+		t.Errorf("k=2 cap not honored; got %d: %v", len(got4), got4)
+	}
+}

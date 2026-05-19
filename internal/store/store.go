@@ -1147,6 +1147,39 @@ func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, erro
 	return out, rows.Err()
 }
 
+// FindSymbolCandidates returns up to k distinct chunk names whose
+// `name` column contains `query` as a substring. Ordered by length
+// (shorter ≈ closer-in-spirit) then alphabetically. Intended as a
+// "did you mean" surface for find_symbol misses — callers should pass
+// the exact-name lookup query and surface the results in a hint so
+// the agent can retry with a real identifier instead of guessing.
+func (s *Store) FindSymbolCandidates(ctx context.Context, query string, k int) ([]string, error) {
+	if k <= 0 {
+		k = 5
+	}
+	if query == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT name FROM chunks
+		 WHERE name LIKE '%' || ? || '%' AND name != '' AND name != ?
+		 ORDER BY length(name), name LIMIT ?`,
+		query, query, k)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		out = append(out, name)
+	}
+	return out, rows.Err()
+}
+
 // RelatedChunks returns the top-k chunks most similar to the chunk at
 // (path, startLine), excluding the source chunk itself. Uses the in-RAM
 // vector cache for speed. Returns an error if no chunk is found at the

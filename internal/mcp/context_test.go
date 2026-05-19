@@ -440,6 +440,42 @@ func TestInlineContentSharedBudgetDoesNotDoubleCharge(t *testing.T) {
 	}
 }
 
+func TestInlineContentScoreFloorOnLowSignalQueries(t *testing.T) {
+	// When top semantic score is below lowConfidenceScore, hits whose
+	// individual score is below noiseFloorScore should ship without
+	// Content (path+range only) — the agent keeps the pointer but we
+	// don't burn bytes on what's almost certainly noise.
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "weak.go"), "line 1\nline 2\nline 3\n")
+	writeFile(t, filepath.Join(root, "weaker.go"), "line A\nline B\nline C\n")
+	writeFile(t, filepath.Join(root, "strong.go"), "line X\nline Y\nline Z\n")
+
+	// Top score below lowConfidenceScore (0.45) triggers the floor.
+	sem := []SemHit{
+		{Path: "weak.go", StartLine: 1, EndLine: 3, Score: 0.42},   // top, < 0.45 → suppression mode on
+		{Path: "weaker.go", StartLine: 1, EndLine: 3, Score: 0.38}, // < noiseFloorScore → suppressed
+		// 0.41 is above the floor — would also be inlined.
+	}
+	inlineContent(root, IntentBehaviorSearch, nil, sem)
+	if sem[0].Content == "" {
+		t.Error("top hit (score 0.42) should still inline — only sub-floor hits are suppressed")
+	}
+	if sem[1].Content != "" {
+		t.Errorf("hit at score 0.38 should be suppressed under floor; got Content=%q", sem[1].Content)
+	}
+
+	// Sanity check: when top score IS strong, low-score companions
+	// still inline normally (the floor only fires on no-signal pools).
+	sem2 := []SemHit{
+		{Path: "strong.go", StartLine: 1, EndLine: 3, Score: 0.80},
+		{Path: "weaker.go", StartLine: 1, EndLine: 3, Score: 0.38},
+	}
+	inlineContent(root, IntentBehaviorSearch, nil, sem2)
+	if sem2[1].Content == "" {
+		t.Error("low-score companion to a strong top should still inline (floor only fires on no-signal queries)")
+	}
+}
+
 func TestInlineSuggestedReadsMissingFileGraceful(t *testing.T) {
 	root := t.TempDir()
 	reads := []SuggestedRead{{Path: "does-not-exist.go", StartLine: 1, EndLine: 5}}
@@ -499,6 +535,34 @@ func TestContextRouterNoInline(t *testing.T) {
 		if r.Content != "" {
 			t.Errorf("suggested_reads[%d].Content should be empty with NoInline=true; got %d bytes", i, len(r.Content))
 		}
+	}
+}
+
+func TestPickSuggestedReadsFiltersRollupSummaries(t *testing.T) {
+	// package_summary / repo_summary rollup chunks have Path pointing
+	// at a directory and zero line ranges. They're informative in the
+	// semantic_hits lane but produce bogus "lines 0-0" Read directives
+	// if they leak into suggested_reads.
+	sem := []SemHit{
+		{Path: "internal/index", Kind: "package_summary", Score: 0.95},
+		{Path: ".", Kind: "repo_summary", Score: 0.90},
+		{Path: "internal/store/store.go", StartLine: 100, EndLine: 150, Kind: "method_declaration", Score: 0.85},
+	}
+	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	for _, r := range got {
+		if r.Path == "internal/index" || r.Path == "." {
+			t.Errorf("rollup-summary path %q leaked into suggested_reads", r.Path)
+		}
+	}
+	// At least the real file should make it through.
+	foundFile := false
+	for _, r := range got {
+		if r.Path == "internal/store/store.go" {
+			foundFile = true
+		}
+	}
+	if !foundFile {
+		t.Error("real-file SemHit should land in suggested_reads")
 	}
 }
 
@@ -572,29 +636,42 @@ func TestBuildNextAction(t *testing.T) {
 	syms := []SymbolHit{{QualifiedName: "Foo", Path: "x.go"}}
 
 	cases := []struct {
-		intent string
-		reads  []SuggestedRead
-		syms   []SymbolHit
-		topSem float32
-		want   string // substring match
+		intent     string
+		reads      []SuggestedRead
+		syms       []SymbolHit
+		topSem     float32
+		graphEdges int
+		hasBlame   bool
+		want       string // substring match
 	}{
-		{IntentSymbolLookup, reads, syms, 0.8, "Read x.go lines 10-30"},
-		{IntentEditingContext, reads, syms, 0.8, "before editing"},
-		{IntentBehaviorSearch, reads, syms, 0.8, "ground your answer"},
-		{IntentArchitecture, reads, syms, 0.8, "structural overview"},
-		{IntentCallers, nil, syms, 0.8, "Call-graph edges are not yet extracted"},
-		{IntentSymbolLookup, nil, nil, 0, "Rephrase"},
+		{IntentSymbolLookup, reads, syms, 0.8, 0, false, "Read x.go lines 10-30"},
+		{IntentEditingContext, reads, syms, 0.8, 0, false, "before editing"},
+		{IntentBehaviorSearch, reads, syms, 0.8, 0, false, "ground your answer"},
+		{IntentArchitecture, reads, syms, 0.8, 0, false, "structural overview"},
+		{IntentCallers, nil, syms, 0.8, 0, false, "Call-graph edges are not yet extracted"},
+		{IntentSymbolLookup, nil, nil, 0, 0, false, "Rephrase"},
 		// Low-confidence: no symbols and top semantic score below the
 		// threshold should route to the "weak match" branch instead of
 		// confidently pointing at a noise hit.
-		{IntentBehaviorSearch, reads, nil, 0.30, "Top semantic match is weak"},
+		{IntentBehaviorSearch, reads, nil, 0.30, 0, false, "Top semantic match is weak"},
 		// Symbols present — confidence comes from the structural lane,
 		// so the low-score branch must NOT trigger.
-		{IntentBehaviorSearch, reads, syms, 0.30, "ground your answer"},
+		{IntentBehaviorSearch, reads, syms, 0.30, 0, false, "ground your answer"},
+		// package_topology with graph edges populated: weak-score branch
+		// must NOT fire — the graph IS the payload. Expect the graph
+		// directive, not the rephrase fallback.
+		{IntentPackageTopology, reads, nil, 0.30, 47, false, "graph.edges"},
+		{IntentPackageTopology, reads, nil, 0.30, 47, false, "47 imports"},
+		// editing_context with blame annotations: weak-score branch
+		// must NOT fire — point at the primary site.
+		{IntentEditingContext, reads, nil, 0.30, 0, true, "before editing"},
+		// package_topology with empty graph still routes to weak-match
+		// fallback when scores are low (the genuine no-signal case).
+		{IntentPackageTopology, reads, nil, 0.30, 0, false, "Top semantic match is weak"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.intent+" "+tc.want, func(t *testing.T) {
-			got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem)
+			got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem, tc.graphEdges, tc.hasBlame)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("got %q, want substring %q", got, tc.want)
 			}

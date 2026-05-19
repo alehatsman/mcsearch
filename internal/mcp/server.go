@@ -228,7 +228,14 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	out := FindSymbolOutput{Status: "ok", Project: p.Root}
 	if len(hits) == 0 {
 		out.Status = "not-found"
-		out.Hint = fmt.Sprintf("no chunk with name=%q in the index; check spelling or re-index if recently added.", in.Name)
+		hint := fmt.Sprintf("no chunk with name=%q in the index; check spelling or re-index if recently added.", in.Name)
+		// Near-miss surface: substring matches give the agent something
+		// real to retry with instead of guessing. Errors are non-fatal —
+		// the original "not-found" hint is still useful on its own.
+		if cands, candErr := st.FindSymbolCandidates(ctx, in.Name, 5); candErr == nil && len(cands) > 0 {
+			hint += " Did you mean: " + strings.Join(cands, ", ") + "?"
+		}
+		out.Hint = hint
 		return nil, out, nil
 	}
 	for _, h := range hits {

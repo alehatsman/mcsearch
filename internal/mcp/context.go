@@ -333,12 +333,17 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	if !in.NoInline {
 		inlineContent(p.Root, intent, out.SuggestedReads, out.SemanticHits)
 	}
-	enrich(ctx, p.Root, intent, &out)
+	enrich(ctx, p.Root, intent, k, &out)
 	var topSem float32
 	if len(out.SemanticHits) > 0 {
 		topSem = out.SemanticHits[0].Score
 	}
-	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols, topSem)
+	var graphEdgeCount int
+	if out.Graph != nil {
+		graphEdgeCount = len(out.Graph.Edges)
+	}
+	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols, topSem,
+		graphEdgeCount, hasBlameAnnotations(out.Annotations))
 	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil, len(out.References) > 0)
 	out.Status = "ok"
 	if embedFailed && out.Hint == "" {
@@ -674,6 +679,19 @@ func isNonImplPath(p string) bool {
 
 // ─── suggested_reads ──────────────────────────────────────────────────────
 
+// isReadableRange reports whether a SemHit points at a concrete file
+// slice the agent can actually `Read`. Rollup chunks (package_summary,
+// repo_summary) have Path set to a directory; they're useful context
+// in semantic_hits but should not land in suggested_reads where
+// "lines 0-0" reads as a Read directive the agent can't execute.
+func isReadableRange(h SemHit) bool {
+	switch h.Kind {
+	case "package_summary", "repo_summary":
+		return false
+	}
+	return true
+}
+
 // pickSuggestedReads merges the top results from both lanes into a
 // short, deduplicated list of file ranges the caller should open in
 // full. Strategy by intent:
@@ -734,6 +752,14 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 	}
 	rs := make([]ranked, 0, len(semHits))
 	for _, h := range semHits {
+		// Skip rollup hits (package_summary / repo_summary) — their
+		// "path" is a directory and StartLine/EndLine are 0, so they
+		// produce bogus "lines 0-0" directives downstream. They still
+		// live in semantic_hits as informational context; they just
+		// don't belong in suggested_reads.
+		if !isReadableRange(h) {
+			continue
+		}
 		_, cross := symbolPaths[h.Path]
 		rs = append(rs, ranked{hit: h, crossLane: cross, nonImpl: isNonImplPath(h.Path)})
 	}
@@ -771,6 +797,16 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 
 // ─── next_action / avoid (prose) ──────────────────────────────────────────
 
+// noiseFloorScore is the per-hit cutoff applied to semantic_hits
+// inlining when the top score is already below lowConfidenceScore.
+// On a genuine no-signal query (gibberish, very rare phrase) the whole
+// pool tends to cluster in the 0.35-0.40 band; inlining all of them
+// burns the byte budget on hits the agent will rightly ignore. The
+// path+range still ships, just without Content, so the caller can
+// follow up with a manual Read if a low-score path turns out to be
+// relevant after all.
+const noiseFloorScore = 0.40
+
 // lowConfidenceScore is the cosine-fused top-score threshold below
 // which we treat semantic results as noise rather than signal. Picked
 // empirically: real matches on this index cluster ≥0.5; nonsense
@@ -781,15 +817,30 @@ const lowConfidenceScore = 0.45
 // buildNextAction returns an imperative sentence the agent can execute
 // directly. The issue is explicit that prose outperforms structured
 // args for agent compliance. Always concrete — names paths and line
-// ranges — never "do more research." When there are no symbols and the
-// top semantic score is below lowConfidenceScore, we route to the
-// "rephrase or grep" branch instead of confidently pointing at a
-// weak hit.
-func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, topSemScore float32) string {
-	if len(reads) == 0 && len(symbols) == 0 {
+// ranges — never "do more research."
+//
+// The "weak semantic" fallback fires only when the intent's *primary*
+// payload is also empty. For graph-driven intents (package_topology /
+// architecture) a populated graph counts as confidence even when the
+// semantic-hit scores are low; for editing_context, populated blame
+// annotations count likewise. This prevents the misleading
+// "rephrase or grep" message on calls that actually returned useful
+// structural data.
+func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, topSemScore float32, graphEdgeCount int, hasBlame bool) string {
+	if len(reads) == 0 && len(symbols) == 0 && graphEdgeCount == 0 {
 		return "Rephrase the question with concrete keywords or fall back to grep."
 	}
-	if len(symbols) == 0 && topSemScore > 0 && topSemScore < lowConfidenceScore {
+	// Confidence comes from any of: symbol hits, strong semantic score,
+	// or an intent-specific structural payload.
+	intentPayloadStrong := false
+	switch intent {
+	case IntentPackageTopology, IntentArchitecture:
+		intentPayloadStrong = graphEdgeCount > 0
+	case IntentEditingContext:
+		intentPayloadStrong = hasBlame
+	}
+	weakSemantic := topSemScore > 0 && topSemScore < lowConfidenceScore
+	if len(symbols) == 0 && weakSemantic && !intentPayloadStrong {
 		return "Top semantic match is weak — rephrase with concrete keywords or fall back to grep."
 	}
 	switch intent {
@@ -806,13 +857,16 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 			return fmt.Sprintf("Call-graph edges are not yet extracted — start from %s (%s) and grep for %s.",
 				symbols[0].Path, symbols[0].QualifiedName, rel)
 		}
-	case IntentArchitecture, IntentPackageTopology:
+	case IntentPackageTopology:
+		if graphEdgeCount > 0 {
+			return fmt.Sprintf("Read the `graph.edges` list (%d imports) to see package dependencies, then call with intent=symbol_lookup on a specific package to drill in.", graphEdgeCount)
+		}
 		if len(reads) > 0 {
-			parts := make([]string, 0, len(reads))
-			for _, r := range reads {
-				parts = append(parts, fmt.Sprintf("%s lines %d-%d", r.Path, r.StartLine, r.EndLine))
-			}
-			return "Skim " + strings.Join(parts, "; ") + " for the structural overview, then re-call with intent=symbol_lookup to drill into specific types, or intent=editing_context for files you want to modify."
+			return readsSkimDirective(reads)
+		}
+	case IntentArchitecture:
+		if len(reads) > 0 {
+			return readsSkimDirective(reads)
 		}
 	case IntentEditingContext:
 		if len(reads) > 0 {
@@ -827,6 +881,29 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 		return fmt.Sprintf("Inspect %s in %s.", symbols[0].QualifiedName, symbols[0].Path)
 	}
 	return ""
+}
+
+// readsSkimDirective renders the multi-file skim hint used by
+// architecture / package_topology when the graph isn't the headline.
+func readsSkimDirective(reads []SuggestedRead) string {
+	parts := make([]string, 0, len(reads))
+	for _, r := range reads {
+		parts = append(parts, fmt.Sprintf("%s lines %d-%d", r.Path, r.StartLine, r.EndLine))
+	}
+	return "Skim " + strings.Join(parts, "; ") + " for the structural overview, then re-call with intent=symbol_lookup to drill into specific types, or intent=editing_context for files you want to modify."
+}
+
+// hasBlameAnnotations reports whether any path in the annotations map
+// carries blame metadata — the signal that buildNextAction uses to
+// avoid emitting "weak match" on editing_context responses that have
+// concrete authorship data.
+func hasBlameAnnotations(anns map[string]PathMeta) bool {
+	for _, m := range anns {
+		if m.LastCommit != "" || m.LastAuthor != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // buildAvoid emits a "what not to do" hint. Strong claims when we
@@ -962,12 +1039,25 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemH
 			budget -= len(content)
 		}
 	}
+	// On a no-signal query (top semantic score below the confidence
+	// threshold) the whole pool is likely noise. Skip inlining hits
+	// whose individual score is also below the noise floor — the agent
+	// keeps the path/range pointer but we don't burn bytes on a Content
+	// blob that won't pay off.
+	var topScore float32
+	if len(sem) > 0 {
+		topScore = sem[0].Score
+	}
+	suppressLowScore := topScore > 0 && topScore < lowConfidenceScore
 	for i := range sem {
 		if budget <= 0 {
 			return
 		}
 		if sem[i].Content != "" {
 			budget -= len(sem[i].Content)
+			continue
+		}
+		if suppressLowScore && sem[i].Score < noiseFloorScore {
 			continue
 		}
 		content, truncated, charged := fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)

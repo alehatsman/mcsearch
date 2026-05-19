@@ -486,3 +486,32 @@ func itoa(i int) string {
 	}
 	return string(b[n:])
 }
+
+func TestFindSymbolNotFoundSurfaceCandidates(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	writeFile(t, filepath.Join(projDir, "main.go"),
+		"package main\n\nfunc Indexer() {}\nfunc IndexableExt() {}\nfunc cmdIndex() {}\n")
+	root := indexProject(t, projDir, cacheDir, srv.URL)
+
+	s := newServer(srv.URL, cacheDir)
+	_, out, err := s.findSymbol(context.Background(), nil, FindSymbolInput{
+		Name:        "Index", // no exact match, but substring of several
+		ProjectRoot: root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.Status != "not-found" {
+		t.Errorf("status=%q, want not-found", out.Status)
+	}
+	if !strings.Contains(out.Hint, "Did you mean") {
+		t.Errorf("hint should propose near-misses; got %q", out.Hint)
+	}
+	// At least one real candidate should appear by name.
+	if !strings.Contains(out.Hint, "Indexer") && !strings.Contains(out.Hint, "IndexableExt") && !strings.Contains(out.Hint, "cmdIndex") {
+		t.Errorf("hint should name a real candidate; got %q", out.Hint)
+	}
+}
