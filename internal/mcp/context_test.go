@@ -40,6 +40,7 @@ func TestResolveIntent(t *testing.T) {
 		// Bare identifier query → symbol_lookup.
 		{"bare qualified", ContextInput{Question: "(*Store).Search"}, IntentSymbolLookup},
 		{"bare pascal", ContextInput{Question: "OpenWith"}, IntentSymbolLookup},
+		{"bare camel", ContextInput{Question: "inlineContent"}, IntentSymbolLookup},
 
 		// Default: behavior_search.
 		{"plain question", ContextInput{Question: "where do we open the SQLite store"}, IntentBehaviorSearch},
@@ -74,6 +75,12 @@ func TestExtractIdentifiers(t *testing.T) {
 		{"the user_role table and old_users column", []string{"user_role", "old_users"}},
 		{"plain english only", nil},
 		{"a Foo Bar duplicate Foo", []string{"Foo", "Bar"}},
+		// camelCase — Go unexported names should be picked up.
+		{"inlineContent", []string{"inlineContent"}},
+		{"where is markDirty called", []string{"markDirty"}},
+		// A camelCase token inside a qualified form must not double-add
+		// (the qualified span masks sub-token matches).
+		{"(*Store).searchRaw", []string{"(*Store).searchRaw"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.in, func(t *testing.T) {
@@ -201,6 +208,108 @@ func TestIsDocPath(t *testing.T) {
 			t.Errorf("isDocPath(%q) = %v, want %v", p, got, want)
 		}
 	}
+}
+
+func TestIsTestPath(t *testing.T) {
+	tests := map[string]bool{
+		"internal/mcp/context_test.go":   true,
+		"pkg/foo/bar_test.go":            true,
+		"src/Foo.test.ts":                true,
+		"src/Foo.test.tsx":               true,
+		"src/foo.spec.js":                true,
+		"src/foo.spec.jsx":               true,
+		"tests/test_foo.py":              true,
+		"tests/foo_test.py":              true,
+		"spec/foo_spec.rb":               true,
+		"src/foo_test.rs":                true,
+		"internal/store/store.go":        false,
+		"README.md":                      false,
+		"cmd/main.py":                    false,
+		"src/foo.ts":                     false,
+	}
+	for p, want := range tests {
+		if got := isTestPath(p); got != want {
+			t.Errorf("isTestPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// ─── enrichGraph caps ─────────────────────────────────────────────────────
+
+// TestEnrichGraphCaps guards against unbounded graph payloads — the
+// regression that motivated maxGraphNodes/maxGraphEdges. A big
+// package's rollup or a god-struct's sibling fan-out should not blow
+// the response budget.
+func TestEnrichGraphCaps(t *testing.T) {
+	t.Run("node cap via package rollup", func(t *testing.T) {
+		view := &graphView{
+			nodesByID:        map[string]graphNode{},
+			nodesByName:      map[string][]graphNode{},
+			nodesByQualified: map[string][]graphNode{},
+			nodesByPackage:   map[string][]graphNode{},
+			nodesByPath:      map[string][]graphNode{},
+			edgesBySrc:       map[string][]graphEdge{},
+			edgesByDst:       map[string][]graphEdge{},
+			edgesByKind:      map[graph.EdgeKind][]graphEdge{},
+		}
+		const pkg = "example.com/bigpkg"
+		for i := range 100 {
+			n := graphNode{
+				ID:            fmt.Sprintf("n%d", i),
+				Kind:          graph.NodeFunction,
+				Name:          fmt.Sprintf("Fn%d", i),
+				QualifiedName: fmt.Sprintf("Fn%d", i),
+				PackagePath:   pkg,
+				FilePath:      "bigpkg/bigpkg.go",
+			}
+			view.nodesByID[n.ID] = n
+			view.nodesByPackage[pkg] = append(view.nodesByPackage[pkg], n)
+			view.nodesByPath[n.FilePath] = append(view.nodesByPath[n.FilePath], n)
+		}
+		out := &ContextOutput{}
+		enrichGraph(out, IntentArchitecture, view, []SemHit{{Path: "bigpkg/bigpkg.go"}}, nil)
+		if got := len(out.Graph.Nodes); got > maxGraphNodes {
+			t.Errorf("got %d nodes, want ≤ %d", got, maxGraphNodes)
+		}
+		if len(out.Graph.Nodes) == 0 {
+			t.Error("expected some nodes from package rollup")
+		}
+	})
+
+	t.Run("edge cap via package_topology imports", func(t *testing.T) {
+		view := &graphView{
+			nodesByID:        map[string]graphNode{},
+			nodesByName:      map[string][]graphNode{},
+			nodesByQualified: map[string][]graphNode{},
+			nodesByPackage:   map[string][]graphNode{},
+			nodesByPath:      map[string][]graphNode{},
+			edgesBySrc:       map[string][]graphEdge{},
+			edgesByDst:       map[string][]graphEdge{},
+			edgesByKind:      map[graph.EdgeKind][]graphEdge{},
+		}
+		const src = "example.com/src"
+		srcPkg := graphNode{ID: "src", Kind: graph.NodePackage, Name: "src", PackagePath: src, FilePath: "src/src.go"}
+		view.nodesByID[srcPkg.ID] = srcPkg
+		view.nodesByPackage[src] = append(view.nodesByPackage[src], srcPkg)
+		view.nodesByPath[srcPkg.FilePath] = append(view.nodesByPath[srcPkg.FilePath], srcPkg)
+		for i := range 100 {
+			dstID := fmt.Sprintf("dst%d", i)
+			dst := graphNode{ID: dstID, Kind: graph.NodePackage, Name: dstID, PackagePath: "example.com/" + dstID}
+			view.nodesByID[dstID] = dst
+			e := graphEdge{Kind: graph.EdgeImports, SrcID: srcPkg.ID, DstID: dstID}
+			view.edgesByKind[graph.EdgeImports] = append(view.edgesByKind[graph.EdgeImports], e)
+			view.edgesBySrc[srcPkg.ID] = append(view.edgesBySrc[srcPkg.ID], e)
+			view.edgesByDst[dstID] = append(view.edgesByDst[dstID], e)
+		}
+		out := &ContextOutput{}
+		enrichGraph(out, IntentPackageTopology, view, []SemHit{{Path: "src/src.go"}}, nil)
+		if got := len(out.Graph.Edges); got > maxGraphEdges {
+			t.Errorf("got %d edges, want ≤ %d", got, maxGraphEdges)
+		}
+		if len(out.Graph.Edges) == 0 {
+			t.Error("expected some edges from imports rollup")
+		}
+	})
 }
 
 // ─── inlineSuggestedReads ─────────────────────────────────────────────────
@@ -466,18 +575,26 @@ func TestBuildNextAction(t *testing.T) {
 		intent string
 		reads  []SuggestedRead
 		syms   []SymbolHit
+		topSem float32
 		want   string // substring match
 	}{
-		{IntentSymbolLookup, reads, syms, "Read x.go lines 10-30"},
-		{IntentEditingContext, reads, syms, "before editing"},
-		{IntentBehaviorSearch, reads, syms, "ground your answer"},
-		{IntentArchitecture, reads, syms, "structural overview"},
-		{IntentCallers, nil, syms, "Call-graph edges are not yet extracted"},
-		{IntentSymbolLookup, nil, nil, "Rephrase"},
+		{IntentSymbolLookup, reads, syms, 0.8, "Read x.go lines 10-30"},
+		{IntentEditingContext, reads, syms, 0.8, "before editing"},
+		{IntentBehaviorSearch, reads, syms, 0.8, "ground your answer"},
+		{IntentArchitecture, reads, syms, 0.8, "structural overview"},
+		{IntentCallers, nil, syms, 0.8, "Call-graph edges are not yet extracted"},
+		{IntentSymbolLookup, nil, nil, 0, "Rephrase"},
+		// Low-confidence: no symbols and top semantic score below the
+		// threshold should route to the "weak match" branch instead of
+		// confidently pointing at a noise hit.
+		{IntentBehaviorSearch, reads, nil, 0.30, "Top semantic match is weak"},
+		// Symbols present — confidence comes from the structural lane,
+		// so the low-score branch must NOT trigger.
+		{IntentBehaviorSearch, reads, syms, 0.30, "ground your answer"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.intent+" "+tc.want, func(t *testing.T) {
-			got := buildNextAction(tc.intent, tc.reads, tc.syms)
+			got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("got %q, want substring %q", got, tc.want)
 			}
@@ -505,6 +622,9 @@ func TestBuildAvoid(t *testing.T) {
 		{"behavior + symbols only", IntentBehaviorSearch, nil, syms, true, "Do not grep for the identifier"},
 		{"behavior + semantic only", IntentBehaviorSearch, sem, nil, true, "Do not read entire files"},
 		{"behavior + nothing", IntentBehaviorSearch, nil, nil, true, ""},
+		// behavior_search without graph now also gets the index nag —
+		// graph enrichment runs on every intent.
+		{"behavior without graph nudges to index", IntentBehaviorSearch, sem, syms, false, "Run `mcsearch graph index"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -557,9 +677,10 @@ func TestContextRouterBehaviorSearch(t *testing.T) {
 	if out.NextAction == "" {
 		t.Error("want non-empty next_action prose")
 	}
-	if out.Graph == nil {
-		t.Error("graph field should always be present (even if empty)")
-	}
+	// out.Graph is omitted when enrichGraph produced nothing — the
+	// JSON tag is `omitempty`. We don't assert anything about it here;
+	// the dedicated TestContextRouter*GraphPopulated tests cover the
+	// populated path.
 }
 
 func TestContextRouterSymbolLookup(t *testing.T) {

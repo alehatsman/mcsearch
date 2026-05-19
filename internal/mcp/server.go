@@ -502,6 +502,7 @@ type StatusInput struct{}
 
 type ProjectStatus struct {
 	ID          string `json:"id"`
+	Root        string `json:"root,omitempty"`
 	Chunks      int    `json:"chunks"`
 	Files       int    `json:"files"`
 	Dim         int    `json:"dim"`
@@ -623,9 +624,11 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 					return
 				}
 				stats, _ := st.Stats(ctx)
+				root, _ := st.ProjectRoot(ctx)
 				st.Close()
 				ps := ProjectStatus{
 					ID:     id,
+					Root:   root,
 					Chunks: stats.Chunks,
 					Files:  stats.Files,
 					Dim:    stats.Dim,

@@ -72,6 +72,11 @@ var (
 	reQualifiedSymbol = regexp.MustCompile(`\(\*?[A-Z][A-Za-z0-9_]*\)\.[A-Za-z_][A-Za-z0-9_]*|\b[A-Z][A-Za-z0-9_]*\.[A-Za-z_][A-Za-z0-9_]*\b`)
 	// Bare PascalCase identifier of length ≥ 3 (skip "I", "Go", noise).
 	reBarePascal = regexp.MustCompile(`\b[A-Z][A-Za-z0-9_]{2,}\b`)
+	// camelCase — lowercase start with an internal uppercase transition
+	// (e.g. `inlineContent`, `markDirty`). Required for Go unexported
+	// identifiers; the uppercase transition keeps plain English words
+	// out (no English word has a mid-word capital).
+	reCamel = regexp.MustCompile(`\b[a-z][a-z0-9]*[A-Z][A-Za-z0-9_]*\b`)
 	// snake_case_with_underscores — at least one underscore so we don't
 	// flag plain words.
 	reSnake = regexp.MustCompile(`\b[a-z][a-z0-9_]*_[a-z0-9_]+\b`)
@@ -282,9 +287,10 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 			time.Since(stats.LastIndex).Round(time.Hour), p.Root)
 	}
 
-	// Always emit the graph field (issue requires structural presence).
-	// enrichGraph may replace it with a populated view per intent.
-	out.Graph = &GraphResult{Nodes: []GraphNode{}, Edges: []GraphEdge{}}
+	// enrichGraph sets out.Graph only when it has something to emit.
+	// An absent `graph` key signals "no graph indexed, or this intent
+	// surfaced no structural context" — saves bytes over shipping
+	// `{nodes:[], edges:[]}` on every response.
 
 	// Load the graph view once per request. Nil view = no graph
 	// indexed; intents that need it will note this in `avoid`.
@@ -327,7 +333,11 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		inlineContent(p.Root, intent, out.SuggestedReads, out.SemanticHits)
 	}
 	enrich(ctx, p.Root, intent, &out)
-	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols)
+	var topSem float32
+	if len(out.SemanticHits) > 0 {
+		topSem = out.SemanticHits[0].Score
+	}
+	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols, topSem)
 	out.Avoid = buildAvoid(intent, out.SemanticHits, out.Symbols, graphView != nil, len(out.References) > 0)
 	out.Status = "ok"
 	if embedFailed && out.Hint == "" {
@@ -427,6 +437,12 @@ func extractIdentifiers(q string) []string {
 	}
 
 	for _, idx := range reBarePascal.FindAllStringIndex(q, -1) {
+		if inside(idx[0], idx[1]) {
+			continue
+		}
+		add(q[idx[0]:idx[1]])
+	}
+	for _, idx := range reCamel.FindAllStringIndex(q, -1) {
 		if inside(idx[0], idx[1]) {
 			continue
 		}
@@ -548,12 +564,23 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 	}
 	out := make([]SemHit, 0, len(hits))
 	for _, h := range hits {
+		// In hybrid mode, Hit.Score is raw cosine — zero for hits
+		// that came in via BM25 only (the FTS leg of the RRF fusion).
+		// Surfacing 0 here misleads the agent into thinking it's
+		// looking at irrelevant content. Fall back to the RRF
+		// score so every returned hit has a positive ranking signal.
+		// Scales differ (cosine ~0-1, RRF ~0-0.03) but ordering
+		// within the list is what matters.
+		score := h.Score
+		if score == 0 && h.RRFScore > 0 {
+			score = h.RRFScore
+		}
 		out = append(out, SemHit{
 			Path:      h.Path,
 			StartLine: h.StartLine,
 			EndLine:   h.EndLine,
-			Score:     h.Score,
 			Kind:      h.Kind,
+			Score:     score,
 			Reason:    h.Name,
 		})
 	}
@@ -598,9 +625,37 @@ func isBuildOrConfigPath(p string) bool {
 	return false
 }
 
-// isNonImplPath unifies the doc + build/config demotion checks.
+// isTestPath returns true for test files across the languages we
+// index. Demoted in pickSuggestedReads Pass 2 so a bare-noun
+// symbol_lookup query (e.g. "Executor") doesn't surface
+// `executor_test.go` above the type definition. Sibling-test
+// annotations still link the matching test from each suggested
+// implementation read — demotion only affects ranking, not
+// availability.
+func isTestPath(p string) bool {
+	base := filepath.Base(p)
+	switch {
+	case strings.HasSuffix(base, "_test.go"),
+		strings.HasSuffix(base, ".test.ts"),
+		strings.HasSuffix(base, ".test.tsx"),
+		strings.HasSuffix(base, ".test.js"),
+		strings.HasSuffix(base, ".test.jsx"),
+		strings.HasSuffix(base, ".spec.ts"),
+		strings.HasSuffix(base, ".spec.tsx"),
+		strings.HasSuffix(base, ".spec.js"),
+		strings.HasSuffix(base, ".spec.jsx"),
+		strings.HasSuffix(base, "_test.py"),
+		strings.HasPrefix(base, "test_") && strings.HasSuffix(base, ".py"),
+		strings.HasSuffix(base, "_spec.rb"),
+		strings.HasSuffix(base, "_test.rs"):
+		return true
+	}
+	return false
+}
+
+// isNonImplPath unifies the doc + build/config + test demotion checks.
 func isNonImplPath(p string) bool {
-	return isDocPath(p) || isBuildOrConfigPath(p)
+	return isDocPath(p) || isBuildOrConfigPath(p) || isTestPath(p)
 }
 
 // ─── suggested_reads ──────────────────────────────────────────────────────
@@ -701,13 +756,26 @@ func pickSuggestedReads(intent string, semHits []SemHit, symbols []SymbolHit, sy
 
 // ─── next_action / avoid (prose) ──────────────────────────────────────────
 
+// lowConfidenceScore is the cosine-fused top-score threshold below
+// which we treat semantic results as noise rather than signal. Picked
+// empirically: real matches on this index cluster ≥0.5; nonsense
+// queries ("frobnicate the quux gizmo") tend to score ≤0.4 on whatever
+// chunk happens to share a token.
+const lowConfidenceScore = 0.45
+
 // buildNextAction returns an imperative sentence the agent can execute
 // directly. The issue is explicit that prose outperforms structured
 // args for agent compliance. Always concrete — names paths and line
-// ranges — never "do more research."
-func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit) string {
+// ranges — never "do more research." When there are no symbols and the
+// top semantic score is below lowConfidenceScore, we route to the
+// "rephrase or grep" branch instead of confidently pointing at a
+// weak hit.
+func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, topSemScore float32) string {
 	if len(reads) == 0 && len(symbols) == 0 {
 		return "Rephrase the question with concrete keywords or fall back to grep."
+	}
+	if len(symbols) == 0 && topSemScore > 0 && topSemScore < lowConfidenceScore {
+		return "Top semantic match is weak — rephrase with concrete keywords or fall back to grep."
 	}
 	switch intent {
 	case IntentSymbolLookup:
@@ -761,8 +829,17 @@ func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndex
 		}
 		return "Do not trust the symbols list as exhaustive — `calls` edges are not yet extracted, so caller/callee coverage is best-effort. Verify with grep on the symbol name."
 	}
-	if !graphIndexed && graphSupportsIntent(intent) {
+	if !graphIndexed {
 		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch graph index <project>` for richer structural context."
+	}
+	// Exploration intents — the user is forming a mental model, so
+	// the failure mode to discourage is breadth (enumerating files,
+	// re-deriving the topology) rather than depth (reading whole files).
+	switch intent {
+	case IntentArchitecture:
+		return "Do not enumerate the file tree — the graph nodes and suggested reads ARE the structural overview. Start there before broader exploration."
+	case IntentPackageTopology:
+		return "Do not infer imports by grepping — the graph edges encode them. Use the topology, don't rebuild it."
 	}
 	if len(symbols) > 0 && len(semHits) > 0 {
 		return "Do not grep for the identifier; it is already located. Read the suggested ranges instead of opening whole files."

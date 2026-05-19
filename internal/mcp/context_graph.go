@@ -141,6 +141,18 @@ func loadGraphView(ctx context.Context, st *store.Store) (*graphView, error) {
 // `<module>::<pkg>::<kind>::<qname>` for every reference. The full
 // IDs remain available via the in-memory view for any future query
 // that takes a graph ID as input.
+// maxGraphNodes / maxGraphEdges bound the graph lane so a big package
+// (e.g. mooncake's cmd/* with dozens of entries) can't blow the
+// response budget by itself. Hit empirically: 30/50 keeps the lane
+// useful for orientation without dominating the payload, and survives
+// `no_inline: true` so callers can rely on bundle size being roughly
+// proportional to k. Truncation is silent — once full, further nodes
+// and edges are dropped.
+const (
+	maxGraphNodes = 30
+	maxGraphEdges = 50
+)
+
 func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []SemHit, symbols []SymbolHit) bool {
 	if view == nil {
 		return false
@@ -149,22 +161,31 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 	seenNode := map[string]bool{}
 	seenEdge := map[string]bool{}
 	addNode := func(n graphNode) {
-		if seenNode[n.ID] {
+		// Import nodes are emitted per-file in layer 1, so the same
+		// dependency (e.g. `fmt`) shows up as N distinct node IDs.
+		// Dedup on QualifiedName for imports so the agent sees one
+		// entry per dependency, not one per importing file.
+		key := n.ID
+		if n.Kind == graph.NodeImport && n.QualifiedName != "" {
+			key = "import:" + n.QualifiedName
+		}
+		if seenNode[key] || len(gr.Nodes) >= maxGraphNodes {
 			return
 		}
-		seenNode[n.ID] = true
+		seenNode[key] = true
+		// For imports the compactID already encodes the import path, so
+		// QualifiedName is redundant — drop it on the wire.
+		qname := n.QualifiedName
+		if n.Kind == graph.NodeImport {
+			qname = ""
+		}
 		gr.Nodes = append(gr.Nodes, GraphNode{
 			ID:            compactID(n),
-			QualifiedName: n.QualifiedName,
+			QualifiedName: qname,
 			Kind:          string(n.Kind),
 		})
 	}
 	addEdge := func(e graphEdge) {
-		key := e.SrcID + "|" + string(e.Kind) + "|" + e.DstID
-		if seenEdge[key] {
-			return
-		}
-		seenEdge[key] = true
 		from, to := e.SrcID, e.DstID
 		if n, ok := view.nodesByID[e.SrcID]; ok {
 			from = compactID(n)
@@ -172,6 +193,15 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 		if n, ok := view.nodesByID[e.DstID]; ok {
 			to = compactID(n)
 		}
+		// Dedup on the compact (from,kind,to) triple — the raw IDs
+		// can differ for per-file import nodes that collapse to the
+		// same dependency on the wire (see addNode), so a raw-ID
+		// dedup leaks duplicates like `src -> fmt` × N.
+		key := from + "|" + string(e.Kind) + "|" + to
+		if seenEdge[key] || len(gr.Edges) >= maxGraphEdges {
+			return
+		}
+		seenEdge[key] = true
 		gr.Edges = append(gr.Edges, GraphEdge{
 			From: from,
 			To:   to,
@@ -179,11 +209,12 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 		})
 	}
 
-	switch intent {
-	case IntentSymbolLookup, IntentEditingContext:
-		// For each matched symbol, surface its container (parent type
-		// for methods/fields) and its siblings (other methods/fields
-		// on the same type, embedded types).
+	// graphSymbolNeighborhood and graphPackageRollup are the two
+	// reusable expansions; they were inlined in the symbol_lookup /
+	// architecture cases and are now used by the default branch too
+	// so every intent yields populated nodes/edges when a graph is
+	// indexed.
+	symbolNeighborhood := func() {
 		for _, sym := range symbols {
 			lookup := view.nodesByName[sym.QualifiedName]
 			if len(lookup) == 0 {
@@ -193,7 +224,6 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 			}
 			for _, n := range lookup {
 				addNode(n)
-				// Siblings via has_method / has_field on the same parent.
 				for _, parentEdge := range view.edgesByDst[n.ID] {
 					if parentEdge.Kind != graph.EdgeHasMethod && parentEdge.Kind != graph.EdgeHasField {
 						continue
@@ -216,10 +246,8 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 				}
 			}
 		}
-
-	case IntentArchitecture:
-		// Package + top-level type/function rollup for packages
-		// surfaced by the semantic lane.
+	}
+	packageRollup := func() {
 		pkgs := packagesFromPaths(view, semHits)
 		for pkg := range pkgs {
 			for _, n := range view.nodesByPackage[pkg] {
@@ -229,6 +257,19 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 				}
 			}
 		}
+	}
+
+	switch intent {
+	case IntentSymbolLookup, IntentEditingContext:
+		// For each matched symbol, surface its container (parent type
+		// for methods/fields) and its siblings (other methods/fields
+		// on the same type, embedded types).
+		symbolNeighborhood()
+
+	case IntentArchitecture:
+		// Package + top-level type/function rollup for packages
+		// surfaced by the semantic lane.
+		packageRollup()
 
 	case IntentPackageTopology:
 		// Imports between packages in the semantic neighborhood.
@@ -256,6 +297,14 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 			}
 			addEdge(e)
 		}
+
+	default:
+		// behavior_search / callers / callees / unrecognized — fall
+		// back to the union of symbol-neighborhood + package rollup so
+		// the caller always sees structural context when a graph
+		// exists. Cheap: the view is already in memory.
+		symbolNeighborhood()
+		packageRollup()
 	}
 
 	if len(gr.Nodes) == 0 && len(gr.Edges) == 0 {
@@ -279,17 +328,6 @@ func packagesFromPaths(view *graphView, semHits []SemHit) map[string]struct{} {
 		}
 	}
 	return pkgs
-}
-
-// graphSupportsIntent returns true when the graph layer can
-// meaningfully contribute to this intent. Used by buildAvoid to
-// suppress the "graph deferred" warning once the lane is wired.
-func graphSupportsIntent(intent string) bool {
-	switch intent {
-	case IntentSymbolLookup, IntentEditingContext, IntentArchitecture, IntentPackageTopology:
-		return true
-	}
-	return false
 }
 
 // compactID condenses internal/graph.NodeID's
