@@ -356,12 +356,29 @@ func buildNestedChunk(relPath string, src []byte, n *sitter.Node, parentName str
 // identifier in every tree-sitter grammar we target (Go functions, Python
 // defs, JS/TS classes, Rust items, Java methods, etc.). Returns "" when the
 // node has no such field (e.g. impl_item, lexical_declaration).
+//
+// Go's `type_declaration` is a wrapper: `type X struct{}` parses as
+// type_declaration → type_spec → name:identifier. The wrapper itself
+// has no name field. Walk to the first type_spec child so single-spec
+// declarations (the overwhelming majority) name their type correctly.
+// Multi-spec declarations (`type (X struct{}; Y int)`) still get the
+// name of the first spec — better than empty.
 func nodeIdentifier(n *sitter.Node, src []byte) string {
-	nameNode := n.ChildByFieldName("name")
-	if nameNode == nil {
-		return ""
+	if nameNode := n.ChildByFieldName("name"); nameNode != nil {
+		return string(src[nameNode.StartByte():nameNode.EndByte()])
 	}
-	return string(src[nameNode.StartByte():nameNode.EndByte()])
+	if n.Type() == "type_declaration" {
+		for i := 0; i < int(n.NamedChildCount()); i++ {
+			c := n.NamedChild(i)
+			if c.Type() != "type_spec" && c.Type() != "type_alias" {
+				continue
+			}
+			if nameNode := c.ChildByFieldName("name"); nameNode != nil {
+				return string(src[nameNode.StartByte():nameNode.EndByte()])
+			}
+		}
+	}
+	return ""
 }
 
 // orphanWindows emits window chunks over the parts of src that aren't

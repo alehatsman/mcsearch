@@ -185,6 +185,51 @@ func TestChunkNameExtraction(t *testing.T) {
 	}
 }
 
+func TestChunkGoTypeNameExtraction(t *testing.T) {
+	// Go's `type_declaration` wraps one or more `type_spec` nodes;
+	// the wrapper itself has no `name` field. Confirm we descend to
+	// type_spec so single-spec types name their chunk correctly.
+	src := []byte(`package x
+
+// Hit is a search result.
+type Hit struct {
+	Path string
+}
+
+type Options struct {
+	Verbose bool
+}
+
+type AliasedType = int
+
+// Parenthesized block — only the first spec gets named (acceptable
+// degradation, beats empty).
+type (
+	A struct{}
+	B int
+)
+`)
+	chunks, err := Chunks(context.Background(), "x.go", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]bool{}
+	for _, c := range chunks {
+		if c.Kind == "type_declaration" && c.Name != "" {
+			names[c.Name] = true
+		}
+	}
+	for _, want := range []string{"Hit", "Options", "AliasedType"} {
+		if !names[want] {
+			t.Errorf("expected type-declaration chunk named %q; got names: %v", want, names)
+		}
+	}
+	// Multi-spec block should still get a name (the first spec).
+	if !names["A"] {
+		t.Errorf("multi-spec type_declaration should yield the first spec name (A); got names: %v", names)
+	}
+}
+
 func TestEmbedTextStampsName(t *testing.T) {
 	c := Chunk{Path: "main.go", Kind: "function_declaration", Name: "cmdIndex", Content: "func cmdIndex() {}"}
 	got := c.EmbedText()
