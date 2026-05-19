@@ -204,6 +204,60 @@ func TestReadSignatureAndDocAdjacentFunctionDisambiguation(t *testing.T) {
 	}
 }
 
+func TestReadSignatureAndDocFieldShape(t *testing.T) {
+	// Struct fields and Python attrs don't start with a declaration
+	// keyword — they start with the field name itself. When wantName
+	// is supplied AND the line's leading token equals wantName, accept
+	// the line as the signature without requiring `func`/`type`/etc.
+	root := t.TempDir()
+	src := strings.Join([]string{
+		"package x",
+		"",
+		"// Options controls one index run.",
+		"type Options struct {",
+		"\t// MaxFileSize caps file size in bytes.",
+		"\tMaxFileSize int64",
+		"\tVerbose     bool",
+		"}",
+		"",
+	}, "\n") + "\n"
+	path := filepath.Join(root, "opts.go")
+	writeFile(t, path, src)
+
+	// Field MaxFileSize lives at line 6 (1-indexed). With wantName
+	// set, the scan must accept the field line as the signature and
+	// pull the "// MaxFileSize caps file size in bytes." doc comment
+	// from the line above.
+	sig, doc := readSignatureAndDoc(path, 6, "MaxFileSize")
+	if !strings.HasPrefix(sig, "MaxFileSize") {
+		t.Errorf("sig=%q, want it to start with MaxFileSize", sig)
+	}
+	if !strings.Contains(doc, "MaxFileSize caps file size") {
+		t.Errorf("doc=%q, want the field's leading comment", doc)
+	}
+
+	// Without wantName, the field line is not declaration-shaped and
+	// must NOT be accepted (legacy staleness-guard semantics).
+	sig2, _ := readSignatureAndDoc(path, 6, "")
+	if sig2 != "" {
+		t.Errorf("without wantName, field line should be rejected; got sig=%q", sig2)
+	}
+
+	// startsWithName boundary check: token must end at a non-ident byte.
+	if !startsWithName("MaxFileSize int64", "MaxFileSize") {
+		t.Error("startsWithName should match `MaxFileSize int64`")
+	}
+	if !startsWithName("\tMaxFileSize int64", "MaxFileSize") {
+		t.Error("startsWithName should ignore leading tabs")
+	}
+	if startsWithName("MaxFileSizeOther int64", "MaxFileSize") {
+		t.Error("startsWithName must respect identifier boundary")
+	}
+	if startsWithName("Other MaxFileSize int64", "MaxFileSize") {
+		t.Error("startsWithName must require leading position")
+	}
+}
+
 func TestReadSignatureAndDocStalenessGuard(t *testing.T) {
 	// Simulate a stale index: the recorded StartLine points at a
 	// line that no longer holds a declaration. Both fields must come

@@ -174,7 +174,12 @@ func readSignatureAndDoc(path string, startLine int, wantName string) (string, s
 			}
 		default:
 			inCommentRun = false
-			if !looksLikeDeclaration(t) {
+			// Accept either: a declaration-keyword line (func/type/...)
+			// OR a line whose first token IS wantName. The second case
+			// catches Go struct fields ("MaxFileSize int64 //...") and
+			// Python attrs ("name: str = ..."), which don't start with a
+			// declaration keyword but ARE the field's signature line.
+			if !looksLikeDeclaration(t) && !startsWithName(t, wantName) {
 				continue
 			}
 			if wantName != "" && !declarationMentions(t, wantName) {
@@ -244,6 +249,27 @@ func declarationMentions(decl, name string) bool {
 		i = end
 	}
 	return false
+}
+
+// startsWithName reports whether the first whitespace-delimited token
+// of line equals name. Used to accept field-shape declaration lines
+// (Go fields, Python attrs) that don't begin with a recognized
+// declaration keyword but DO start with the symbol identifier itself.
+func startsWithName(line, name string) bool {
+	if name == "" {
+		return false
+	}
+	t := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(t, name) {
+		return false
+	}
+	if len(t) == len(name) {
+		return true
+	}
+	// Boundary: next char must not be an identifier character (so
+	// "MaxFileSize" matches " MaxFileSize int64" but NOT
+	// " MaxFileSizeOther int64").
+	return !isIdentChar(t[len(name)])
 }
 
 func isIdentChar(b byte) bool {
