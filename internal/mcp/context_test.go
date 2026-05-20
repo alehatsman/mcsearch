@@ -332,7 +332,7 @@ func TestInlineSuggestedReadsBasic(t *testing.T) {
 		"line 1\nline 2\nline 3\nline 4\nline 5\n")
 
 	reads := []SuggestedRead{{Path: "f.go", StartLine: 2, EndLine: 4, Reason: "x"}}
-	inlineContent(root, IntentBehaviorSearch, reads, nil)
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
 
 	want := "line 2\nline 3\nline 4\n"
 	if reads[0].Content != want {
@@ -354,7 +354,7 @@ func TestInlineSuggestedReadsPerReadLineCap(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.go"), b.String())
 
 	reads := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineContent(root, IntentBehaviorSearch, reads, nil)
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
 
 	if !reads[0].Truncated {
 		t.Error("want truncated=true when range exceeds per-read cap")
@@ -371,8 +371,8 @@ func TestInlineSuggestedReadsPerReadLineCap(t *testing.T) {
 }
 
 func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
-	// Three reads each at the per-read byte cap should exhaust the
-	// total budget before all are filled.
+	// Six reads each at the per-read byte cap (4 KB) should exhaust the
+	// 20 KB targeted-intent total budget before all are filled.
 	root := t.TempDir()
 	// Write a file with ~30 long lines so any 60-line slice hits the
 	// per-read byte cap (4 KB) first.
@@ -381,7 +381,7 @@ func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
 		b.WriteString(strings.Repeat("x", 500))
 		b.WriteByte('\n')
 	}
-	for _, n := range []string{"a.go", "b.go", "c.go", "d.go"} {
+	for _, n := range []string{"a.go", "b.go", "c.go", "d.go", "e.go", "f.go"} {
 		writeFile(t, filepath.Join(root, n), b.String())
 	}
 	reads := []SuggestedRead{
@@ -389,15 +389,17 @@ func TestInlineSuggestedReadsTotalByteBudget(t *testing.T) {
 		{Path: "b.go", StartLine: 1, EndLine: 30},
 		{Path: "c.go", StartLine: 1, EndLine: 30},
 		{Path: "d.go", StartLine: 1, EndLine: 30},
+		{Path: "e.go", StartLine: 1, EndLine: 30},
+		{Path: "f.go", StartLine: 1, EndLine: 30},
 	}
-	inlineContent(root, IntentBehaviorSearch, reads, nil)
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
 
 	total := 0
 	for _, r := range reads {
 		total += len(r.Content)
 	}
-	if total > 12*1024 {
-		t.Errorf("total inlined bytes %d > 12 KB cap", total)
+	if total > 20*1024 {
+		t.Errorf("total inlined bytes %d > 20 KB cap", total)
 	}
 	// Last read should be empty — budget exhausted.
 	if reads[len(reads)-1].Content != "" {
@@ -415,7 +417,7 @@ func TestInlineContentSemanticHitsAlsoFilled(t *testing.T) {
 		{Path: "a.go", StartLine: 1, EndLine: 3},
 		{Path: "b.go", StartLine: 1, EndLine: 3},
 	}
-	inlineContent(root, IntentBehaviorSearch, reads, sem)
+	inlineContent(root, IntentBehaviorSearch, reads, nil, sem)
 
 	if sem[0].Content == "" {
 		t.Error("semantic_hits[0] should be filled (cache-hit from suggested_reads)")
@@ -441,7 +443,7 @@ func TestInlineContentSharedBudgetDoesNotDoubleCharge(t *testing.T) {
 		{Path: "shared.go", StartLine: 1, EndLine: 3},
 		{Path: "other.go", StartLine: 1, EndLine: 3},
 	}
-	inlineContent(root, IntentBehaviorSearch, reads, sem)
+	inlineContent(root, IntentBehaviorSearch, reads, nil, sem)
 
 	if reads[0].Content == "" || sem[0].Content == "" || sem[1].Content == "" {
 		t.Errorf("expected all three to be filled; got reads=%q sem0=%q sem1=%q",
@@ -468,7 +470,7 @@ func TestInlineContentScoreFloorOnLowSignalQueries(t *testing.T) {
 		{Path: "weaker.go", StartLine: 1, EndLine: 3, Score: 0.38}, // < noiseFloorScore → suppressed
 		// 0.41 is above the floor — would also be inlined.
 	}
-	inlineContent(root, IntentBehaviorSearch, nil, sem)
+	inlineContent(root, IntentBehaviorSearch, nil, nil, sem)
 	if sem[0].Content == "" {
 		t.Error("top hit (score 0.42) should still inline — only sub-floor hits are suppressed")
 	}
@@ -482,7 +484,7 @@ func TestInlineContentScoreFloorOnLowSignalQueries(t *testing.T) {
 		{Path: "strong.go", StartLine: 1, EndLine: 3, Score: 0.80},
 		{Path: "weaker.go", StartLine: 1, EndLine: 3, Score: 0.38},
 	}
-	inlineContent(root, IntentBehaviorSearch, nil, sem2)
+	inlineContent(root, IntentBehaviorSearch, nil, nil, sem2)
 	if sem2[1].Content == "" {
 		t.Error("low-score companion to a strong top should still inline (floor only fires on no-signal queries)")
 	}
@@ -491,9 +493,110 @@ func TestInlineContentScoreFloorOnLowSignalQueries(t *testing.T) {
 func TestInlineSuggestedReadsMissingFileGraceful(t *testing.T) {
 	root := t.TempDir()
 	reads := []SuggestedRead{{Path: "does-not-exist.go", StartLine: 1, EndLine: 5}}
-	inlineContent(root, IntentBehaviorSearch, reads, nil) // must not panic
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil) // must not panic
 	if reads[0].Content != "" {
 		t.Errorf("missing file should leave content empty, got %q", reads[0].Content)
+	}
+}
+
+func TestInlineContentFillsSymbolBodyForSymbolLookup(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.go"),
+		"package main\n"+
+			"\n"+
+			"func Alpha() string {\n"+
+			"\treturn \"alpha\"\n"+
+			"}\n")
+	syms := []SymbolHit{
+		{QualifiedName: "Alpha", Path: "a.go", StartLine: 3, EndLine: 5},
+	}
+	inlineContent(root, IntentSymbolLookup, nil, syms, nil)
+	if syms[0].Body == "" {
+		t.Fatal("symbol body should be inlined for symbol_lookup intent")
+	}
+	if !strings.Contains(syms[0].Body, "return \"alpha\"") {
+		t.Errorf("symbol body should include the function body; got %q", syms[0].Body)
+	}
+}
+
+func TestInlineContentFillsImportsForGoFile(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "deep/foo.go"),
+		"package deep\n"+
+			"\n"+
+			"import (\n"+
+			"\t\"context\"\n"+
+			"\t\"fmt\"\n"+
+			"\t\"github.com/x/y\"\n"+
+			")\n"+
+			"\n"+
+			"func A() {}\n"+
+			"func B() {}\n"+
+			"func C() {}\n"+
+			"func D() {}\n"+
+			"func E() {}\n"+
+			"func F() {}\n"+
+			"func G() {}\n"+
+			"func H() {}\n"+
+			"func I() {}\n"+
+			"func J() {}\n"+
+			"func K() {}\n"+
+			"func L() {}\n"+
+			"func M() {}\n"+
+			"func N() {}\n")
+	reads := []SuggestedRead{
+		// Reads a function far from the import block (StartLine > 5).
+		{Path: "deep/foo.go", StartLine: 20, EndLine: 22, Reason: "test"},
+	}
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
+	if reads[0].Imports == "" {
+		t.Fatal("Go imports should be inlined for a read starting away from the top")
+	}
+	for _, want := range []string{"import (", "\"context\"", "\"fmt\"", "\"github.com/x/y\"", ")"} {
+		if !strings.Contains(reads[0].Imports, want) {
+			t.Errorf("imports missing %q; got:\n%s", want, reads[0].Imports)
+		}
+	}
+}
+
+func TestInlineContentSkipsImportsWhenReadCoversTop(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "foo.go"),
+		"package foo\n\nimport \"context\"\n\nfunc A() {}\n")
+	reads := []SuggestedRead{
+		// StartLine=1 → the read already includes the import line.
+		{Path: "foo.go", StartLine: 1, EndLine: 5, Reason: "test"},
+	}
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
+	if reads[0].Imports != "" {
+		t.Errorf("Imports should be omitted when the read already covers the top; got %q", reads[0].Imports)
+	}
+}
+
+func TestInlineContentSkipsImportsForUnknownLanguage(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "foo.txt"), "plain text\nno imports here\n")
+	reads := []SuggestedRead{
+		{Path: "foo.txt", StartLine: 20, EndLine: 22, Reason: "test"},
+	}
+	inlineContent(root, IntentBehaviorSearch, reads, nil, nil)
+	if reads[0].Imports != "" {
+		t.Errorf("unknown language should produce empty Imports; got %q", reads[0].Imports)
+	}
+}
+
+func TestInlineContentSkipsSymbolBodyForOtherIntents(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "a.go"),
+		"package main\n\nfunc Alpha() {}\n")
+	syms := []SymbolHit{
+		{QualifiedName: "Alpha", Path: "a.go", StartLine: 3, EndLine: 3},
+	}
+	// behavior_search should NOT fill bodies — signature+doc are
+	// considered sufficient and we save budget for semantic_hits.
+	inlineContent(root, IntentBehaviorSearch, nil, syms, nil)
+	if syms[0].Body != "" {
+		t.Errorf("non-symbol_lookup intent should leave Body empty; got %q", syms[0].Body)
 	}
 }
 
@@ -680,8 +783,8 @@ func TestInlineCapsFor(t *testing.T) {
 	}
 	for _, intent := range targeted {
 		c := inlineCapsFor(intent)
-		if c.totalBytesCap > 16*1024 {
-			t.Errorf("%s totalBytesCap=%d, want ≤16 KB for targeted intents", intent, c.totalBytesCap)
+		if c.totalBytesCap > 24*1024 {
+			t.Errorf("%s totalBytesCap=%d, want ≤24 KB for targeted intents", intent, c.totalBytesCap)
 		}
 	}
 }
@@ -697,11 +800,11 @@ func TestInlineSuggestedReadsExplorationDenser(t *testing.T) {
 	writeFile(t, filepath.Join(root, "big.go"), b.String())
 
 	targeted := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineContent(root, IntentBehaviorSearch, targeted, nil)
+	inlineContent(root, IntentBehaviorSearch, targeted, nil, nil)
 	targetedLines := strings.Count(targeted[0].Content, "\n")
 
 	exploration := []SuggestedRead{{Path: "big.go", StartLine: 1, EndLine: 200}}
-	inlineContent(root, IntentArchitecture, exploration, nil)
+	inlineContent(root, IntentArchitecture, exploration, nil, nil)
 	explorationLines := strings.Count(exploration[0].Content, "\n")
 
 	if !(explorationLines > targetedLines) {

@@ -708,7 +708,7 @@ func (s *Server) RunStdio(ctx context.Context) error {
 			"and editing_context add `build_tags` and `package`. `references` is populated for callers/callees with a " +
 			"ripgrep-backed list of usage sites (stand-in until the `calls` graph layer lands). Inline content " +
 			"shares ONE per-intent byte pool across both lanes: targeted intents budget ~60 lines / 4 KB per range " +
-			"and ~12 KB total; exploration intents (architecture, package_topology) widen to ~120 lines / 8 KB per " +
+			"and ~20 KB total; exploration intents (architecture, package_topology) widen to ~120 lines / 8 KB per " +
 			"range and ~40 KB total. Suggested_reads (~2 targeted / ~5 exploration) are filled first as the curated " +
 			"cut; semantic_hits use the remaining budget. A range that appears in both lanes is read once and " +
 			"charged once. Oversize ranges arrive with `truncated: true` and the original line range, so the caller " +

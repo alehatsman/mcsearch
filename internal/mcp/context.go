@@ -100,7 +100,7 @@ type ContextInput struct {
 	Question string `json:"question" jsonschema:"free-text question about the codebase (e.g. 'where is filesystem event debouncing handled?', 'how does indexing work?', 'callers of (*Store).Search')"`
 	Intent   string `json:"intent,omitempty" jsonschema:"force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context (default: auto)"`
 	K        int    `json:"k,omitempty" jsonschema:"max hits per lane (default 8, max 30)"`
-	NoInline bool   `json:"no_inline,omitempty" jsonschema:"skip inlining file contents into suggested_reads and semantic_hits. Default off: both lanes carry their line-range content from one shared per-intent byte pool (per-range cap ~60 lines / 4 KB; total cap ~12 KB targeted / ~40 KB exploration; oversize ranges are clipped with truncated=true). Set true if you already have the files open."`
+	NoInline bool   `json:"no_inline,omitempty" jsonschema:"skip inlining file contents into suggested_reads and semantic_hits. Default off: both lanes carry their line-range content from one shared per-intent byte pool (per-range cap ~60 lines / 4 KB; total cap ~20 KB targeted / ~40 KB exploration; oversize ranges are clipped with truncated=true). Set true if you already have the files open."`
 }
 
 // SemHit is a semantic-search result reduced to the wire shape the
@@ -134,6 +134,14 @@ type SymbolHit struct {
 	// Doc is the contiguous comment block immediately above StartLine
 	// (Go `//` lines, Python `#` lines). Capped at ~10 lines / 600 B.
 	Doc string `json:"doc,omitempty"`
+	// Body is the symbol's full source between StartLine and EndLine,
+	// populated only for symbol_lookup intent (the case where the caller
+	// almost always wants to read the body after seeing the signature).
+	// Shares the per-intent inline byte budget with suggested_reads /
+	// semantic_hits via inlineContent; oversized symbols are clipped at
+	// the per-range cap with Truncated=true.
+	Body      string `json:"body,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // RefHit is a lexical reference produced by the references lane
@@ -213,6 +221,14 @@ type SuggestedRead struct {
 	// content before reaching EndLine. The caller can still issue a
 	// regular Read for the rest if needed.
 	Truncated bool `json:"truncated,omitempty"`
+	// Imports is the file's import block (Go `import (...)` / single-line
+	// imports, Python `import` / `from import`, JS/TS `import` /
+	// `require(...)`). Inlined per-file once across the bundle so the
+	// caller sees what the file depends on without a separate Read of
+	// the first 30 lines. Empty when the language isn't supported, the
+	// file has no imports, the StartLine range already covers the
+	// imports, or the shared byte budget is exhausted.
+	Imports string `json:"imports,omitempty"`
 }
 
 type ContextOutput struct {
@@ -359,7 +375,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	enrichGraph(&out, intent, graphView, out.SemanticHits, out.Symbols)
 	out.SuggestedReads = pickSuggestedReads(intent, out.SemanticHits, out.Symbols, symbolPaths)
 	if !in.NoInline {
-		inlineContent(p.Root, intent, out.SuggestedReads, out.SemanticHits)
+		inlineContent(p.Root, intent, out.SuggestedReads, out.Symbols, out.SemanticHits)
 	}
 	enrich(ctx, p.Root, intent, k, &out)
 	topSem := maxSemanticScore(out.SemanticHits)
@@ -1105,24 +1121,31 @@ func inlineCapsFor(intent string) inlineCaps {
 	case IntentArchitecture, IntentPackageTopology:
 		return inlineCaps{maxLinesPerRead: 120, maxBytesPerRead: 8 * 1024, totalBytesCap: 40 * 1024}
 	default:
-		return inlineCaps{maxLinesPerRead: 60, maxBytesPerRead: 4 * 1024, totalBytesCap: 12 * 1024}
+		// Targeted intents (behavior_search / symbol_lookup / callers /
+		// callees / editing_context). Bumped from 12 KB → 20 KB on
+		// 2026-05-20: the smaller budget often forced semantic_hits to
+		// truncate, pushing the agent toward follow-up Reads. 20 KB
+		// covers ~10 chunk-sized hits with their content intact while
+		// still being a tight bundle.
+		return inlineCaps{maxLinesPerRead: 60, maxBytesPerRead: 4 * 1024, totalBytesCap: 20 * 1024}
 	}
 }
 
-// inlineContent fills the Content/Truncated fields on suggested_reads
-// and semantic_hits from a single per-intent byte budget, so the
-// caller gets a usable bundle without follow-up Reads. Suggested_reads
-// are filled first (they are the curated cut); remaining budget then
-// covers semantic_hits in order. A small read cache means a range
-// that appears in both lanes is loaded once and charged once against
-// the budget.
+// inlineContent fills the Content/Truncated fields on suggested_reads,
+// the Content fields on semantic_hits, and (for symbol_lookup intent)
+// the Body field on symbols — all from a single per-intent byte
+// budget so the caller gets a usable bundle without follow-up Reads.
+// Fill order: suggested_reads → symbols → semantic_hits. The first
+// two are the curated cut; semantic_hits use the remaining budget.
+// A small read cache means a range that appears in multiple lanes
+// is loaded once and charged once.
 //
 // Bounds are enforced at two levels: per-read (lines + bytes) and
-// total bytes across both arrays. Caps scale with intent (see
+// total bytes across all three arrays. Caps scale with intent (see
 // inlineCapsFor). Failures (missing file, unreadable, scanner error)
-// leave Content empty and the caller still has Path/StartLine/EndLine
-// to fall back on a manual Read.
-func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemHit) {
+// leave Content/Body empty and the caller still has Path/StartLine
+// /EndLine to fall back on a manual Read.
+func inlineContent(projectRoot, intent string, reads []SuggestedRead, syms []SymbolHit, sem []SemHit) {
 	caps := inlineCapsFor(intent)
 	budget := caps.totalBytesCap
 
@@ -1181,6 +1204,69 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemH
 			budget -= len(content)
 		}
 	}
+	// Imports — one extraction per unique file path in reads, populated
+	// on the first SuggestedRead pointing at that file. Skip when the
+	// read already starts near the top (its content already covers the
+	// import block) and when the language isn't recognised. Cheap on a
+	// per-byte basis (typically <500 B) but high agent value: surfaces
+	// what each suggested file depends on without a separate Read.
+	importsDone := make(map[string]bool, len(reads))
+	for i := range reads {
+		if budget <= 0 {
+			return
+		}
+		p := reads[i].Path
+		if importsDone[p] {
+			continue
+		}
+		importsDone[p] = true
+		if reads[i].StartLine > 0 && reads[i].StartLine <= 5 {
+			// Reads from the top of the file already include the
+			// import block — don't duplicate.
+			continue
+		}
+		abs := p
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(projectRoot, abs)
+		}
+		imps := extractImports(abs)
+		if imps == "" {
+			continue
+		}
+		// Conservative per-file cap: 1.5 KB of imports is plenty even
+		// for big Go files. Clip with a marker if exceeded.
+		const maxImportsBytes = 1536
+		if len(imps) > maxImportsBytes {
+			imps = imps[:maxImportsBytes] + "\n// … imports truncated"
+		}
+		reads[i].Imports = imps
+		budget -= len(imps)
+	}
+	// Symbol bodies — only for symbol_lookup intent. "What does X do" is
+	// the canonical case where the agent reads the body next, so inlining
+	// it here eliminates an otherwise certain follow-up Read. Cache often
+	// hits because the same (path, start, end) is already in suggested_reads
+	// (pickSuggestedReads pulls from out.Symbols).
+	if intent == IntentSymbolLookup {
+		for i := range syms {
+			if budget <= 0 {
+				return
+			}
+			s := &syms[i]
+			if s.Path == "" || s.StartLine <= 0 || s.EndLine < s.StartLine {
+				continue
+			}
+			content, truncated, charged := fetch(s.Path, s.StartLine, s.EndLine)
+			if content == "" && !truncated {
+				continue
+			}
+			s.Body = content
+			s.Truncated = truncated
+			if charged {
+				budget -= len(content)
+			}
+		}
+	}
 	// On a no-signal query (top semantic score below the confidence
 	// threshold) the whole pool is likely noise. Skip inlining hits
 	// whose individual score is also below the noise floor — the agent
@@ -1217,6 +1303,172 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, sem []SemH
 // readLineRange returns the 1-indexed [start, end] line slice of a
 // file, clipped at maxLines and maxBytes. truncated reports whether
 // either cap fired before reaching end.
+// extractImports returns the import block at the top of the file, or
+// empty if the language isn't recognised, the file has no imports, or
+// the file can't be opened. Heuristic — not a tree-sitter parse — but
+// good enough for the import-block convention every modern language
+// follows (top of file, contiguous, before any declarations).
+//
+// Cap scanning at the first 200 lines: well-organised codebases keep
+// imports at the top; pathological files (commented-out giant blocks
+// near the top) cost a small bounded amount.
+func extractImports(absPath string) string {
+	lines, err := readFirstNLines(absPath, 200)
+	if err != nil || len(lines) == 0 {
+		return ""
+	}
+	switch strings.ToLower(filepath.Ext(absPath)) {
+	case ".go":
+		return extractGoImports(lines)
+	case ".py", ".pyi":
+		return extractPythonImports(lines)
+	case ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs":
+		return extractJSImports(lines)
+	case ".rs":
+		return extractRustImports(lines)
+	}
+	return ""
+}
+
+func readFirstNLines(path string, n int) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	out := make([]string, 0, n)
+	for i := 0; i < n && sc.Scan(); i++ {
+		out = append(out, sc.Text())
+	}
+	if err := sc.Err(); err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+// extractGoImports captures `import (...)` blocks and consecutive
+// single-line `import "..."` statements. Stops at the closing `)` of
+// the block or the first non-import / non-comment / non-blank line
+// after a single-line run.
+func extractGoImports(lines []string) string {
+	var out []string
+	inBlock := false
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if inBlock {
+			out = append(out, l)
+			if t == ")" {
+				break
+			}
+			continue
+		}
+		if strings.HasPrefix(t, "import (") {
+			inBlock = true
+			out = append(out, l)
+			continue
+		}
+		if strings.HasPrefix(t, "import \"") {
+			out = append(out, l)
+			continue
+		}
+		if len(out) > 0 {
+			// Run of single-line imports ended.
+			break
+		}
+		// Pre-import noise (package decl, copyright, build tags) — skip.
+	}
+	return strings.Join(out, "\n")
+}
+
+// extractPythonImports captures contiguous module-level import /
+// from-import statements at the top of the file. Module-level means
+// no leading whitespace (functions / classes inside the module live
+// later).
+func extractPythonImports(lines []string) string {
+	var out []string
+	started := false
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "import ") || strings.HasPrefix(t, "from ") {
+			out = append(out, l)
+			started = true
+			continue
+		}
+		if started && (t == "" || strings.HasPrefix(t, "#")) {
+			out = append(out, l)
+			continue
+		}
+		if started {
+			break
+		}
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// extractJSImports captures top-of-file ES `import ... from "..."`
+// statements and CommonJS `require("...")` lines.
+func extractJSImports(lines []string) string {
+	var out []string
+	started := false
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		importish := strings.HasPrefix(t, "import ") ||
+			strings.HasPrefix(t, "import{") ||
+			strings.HasPrefix(t, "import*") ||
+			strings.HasPrefix(t, "import\"") ||
+			strings.HasPrefix(t, "import '") ||
+			strings.Contains(t, "require(\"") ||
+			strings.Contains(t, "require('")
+		if importish {
+			out = append(out, l)
+			started = true
+			continue
+		}
+		if started && t == "" {
+			out = append(out, l)
+			continue
+		}
+		if started {
+			break
+		}
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
+// extractRustImports captures contiguous `use` declarations at the
+// top of the file.
+func extractRustImports(lines []string) string {
+	var out []string
+	started := false
+	for _, l := range lines {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "use ") {
+			out = append(out, l)
+			started = true
+			continue
+		}
+		if started && t == "" {
+			out = append(out, l)
+			continue
+		}
+		if started {
+			break
+		}
+	}
+	for len(out) > 0 && strings.TrimSpace(out[len(out)-1]) == "" {
+		out = out[:len(out)-1]
+	}
+	return strings.Join(out, "\n")
+}
+
 func readLineRange(path string, start, end, maxLines, maxBytes int) (string, bool, error) {
 	if maxLines <= 0 || maxBytes <= 0 {
 		return "", false, nil
