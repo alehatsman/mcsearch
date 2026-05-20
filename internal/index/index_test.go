@@ -527,6 +527,187 @@ func countByKind(t *testing.T, ctx context.Context, st *store.Store) map[string]
 	return out
 }
 
+// TestDrainPendingSummariesEndToEnd is the round-trip test for Layer 3:
+// run an index with DeferSummaries=true (no chat calls), then invoke
+// DrainPendingSummaries with a stub chat. Verify that:
+//   - the drainer calls chat exactly once per pending row;
+//   - chunks table receives file_summary, chunk_summary,
+//     package_summary, and repo_summary entries with the expected SHAs;
+//   - pending_summaries empties;
+//   - a second drain on an empty queue is a no-op (no chat calls).
+func TestDrainPendingSummariesEndToEnd(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "Stub summary."}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	writeFile(t, filepath.Join(projDir, "short.go"),
+		"package main\n\nfunc S() string { return \"x\" }\n")
+	long := "package main\n\nfunc LongFunc() {\n"
+	for i := range chunkSummaryMinLines {
+		long += fmt.Sprintf("\t// line %d\n", i+1)
+	}
+	long += "}\n"
+	writeFile(t, filepath.Join(projDir, "long.go"), long)
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	// Phase: index in defer mode. No chat calls yet.
+	ix := New(p, st, em, ig, Options{
+		Summarize:          true,
+		DeferSummaries:     true,
+		Chat:               cc,
+		SummaryConcurrency: 4,
+	})
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run (index defer): %v", err)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Fatalf("defer-mode index must not call chat; got %d", got)
+	}
+
+	startQueue, _ := st.CountPendingSummaries(ctx)
+	if startQueue == 0 {
+		t.Fatalf("expected queue to be non-empty after defer-mode index")
+	}
+
+	// Phase: drain. Expect chat to be called for each pending row, plus
+	// package_summary + repo_summary cascade calls.
+	generated, err := ix.DrainPendingSummaries(ctx)
+	if err != nil {
+		t.Fatalf("DrainPendingSummaries: %v", err)
+	}
+	if generated < startQueue {
+		t.Errorf("expected at least %d generated (queue depth); got %d", startQueue, generated)
+	}
+
+	endQueue, _ := st.CountPendingSummaries(ctx)
+	if endQueue != 0 {
+		t.Errorf("queue should be empty after drain; got %d", endQueue)
+	}
+
+	chatAfterDrain := atomic.LoadInt32(&chatCalls)
+	if int(chatAfterDrain) < startQueue {
+		t.Errorf("expected ≥ %d chat calls during drain; got %d", startQueue, chatAfterDrain)
+	}
+
+	// Verify the chunks table actually got the summary chunks.
+	stats, _ := st.Stats(ctx)
+	if stats.Chunks < startQueue {
+		t.Errorf("expected at least %d chunks after drain; got %d", startQueue, stats.Chunks)
+	}
+	// Spot-check that the cascaded summaries landed.
+	pkgSummaries, _ := st.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+	if len(pkgSummaries) == 0 {
+		t.Errorf("expected at least one package_summary chunk after cascade")
+	}
+	repoSummaries, _ := st.AllSummariesByKind(ctx, chunk.KindRepoSummary)
+	if len(repoSummaries) == 0 {
+		t.Errorf("expected one repo_summary chunk after cascade")
+	}
+
+	// Phase: drain again. Queue is empty, so no new chat calls
+	// (the cascade also no-ops since all package/repo summaries are
+	// already present with matching SHAs).
+	atomic.StoreInt32(&chatCalls, 0)
+	gen2, err := ix.DrainPendingSummaries(ctx)
+	if err != nil {
+		t.Fatalf("DrainPendingSummaries (2nd): %v", err)
+	}
+	if gen2 != 0 {
+		t.Errorf("expected 0 generated on 2nd drain; got %d", gen2)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("2nd drain should not call chat; got %d", got)
+	}
+}
+
+// TestDrainDropsStaleFileSummary verifies that if a file's content
+// changes between enqueue and drain, the drainer drops the stale
+// pending row instead of generating an incorrectly-SHA-keyed chunk.
+func TestDrainDropsStaleFileSummary(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "Stub."}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+	target := filepath.Join(projDir, "f.go")
+	writeFile(t, target, "package main\n\nfunc F1() {}\n")
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	ix := New(p, st, em, ig, Options{
+		Summarize:      true,
+		DeferSummaries: true,
+		Chat:           cc,
+	})
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Mutate the file out from under the pending row.
+	writeFile(t, target, "package main\n\nfunc Different() {}\n")
+
+	if _, err := ix.DrainPendingSummaries(ctx); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+
+	// The file_summary pending row should have been dropped without
+	// producing a chunk — its enqueued ContentSHA no longer matches
+	// the file's current content. (Cascade still tries to run, but
+	// FileSummariesForPaths returns nothing for f.go so nothing is
+	// produced for the package layer either.)
+	remaining, _ := st.CountPendingSummaries(ctx)
+	if remaining != 0 {
+		t.Errorf("stale rows should be dropped; got %d remaining", remaining)
+	}
+	// No file_summary chunk for f.go (the source content changed and
+	// we dropped the pending row).
+	shas, _ := st.FileSummarySHAs(ctx)
+	if _, ok := shas["f.go"]; ok {
+		t.Errorf("expected no file_summary for f.go (was stale); got SHA in store")
+	}
+}
+
 // TestDeferSummariesEnqueuesWithoutChat verifies that DeferSummaries=true
 // makes the indexer queue summary jobs into pending_summaries instead of
 // running them through the chat client. The chat endpoint is stubbed

@@ -129,3 +129,23 @@ func (s *Store) CountPendingSummaries(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// ChunkContent returns the content of the chunk identified by
+// (path, content_sha1). Used by the summary drainer to recover a source
+// chunk's text for chunk_summary jobs without re-parsing the file.
+// Returns ("", sql.ErrNoRows) when no matching row exists — the
+// drainer treats that as "source chunk is gone, drop this pending
+// row as stale."
+func (s *Store) ChunkContent(ctx context.Context, path, contentSHA string) (string, error) {
+	var content string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT content FROM chunks WHERE path = ? AND content_sha1 = ?`,
+		path, contentSHA).Scan(&content)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", sql.ErrNoRows
+		}
+		return "", fmt.Errorf("ChunkContent: %w", err)
+	}
+	return content, nil
+}

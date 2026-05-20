@@ -83,6 +83,8 @@ func main() {
 		err = cmdWatch(ctx, args)
 	case "clone":
 		err = cmdClone(ctx, args)
+	case "summarize":
+		err = cmdSummarize(ctx, args)
 	case "graph":
 		err = cmdGraph(ctx, args)
 	case "version", "-V", "--version":
@@ -149,6 +151,11 @@ func usage() {
                                     new git worktree); follow with
                                     `+"`mcsearch index <dst>`"+` to reconcile
                                     any chunks that differ between the two.
+  mcsearch summarize <path>         drain pending_summaries: generate the
+                                    summaries that `+"`mcsearch index --summarize-defer`"+`
+                                    queued, embed them, upsert as summary
+                                    chunks, then cascade to package + repo
+                                    summaries.
   mcsearch graph export <path>      dump graph_nodes/graph_edges as JSONL
                                     (--output=<dir> defaults to <path>/.mcsearch/graph)
                                     (the graph itself is built by `+"`mcsearch index`"+`)
@@ -1311,6 +1318,72 @@ func cmdWatch(ctx context.Context, args []string) error {
 // branch-per-folder workflows). Chunks are keyed by (relative path,
 // content sha1), so the copied index is correct for any file that exists
 // at the same path with the same content in dst; differing files get
+// cmdSummarize drains the pending_summaries queue: generates summaries
+// that `mcsearch index --summarize-defer` enqueued, embeds them, and
+// upserts them as summary chunks. After draining file_summary and
+// chunk_summary jobs, cascades to generate any missing
+// package_summary and repo_summary chunks.
+func cmdSummarize(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("summarize", flag.ContinueOnError)
+	setHelp(fs,
+		"Drain pending_summaries: generate summaries queued by `mcsearch index --summarize-defer`, then cascade to package + repo summaries.",
+		"mcsearch summarize [flags] <path>")
+	verbose := fs.Bool("v", false, "verbose")
+	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("summarize needs exactly one path argument")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return err
+	}
+	if err := proj.CheckIndexable(p, *force); err != nil {
+		return err
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		return err
+	}
+	st, err := openStore(ctx, p.DBPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		return err
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{
+		Verbose:              *verbose,
+		Logger:               cliLogger(),
+		Chat:                 newSummaryClient(),
+		SummaryConcurrency:   envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4),
+		ChunkSummaryMinLines: envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0),
+	})
+
+	startCount, _ := st.CountPendingSummaries(ctx)
+	generated, err := ix.DrainPendingSummaries(ctx)
+	if err != nil {
+		return err
+	}
+	endCount, _ := st.CountPendingSummaries(ctx)
+
+	fmt.Printf("✓ summarize %s\n", p.Root)
+	fmt.Printf("  generated:    %d\n", generated)
+	fmt.Printf("  queue:        %d → %d\n", startCount, endCount)
+	if endCount > 0 {
+		fmt.Printf("  (remaining rows have attempt failures; check with `mcsearch status`)\n")
+	}
+	return nil
+}
+
 // reconciled on the next `mcsearch index <dst>` (incremental — only
 // changed chunks are re-embedded).
 func cmdClone(ctx context.Context, args []string) error {
