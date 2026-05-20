@@ -15,8 +15,8 @@ import (
 	"github.com/alehatsman/mcsearch/internal/store"
 )
 
-// endpointProbe captures one configured backend for `mcsearch status` to
-// report. health is nil for probes that aren't reachable to begin with
+// endpointProbe captures one configured backend for `mcsearch index status`
+// to report. health is nil for probes that aren't reachable to begin with
 // (unset opt-in URL, summary inheriting chat) — those skip the HTTP call
 // and use the pre-set status string.
 type endpointProbe struct {
@@ -114,7 +114,7 @@ func displayCell(s string) string {
 	return s
 }
 
-// queryJSONHit is the wire shape for `mcsearch query --format=json`.
+// queryJSONHit is the wire shape for `mcsearch search semantic --format=json`.
 // Mirrors mcp.SearchHit so the two CLI/MCP surfaces stay aligned.
 type queryJSONHit struct {
 	Path        string  `json:"path"`
@@ -177,6 +177,45 @@ func relativeTime(t time.Time) string {
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	default:
 		return t.Format("2006-01-02")
+	}
+}
+
+// printSearchHitResult renders the shared status/hint/hits shape used
+// by the search-style MCP tools (search_semantic, search_symbol,
+// graph_neighbors). Single helper keeps the CLI's text output for all
+// three surfaces visually identical.
+func printSearchHitResult(status, hint, project string, hits []mcp.SearchHit) {
+	if status != "" && status != "ok" {
+		fmt.Fprintf(os.Stderr, "status: %s\n", status)
+		if hint != "" {
+			fmt.Fprintf(os.Stderr, "hint:   %s\n", hint)
+		}
+		return
+	}
+	if project != "" {
+		fmt.Printf("project: %s\n", project)
+	}
+	if hint != "" {
+		fmt.Printf("hint: %s\n", hint)
+	}
+	if len(hits) == 0 {
+		fmt.Fprintln(os.Stderr, "no results")
+		return
+	}
+	for i, h := range hits {
+		loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
+		header := fmt.Sprintf("─── #%d %s  (%s)  score=%.4f", i+1, loc, h.Kind, h.Score)
+		if h.RerankScore > 0 {
+			header += fmt.Sprintf("  rerank=%.4f", h.RerankScore)
+		}
+		if h.Role != "" {
+			header += "  role=" + h.Role
+		}
+		fmt.Println(header)
+		if h.Content != "" {
+			fmt.Println(truncate(h.Content, 1500))
+		}
+		fmt.Println()
 	}
 }
 

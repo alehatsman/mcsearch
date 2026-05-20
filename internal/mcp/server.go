@@ -32,6 +32,36 @@ type Server struct {
 	StoreOpts      store.Options        // applied to every Store opened by the server
 }
 
+// Search, FindSymbol, Related, Summarize are thin exported wrappers
+// around the unexported MCP handlers so the CLI can reuse the same
+// logic that the stdio server exposes over JSON-RPC. The MCP SDK
+// passes a *sdk.CallToolRequest into every handler; CLI callers
+// don't have one, so the wrappers pass nil.
+func (s *Server) Search(ctx context.Context, in SearchInput) (SearchOutput, error) {
+	_, out, err := s.search(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) FindSymbol(ctx context.Context, in FindSymbolInput) (FindSymbolOutput, error) {
+	_, out, err := s.findSymbol(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) Related(ctx context.Context, in RelatedInput) (RelatedOutput, error) {
+	_, out, err := s.related(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) Summarize(ctx context.Context, in SummarizeInput) (SummarizeOutput, error) {
+	_, out, err := s.summarize(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) Status(ctx context.Context) (StatusOutput, error) {
+	_, out, err := s.status(ctx, nil, StatusInput{})
+	return out, err
+}
+
 // ─── tool: search_semantic ────────────────────────────────────────────────
 
 type SearchInput struct {

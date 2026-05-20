@@ -1,21 +1,31 @@
 // mcsearch — local semantic-search helper for Claude Code.
 //
-// Subcommands:
+// The query-side subcommands mirror the MCP tool surface 1:1
+// (subcommand-group form). The build/maintenance commands are CLI-only.
 //
-//	index <path>              Build or refresh the per-project index (chunk + graph).
-//	query <path> <query...>   Search an existing index from the terminal.
-//	context <path> <q...>     One-shot context router (semantic + symbol + graph).
-//	generate <path> <prompt>  Generate code grounded in the project's index.
-//	status [<path>]           Show endpoint health and indexed projects.
-//	env                       Print effective env-var configuration with sources.
-//	compact <path>            Concatenate indexable files for LLM prompts (alias: bundle).
-//	nuke <path>               Delete the on-disk index for a project.
-//	reindex <path>|--all      Drop and re-embed (one project, or every known project).
-//	watch <path>              Keep the index fresh as files change.
-//	clone <src> <dst>         Seed dst's index from src's (worktrees).
-//	graph export <path>       Dump nodes/edges as JSONL.
-//	mcp                       Run as an MCP server over stdio.
-//	version                   Print the build version.
+//	ask <path> <q...>             Primary entry point (MCP: ask).
+//	search semantic <path> <q...> Hybrid top-k chunks (MCP: search_semantic).
+//	search symbol <path> <name>   Exact identifier lookup (MCP: search_symbol).
+//	graph neighbors <path> <file> <line>
+//	                              Vector neighbours of a chunk (MCP: graph_neighbors).
+//	graph deps <path> [--file|--package]
+//	                              `imports` edges for a file/package (MCP: graph_deps).
+//	graph callers <path> <name>   Incoming `calls` edges (MCP: graph_callers).
+//	graph callees <path> <name>   Outgoing `calls` edges (MCP: graph_callees).
+//	graph export <path>           Dump nodes/edges as JSONL (CLI-only).
+//	view summarize <path> <file>  Summarize a file slice (MCP: view_summarize).
+//	index <path>                  Build or refresh the per-project index.
+//	index status [<path>]         Endpoint health + indexed projects (MCP: index_status).
+//	index summarize <path>        Drain the pending_summaries queue (CLI-only).
+//	generate <path> <prompt>      Generate code grounded in the project's index.
+//	env                           Print effective env-var configuration.
+//	compact <path>                Concatenate indexable files for LLM prompts (alias: bundle).
+//	nuke <path>                   Delete the on-disk index for a project.
+//	reindex <path>|--all          Drop and re-embed.
+//	watch <path>                  Keep the index fresh as files change.
+//	clone <src> <dst>             Seed dst's index from src's (worktrees).
+//	mcp                           Run as an MCP server over stdio.
+//	version                       Print the build version.
 package main
 
 import (
@@ -60,15 +70,17 @@ func main() {
 	var err error
 	switch cmd {
 	case "index":
-		err = cmdIndex(ctx, args)
-	case "query":
-		err = cmdQuery(ctx, args)
-	case "context":
-		err = cmdContext(ctx, args)
+		err = cmdIndexDispatch(ctx, args)
+	case "ask":
+		err = cmdAsk(ctx, args)
+	case "search":
+		err = cmdSearch(ctx, args)
+	case "view":
+		err = cmdView(ctx, args)
+	case "graph":
+		err = cmdGraph(ctx, args)
 	case "generate":
 		err = cmdGenerate(ctx, args)
-	case "status":
-		err = cmdStatus(ctx, args)
 	case "env":
 		err = cmdEnv(ctx, args)
 	case "compact", "bundle":
@@ -83,10 +95,6 @@ func main() {
 		err = cmdWatch(ctx, args)
 	case "clone":
 		err = cmdClone(ctx, args)
-	case "summarize":
-		err = cmdSummarize(ctx, args)
-	case "graph":
-		err = cmdGraph(ctx, args)
 	case "version", "-V", "--version":
 		fmt.Println(mcp.Version)
 		return
@@ -117,60 +125,70 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage:
-  mcsearch index <path>             build or refresh the index for a project
-                                    (runs chunk+embed AND Go static graph phases;
-                                    use --graph=off to skip graph, --graph=only
-                                    to refresh just the graph layer)
-  mcsearch query <path> <query>     return top-k chunks for a query
-  mcsearch context <path> <question>  one-shot router: picks intent, fuses
-                                    semantic + symbol (+ graph when it lands)
-                                    and returns suggested_reads + a prose
-                                    next_action. Use this BEFORE grep loops.
-                                    Flags: --intent, --k, --format=text|json
-  mcsearch generate <path> <prompt> generate code grounded in the project's
-                                    index (RAG: top-k chunks → chat endpoint)
-  mcsearch status [<path>]          show endpoint health and project stats
-  mcsearch env                      print effective env-var config with sources
-                                    (--all to include tuning knobs, --doc for
-                                    descriptions, --format=text|json)
-  mcsearch compact <path>           concatenate all indexable files under <path>
-                                    to stdout with `+"`===== <relpath> =====`"+`
-                                    headers — for pasting into LLM prompts.
-                                    Honors .gitignore/.mcsearch-ignore and
-                                    skips binaries + secret-shaped files.
-                                    Flags: --out FILE, --max-bytes N, --strip
-  mcsearch nuke   <path>            delete the on-disk index for a project
-  mcsearch reindex <path>           drop and re-embed a project from scratch
-  mcsearch reindex --all --yes      drop and re-embed every known project
-                                    (skips indexes from before this feature;
-                                    those need one fresh `+"`mcsearch index <path>`"+`)
-  mcsearch mcp                      run as an MCP server over stdio
-  mcsearch watch  <path>            keep the index fresh as files change
-  mcsearch clone  <src> <dst>       seed dst's index from src's (e.g. for a
-                                    new git worktree); follow with
-                                    `+"`mcsearch index <dst>`"+` to reconcile
-                                    any chunks that differ between the two.
-  mcsearch summarize <path>         drain pending_summaries: generate the
-                                    summaries that `+"`mcsearch index --summarize-defer`"+`
-                                    queued, embed them, upsert as summary
-                                    chunks, then cascade to package + repo
-                                    summaries.
-  mcsearch graph export <path>      dump graph_nodes/graph_edges as JSONL
-                                    (--output=<dir> defaults to <path>/.mcsearch/graph)
-                                    (the graph itself is built by `+"`mcsearch index`"+`)
+	fmt.Fprintln(os.Stderr, `usage (query — mirrors the MCP tool surface):
+  mcsearch ask <path> <q...>              one-shot router (MCP: ask). Picks intent,
+                                          fuses semantic + symbol + graph; returns
+                                          suggested_reads and a prose next_action.
+                                          Flags: --intent, --k, --format=text|json
+  mcsearch search semantic <path> <q...>  hybrid top-k chunks (MCP: search_semantic)
+                                          Flags: --k, --rerank=off, --explain,
+                                          --format=text|json
+  mcsearch search symbol <path> <name>    exact identifier lookup (MCP: search_symbol)
+                                          Flags: --k, --format=text|json
+  mcsearch graph neighbors <path> <file> <line>
+                                          vector neighbours of a chunk (MCP: graph_neighbors)
+  mcsearch graph deps <path> [flags]      package imports (MCP: graph_deps)
+                                          Flags: --file=<rel>, --package=<full path>
+  mcsearch graph callers <path> <name>    incoming calls edges (MCP: graph_callers)
+                                          Flags: --package=<pkg>, --k
+  mcsearch graph callees <path> <name>    outgoing calls edges (MCP: graph_callees)
+                                          Flags: --package=<pkg>, --k
+  mcsearch graph export <path>            dump graph_nodes/graph_edges as JSONL
+                                          Flags: --output=<dir>
+  mcsearch view summarize <path> <file>   summarize a file slice via the chat model
+                                          (MCP: view_summarize). Flags: --start, --end,
+                                          --focus, --temperature, --max-tokens,
+                                          --format=text|json
+  mcsearch index status [<path>]          endpoint health + project stats
+                                          (MCP: index_status)
+
+build / maintenance:
+  mcsearch index <path>                   build or refresh the index. Runs chunk+embed
+                                          AND the Go static graph. Flags: --graph=off
+                                          skips graph, --graph=only refreshes just the
+                                          graph layer. Other flags: --v, --force,
+                                          --summarize[-defer], --format=text|json
+  mcsearch index summarize <path>         drain pending_summaries: generate summaries
+                                          queued by ` + "`mcsearch index --summarize-defer`" + `,
+                                          embed them, upsert as summary chunks, then
+                                          cascade to package + repo summaries
+  mcsearch generate <path> <prompt>       RAG: top-k chunks → chat endpoint
+  mcsearch env                            print effective env-var config with sources
+                                          Flags: --all, --doc, --format=text|json
+  mcsearch compact <path>                 concatenate indexable files under <path>
+                                          to stdout with ` + "`===== <relpath> =====`" + `
+                                          headers. Honors .gitignore/.mcsearch-ignore
+                                          and skips binaries + secret-shaped files.
+                                          Flags: --out FILE, --max-bytes N, --strip
+  mcsearch nuke   <path>                  delete the on-disk index for a project
+  mcsearch reindex <path>                 drop and re-embed from scratch
+  mcsearch reindex --all --yes            drop and re-embed every known project
+                                          (skips indexes from before this feature;
+                                          run ` + "`mcsearch index <path>`" + ` once to
+                                          re-record them)
+  mcsearch watch  <path>                  keep the index fresh as files change
+  mcsearch clone  <src> <dst>             seed dst's index from src's (e.g. for a
+                                          new git worktree); follow with
+                                          ` + "`mcsearch index <dst>`" + ` to reconcile
+  mcsearch mcp                            run as an MCP server over stdio
+  mcsearch version                        print the build version
 
 env:
-  Run `+"`mcsearch env`"+` for the effective configuration. The 5 vars that
+  Run ` + "`mcsearch env`" + ` for the effective configuration. The 5 vars that
   matter for 80% of setups: MCSEARCH_EMBED_URL, MCSEARCH_EMBED_MODEL,
   MCSEARCH_INDEX_DIR, MCSEARCH_CHAT_URL, MCSEARCH_CHAT_MODEL.
   Tuning knobs (timeouts, batch sizes, optional rerank/compress/draft
-  endpoints) — see docs/tuning.md or run `+"`mcsearch env --all --doc`"+`.
-
-flags:
-  mcsearch query --rerank=off <path> "..."     skip rerank for this call
-  mcsearch query --format=json <path> "..."    emit hits as JSON
-  mcsearch query --explain <path> "..."        show per-chunk score breakdown and stage timings`)
+  endpoints) — see docs/tuning.md or run ` + "`mcsearch env --all --doc`" + `.`)
 }
 
 // validIntent reports whether s is one of the strategies the context
@@ -196,7 +214,7 @@ type boolFlag interface {
 // flag.Parse sees them even when the user typed them after positional
 // args. Without this, Go's flag package silently stops parsing at the
 // first non-flag arg and quietly drops every flag that follows — a
-// real footgun for invocations like `mcsearch query <path> "q" --k=3`.
+// real footgun for invocations like `mcsearch search semantic <path> "q" --k=3`.
 //
 // Uses the FlagSet to detect which flags consume a separate-token value
 // (so `--rerank off` is treated as one flag/value pair, not flag plus
@@ -454,6 +472,22 @@ func rerankPool() int {
 
 // ─── index ─────────────────────────────────────────────────────────────────
 
+// cmdIndexDispatch peels off `status` / `summarize` subcommands before
+// falling through to `cmdIndex` (which expects a single path arg).
+// Mirrors the MCP tool layout: `index_status` and `index summarize`
+// live under the `index` group on the CLI side.
+func cmdIndexDispatch(ctx context.Context, args []string) error {
+	if len(args) >= 1 {
+		switch args[0] {
+		case "status":
+			return cmdIndexStatus(ctx, args[1:])
+		case "summarize":
+			return cmdIndexSummarize(ctx, args[1:])
+		}
+	}
+	return cmdIndex(ctx, args)
+}
+
 func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	setHelp(fs,
@@ -462,7 +496,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_SUMMARY_URL is set)")
-	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `mcsearch summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
+	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `mcsearch index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -522,7 +556,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 		// --summarize-defer implies --summarize and routes job dispatch
 		// through pending_summaries instead of inline chat calls; the
 		// chat client is unused at index time but we still wire it so
-		// the future `mcsearch summarize` drainer can reuse the same
+		// the future `mcsearch index summarize` drainer can reuse the same
 		// Options shape.
 		if *summarize || *summarizeDefer || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
 			opts.Summarize = true
@@ -614,13 +648,35 @@ func reportIndexResult(project string, s store.Stats, g *graph.Stats) error {
 	return enc.Encode(out)
 }
 
-// ─── query ─────────────────────────────────────────────────────────────────
+// ─── search ────────────────────────────────────────────────────────────────
 
-func cmdQuery(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("query", flag.ContinueOnError)
+// cmdSearch dispatches `mcsearch search <semantic|symbol>`. Mirrors
+// the MCP tool names `search_semantic` / `search_symbol`.
+func cmdSearch(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("search needs a subcommand: semantic | symbol")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "semantic":
+		return cmdSearchSemantic(ctx, rest)
+	case "symbol":
+		return cmdSearchSymbol(ctx, rest)
+	case "-h", "--help", "help":
+		fmt.Fprintln(os.Stderr, `usage:
+  mcsearch search semantic <path> <query...>   hybrid top-k chunks (MCP: search_semantic)
+  mcsearch search symbol   <path> <name>       exact identifier lookup (MCP: search_symbol)`)
+		return nil
+	default:
+		return fmt.Errorf("unknown search subcommand: %s (have: semantic, symbol)", sub)
+	}
+}
+
+func cmdSearchSemantic(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("search semantic", flag.ContinueOnError)
 	setHelp(fs,
-		"Search an existing index from the terminal (top-k chunks for a query).",
-		"mcsearch query [flags] <path> <query...>")
+		"Hybrid top-k chunks for a query (MCP: search_semantic).",
+		"mcsearch search semantic [flags] <path> <query...>")
 	k := fs.Int("k", 8, "number of results to return")
 	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -630,7 +686,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return fmt.Errorf("query needs <path> <query...>")
+		return fmt.Errorf("search semantic needs <path> <query...>")
 	}
 	path := rest[0]
 	q := strings.Join(rest[1:], " ")
@@ -723,17 +779,59 @@ func cmdQuery(ctx context.Context, args []string) error {
 	}
 }
 
-// ─── context ──────────────────────────────────────────────────────────────
-
-// cmdContext mirrors the `ask` MCP tool so agents and
-// humans share one implementation. The flag surface maps 1-to-1 onto
-// mcp.ContextInput so a CLI invocation can stand in for a tool call
-// when an agent is offline.
-func cmdContext(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("context", flag.ContinueOnError)
+// cmdSearchSymbol wraps the MCP `search_symbol` tool. Exact identifier
+// lookup against the indexed chunks — no embedding required.
+func cmdSearchSymbol(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("search symbol", flag.ContinueOnError)
 	setHelp(fs,
-		"One-shot context router — composes semantic + symbol + graph; emit suggested_reads + next_action. Use this BEFORE grep loops.",
-		"mcsearch context [flags] <path> <question...>")
+		"Exact identifier lookup (MCP: search_symbol).",
+		"mcsearch search symbol [flags] <path> <name>")
+	k := fs.Int("k", 10, "max results to return")
+	format := fs.String("format", "text", "output format: text | json")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("search symbol needs <path> <name>")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return err
+	}
+	s, _ := newServerFromEnv(base)
+	out, err := s.FindSymbol(ctx, mcp.FindSymbolInput{
+		Name:        rest[1],
+		ProjectRoot: p.Root,
+		K:           *k,
+	})
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+	printSearchHitResult(out.Status, out.Hint, out.Project, out.Hits)
+	return nil
+}
+
+// ─── ask ──────────────────────────────────────────────────────────────────
+
+// cmdAsk mirrors the `ask` MCP tool so agents and humans share one
+// implementation. The flag surface maps 1-to-1 onto mcp.ContextInput
+// so a CLI invocation can stand in for a tool call when an agent is
+// offline.
+func cmdAsk(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
+	setHelp(fs,
+		"One-shot router — composes semantic + symbol + graph; emit suggested_reads + next_action. Use this BEFORE grep loops.",
+		"mcsearch ask [flags] <path> <question...>")
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -746,7 +844,7 @@ func cmdContext(ctx context.Context, args []string) error {
 	}
 	rest := fs.Args()
 	if len(rest) < 2 {
-		return fmt.Errorf("context needs <path> <question...>")
+		return fmt.Errorf("ask needs <path> <question...>")
 	}
 	path := rest[0]
 	question := strings.Join(rest[1:], " ")
@@ -783,6 +881,95 @@ func cmdContext(ctx context.Context, args []string) error {
 	default:
 		return fmt.Errorf("unknown format %q (want text|json)", *format)
 	}
+}
+
+// ─── view ──────────────────────────────────────────────────────────────────
+
+// cmdView dispatches `mcsearch view <summarize>`. Mirrors the MCP
+// `view_summarize` tool by parking it under a `view` group so future
+// view-style ops (e.g. `view chunk`) land next to it.
+func cmdView(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("view needs a subcommand: summarize")
+	}
+	sub, rest := args[0], args[1:]
+	switch sub {
+	case "summarize":
+		return cmdViewSummarize(ctx, rest)
+	case "-h", "--help", "help":
+		fmt.Fprintln(os.Stderr, `usage:
+  mcsearch view summarize <path> <file>   summarize a file slice (MCP: view_summarize)`)
+		return nil
+	default:
+		return fmt.Errorf("unknown view subcommand: %s (have: summarize)", sub)
+	}
+}
+
+func cmdViewSummarize(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("view summarize", flag.ContinueOnError)
+	setHelp(fs,
+		"Summarize a file slice via the chat model (MCP: view_summarize).",
+		"mcsearch view summarize [flags] <path> <file>")
+	start := fs.Int("start", 0, "first line to summarize (1-indexed; 0 = beginning of file)")
+	end := fs.Int("end", 0, "last line to summarize (1-indexed, inclusive; 0 = end of file)")
+	focus := fs.String("focus", "", "optional steering — e.g. 'public API surface', 'side effects'")
+	temp := fs.Float64("temperature", 0, "sampling temperature (0 = server default)")
+	maxTok := fs.Int("max-tokens", 0, "max tokens to generate (0 = server default)")
+	format := fs.String("format", "text", "output format: text | json")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 2 {
+		return fmt.Errorf("view summarize needs <path> <file>")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return err
+	}
+	s, _ := newServerFromEnv(base)
+	out, err := s.Summarize(ctx, mcp.SummarizeInput{
+		Path:        rest[1],
+		ProjectRoot: p.Root,
+		StartLine:   *start,
+		EndLine:     *end,
+		Focus:       *focus,
+		Temperature: float32(*temp),
+		MaxTokens:   *maxTok,
+	})
+	if err != nil {
+		return err
+	}
+	if *format == "json" {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	}
+	if out.Status != "ok" {
+		fmt.Fprintf(os.Stderr, "status: %s\n", out.Status)
+		if out.Hint != "" {
+			fmt.Fprintf(os.Stderr, "hint:   %s\n", out.Hint)
+		}
+		return nil
+	}
+	fmt.Printf("file:  %s (lines %d-%d, %d bytes", out.Path, out.StartLine, out.EndLine, out.Bytes)
+	if out.Truncated {
+		fmt.Print(", truncated")
+	}
+	fmt.Println(")")
+	if out.Model != "" {
+		fmt.Printf("model: %s\n", out.Model)
+	}
+	fmt.Println()
+	fmt.Println(out.Content)
+	if out.FinishReason != "" && out.FinishReason != "stop" {
+		fmt.Fprintf(os.Stderr, "\n(finish_reason=%s)\n", out.FinishReason)
+	}
+	return nil
 }
 
 // ─── generate ──────────────────────────────────────────────────────────────
@@ -884,13 +1071,13 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	return nil
 }
 
-// ─── status ────────────────────────────────────────────────────────────────
+// ─── index status ──────────────────────────────────────────────────────────
 
-func cmdStatus(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+func cmdIndexStatus(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("index status", flag.ContinueOnError)
 	setHelp(fs,
-		"Show endpoint health and project stats (chunks/files/graph). Optional path narrows to one project.",
-		"mcsearch status [<path>]")
+		"Show endpoint health and project stats (chunks/files/graph). Optional path narrows to one project. (MCP: index_status)",
+		"mcsearch index status [<path>]")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1063,6 +1250,74 @@ func cmdStatus(ctx context.Context, args []string) error {
 			noun = "indexes"
 		}
 		fmt.Printf("  (%d empty %s skipped)\n", empties, noun)
+	}
+	return nil
+}
+
+// ─── index summarize ───────────────────────────────────────────────────────
+
+// cmdIndexSummarize drains the pending_summaries queue: generates
+// summaries that `mcsearch index --summarize-defer` enqueued, embeds
+// them, and upserts them as summary chunks. After draining file_summary
+// and chunk_summary jobs, cascades to generate any missing
+// package_summary and repo_summary chunks.
+func cmdIndexSummarize(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("index summarize", flag.ContinueOnError)
+	setHelp(fs,
+		"Drain pending_summaries: generate summaries queued by `mcsearch index --summarize-defer`, then cascade to package + repo summaries.",
+		"mcsearch index summarize [flags] <path>")
+	verbose := fs.Bool("v", false, "verbose")
+	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if len(rest) != 1 {
+		return fmt.Errorf("index summarize needs exactly one path argument")
+	}
+	base, err := indexDir()
+	if err != nil {
+		return err
+	}
+	p, err := proj.Resolve(rest[0], base)
+	if err != nil {
+		return err
+	}
+	if err := proj.CheckIndexable(p, *force); err != nil {
+		return err
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		return err
+	}
+	st, err := openStore(ctx, p.DBPath)
+	if err != nil {
+		return err
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		return err
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{
+		Verbose:              *verbose,
+		Logger:               cliLogger(),
+		Chat:                 newSummaryClient(),
+		SummaryConcurrency:   envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4),
+		ChunkSummaryMinLines: envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0),
+	})
+
+	startCount, _ := st.CountPendingSummaries(ctx)
+	generated, err := ix.DrainPendingSummaries(ctx)
+	if err != nil {
+		return err
+	}
+	endCount, _ := st.CountPendingSummaries(ctx)
+
+	fmt.Printf("✓ summarize %s\n", p.Root)
+	fmt.Printf("  generated:    %d\n", generated)
+	fmt.Printf("  queue:        %d → %d\n", startCount, endCount)
+	if endCount > 0 {
+		fmt.Printf("  (remaining rows have attempt failures; check with `mcsearch index status`)\n")
 	}
 	return nil
 }
@@ -1318,72 +1573,6 @@ func cmdWatch(ctx context.Context, args []string) error {
 // branch-per-folder workflows). Chunks are keyed by (relative path,
 // content sha1), so the copied index is correct for any file that exists
 // at the same path with the same content in dst; differing files get
-// cmdSummarize drains the pending_summaries queue: generates summaries
-// that `mcsearch index --summarize-defer` enqueued, embeds them, and
-// upserts them as summary chunks. After draining file_summary and
-// chunk_summary jobs, cascades to generate any missing
-// package_summary and repo_summary chunks.
-func cmdSummarize(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("summarize", flag.ContinueOnError)
-	setHelp(fs,
-		"Drain pending_summaries: generate summaries queued by `mcsearch index --summarize-defer`, then cascade to package + repo summaries.",
-		"mcsearch summarize [flags] <path>")
-	verbose := fs.Bool("v", false, "verbose")
-	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("summarize needs exactly one path argument")
-	}
-	base, err := indexDir()
-	if err != nil {
-		return err
-	}
-	p, err := proj.Resolve(rest[0], base)
-	if err != nil {
-		return err
-	}
-	if err := proj.CheckIndexable(p, *force); err != nil {
-		return err
-	}
-	if err := p.EnsureCacheDir(); err != nil {
-		return err
-	}
-	st, err := openStore(ctx, p.DBPath)
-	if err != nil {
-		return err
-	}
-	defer st.Close()
-	ig, err := ignore.New(p.Root)
-	if err != nil {
-		return err
-	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{
-		Verbose:              *verbose,
-		Logger:               cliLogger(),
-		Chat:                 newSummaryClient(),
-		SummaryConcurrency:   envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4),
-		ChunkSummaryMinLines: envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0),
-	})
-
-	startCount, _ := st.CountPendingSummaries(ctx)
-	generated, err := ix.DrainPendingSummaries(ctx)
-	if err != nil {
-		return err
-	}
-	endCount, _ := st.CountPendingSummaries(ctx)
-
-	fmt.Printf("✓ summarize %s\n", p.Root)
-	fmt.Printf("  generated:    %d\n", generated)
-	fmt.Printf("  queue:        %d → %d\n", startCount, endCount)
-	if endCount > 0 {
-		fmt.Printf("  (remaining rows have attempt failures; check with `mcsearch status`)\n")
-	}
-	return nil
-}
-
 // reconciled on the next `mcsearch index <dst>` (incremental — only
 // changed chunks are re-embedded).
 func cmdClone(ctx context.Context, args []string) error {

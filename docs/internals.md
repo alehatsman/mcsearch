@@ -82,7 +82,7 @@ ordering).
 **Cross-encoder rerank** is off by default. Set `MCSEARCH_RERANK_URL`
 to enable; design and migration notes live in
 [specs/spec-01-rerank.md](specs/spec-01-rerank.md). Per-call opt-out:
-`mcsearch query --rerank=off`. Process-wide off:
+`mcsearch search semantic --rerank=off`. Process-wide off:
 `MCSEARCH_DISABLE_RERANK=1`. Reranker outages never break search —
 on unreachable, results fall back to the pre-rerank fused order silently.
 
@@ -150,7 +150,7 @@ rejected at upsert time.
 
 ## Offline behavior
 
-Endpoint unreachable: `mcsearch query` exits non-zero with an
+Endpoint unreachable: `mcsearch search semantic` exits non-zero with an
 informative error. The MCP `search_semantic` tool returns
 `{ "status": "embedding-service-unreachable", ... }` so Claude can
 fall back to grep without crashing.

@@ -249,7 +249,7 @@ type ContextOutput struct {
 }
 
 // ContextRouter is the exported entry point used by the CLI
-// (`mcsearch context`). It delegates to the MCP-registered handler.
+// (`mcsearch ask`). It delegates to the MCP-registered handler.
 func (s *Server) ContextRouter(ctx context.Context, in ContextInput) (*sdk.CallToolResult, ContextOutput, error) {
 	return s.contextRouter(ctx, nil, in)
 }

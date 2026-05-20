@@ -217,7 +217,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_last_seen ON graph_edges(last_seen_at)`,
 		// pending_summaries holds work queued by `mcsearch index --summarize`
 		// when running in deferred mode. Each row is one summarization job
-		// that the drainer (`mcsearch summarize` or watch idle ticks) will
+		// that the drainer (`mcsearch index summarize` or watch idle ticks) will
 		// pick up later. UNIQUE(path,kind,content_sha1) makes Enqueue
 		// idempotent — repeating an index run on the same source content
 		// doesn't multiply queue entries.

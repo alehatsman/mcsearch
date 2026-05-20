@@ -8,7 +8,7 @@ static graph from `go/packages` + `go/types`. Source never leaves your
 machine.
 
 ```console
-$ mcsearch query ./ "where is filesystem event debouncing handled"
+$ mcsearch search semantic ./ "where is filesystem event debouncing handled"
 ─── #1 markDirty  internal/watch/watch.go:60-71  (method_declaration)
 // markDirty resets the debounce timer; on expiry it runs an index pass.
 func (w *Watcher) markDirty() { … }
@@ -99,21 +99,37 @@ and ensure `CGO_ENABLED=1` plus a C toolchain are available.
 
 ## CLI
 
+The query-side commands mirror the MCP tool surface 1:1 (subcommand-group
+form): `mcsearch ask` ↔ `ask`, `mcsearch search semantic` ↔
+`search_semantic`, `mcsearch graph callers` ↔ `graph_callers`, etc. CLI
+and MCP feel like the same tool.
+
 ```bash
-mcsearch index <path>          # build or refresh the index (chunks + Go graph)
-                               #   --graph=off  skip graph phase
-                               #   --graph=only refresh just the graph
-mcsearch context <path> "..."  # one-shot router (use this BEFORE grep)
-                               #   --intent --k --format=text|json
-mcsearch query <path> "..."    # raw top-k chunks
-                               #   --rerank=off --explain --format=json
-mcsearch generate <path> "..." # RAG: top-k chunks → chat endpoint
-mcsearch status [<path>]       # endpoint health + indexed projects
-mcsearch watch <path>          # fsnotify-driven auto-reindex
-mcsearch clone <src> <dst>     # seed a worktree's index from a sibling
-mcsearch reindex <path>        # drop and re-embed from scratch
-mcsearch graph export <path>   # dump nodes.jsonl + edges.jsonl
-mcsearch mcp                   # MCP server over stdio
+# query (mirrors MCP tools)
+mcsearch ask <path> "..."                       # primary entry point (use BEFORE grep)
+                                                #   --intent --k --no-inline --format=text|json
+mcsearch search semantic <path> "..."           # hybrid top-k chunks
+                                                #   --k --rerank=off --explain --format=json
+mcsearch search symbol   <path> <name>          # exact identifier lookup
+mcsearch graph neighbors <path> <file> <line>   # vector neighbours of a chunk
+mcsearch graph deps      <path> [--file=<rel>|--package=<full>]
+mcsearch graph callers   <path> <name>          # incoming calls edges (Go-only)
+mcsearch graph callees   <path> <name>          # outgoing calls edges (Go-only)
+mcsearch graph export    <path>                 # dump nodes.jsonl + edges.jsonl
+mcsearch view summarize  <path> <file>          # one-shot file/range gist via chat
+mcsearch index status    [<path>]               # endpoint health + indexed projects
+
+# build / maintenance (CLI-only)
+mcsearch index <path>           # build or refresh (chunks + Go graph)
+                                #   --graph=off  skip graph phase
+                                #   --graph=only refresh just the graph
+mcsearch index summarize <path> # drain pending_summaries queue
+mcsearch generate <path> "..."  # RAG: top-k chunks → chat endpoint
+mcsearch watch <path>           # fsnotify-driven auto-reindex
+mcsearch clone <src> <dst>      # seed a worktree's index from a sibling
+mcsearch reindex <path>         # drop and re-embed from scratch
+mcsearch nuke <path>            # delete the on-disk index
+mcsearch mcp                    # MCP server over stdio
 ```
 
 `mcsearch env` prints effective config with sources. `mcsearch -h` for

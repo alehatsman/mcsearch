@@ -93,15 +93,15 @@ If your CLAUDE.md is already dense:
 
 ## CLI fallback
 
-The same router is available as `mcsearch context <path> <question>`
-for shell-based agents or when the MCP transport is unavailable:
+The same router is available as `mcsearch ask <path> <question>` for
+shell-based agents or when the MCP transport is unavailable:
 
 ```sh
-mcsearch context . "where is filesystem event debouncing handled"
-mcsearch context . "callers of (*Store).Search"
-mcsearch context . "how does indexing pipeline work" --intent architecture
-mcsearch context . "..." --format=json   # raw output for piping
-mcsearch context . "..." --k 12          # widen per-lane hits
+mcsearch ask . "where is filesystem event debouncing handled"
+mcsearch ask . "callers of (*Store).Search"
+mcsearch ask . "how does indexing pipeline work" --intent architecture
+mcsearch ask . "..." --format=json   # raw output for piping
+mcsearch ask . "..." --k 12          # widen per-lane hits
 ```
 
 Flags mirror the MCP input fields: `--intent`, `--k`, `--format`.

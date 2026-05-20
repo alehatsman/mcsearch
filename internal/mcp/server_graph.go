@@ -21,6 +21,24 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// GraphDeps, GraphCallers, GraphCallees are exported wrappers around
+// the unexported MCP handlers so the CLI can reuse them. Mirrors the
+// Search/FindSymbol/... wrappers in server.go.
+func (s *Server) GraphDeps(ctx context.Context, in GraphDepsInput) (GraphDepsOutput, error) {
+	_, out, err := s.graphDeps(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) GraphCallers(ctx context.Context, in CallEdgeInput) (CallEdgeOutput, error) {
+	_, out, err := s.graphCallers(ctx, nil, in)
+	return out, err
+}
+
+func (s *Server) GraphCallees(ctx context.Context, in CallEdgeInput) (CallEdgeOutput, error) {
+	_, out, err := s.graphCallees(ctx, nil, in)
+	return out, err
+}
+
 // ─── tool: graph_deps ─────────────────────────────────────────────────────
 
 type GraphDepsInput struct {

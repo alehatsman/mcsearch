@@ -16,8 +16,8 @@ reachable three ways:
   `textDocument/hover`, semantic goto, `inlineCompletion`, etc. Any
   LSP-aware editor (VS Code, Neovim, Helix, Zed, JetBrains) plugs in
   without a per-editor extension.
-- **CLI** — for humans and CI. `mcsearch ask`, `mcsearch deps`,
-  `mcsearch status`.
+- **CLI** — for humans and CI. `mcsearch ask`, `mcsearch graph deps`,
+  `mcsearch index status`.
 
 The point of "one daemon, three faces" is that the agent and the editor
 hit the *same* live index and the *same* warm models. No duplicated

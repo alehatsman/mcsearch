@@ -58,7 +58,7 @@ type Options struct {
 	// DeferSummaries, when true (alongside Summarize), changes Pass 3
 	// from "run chat inline" to "enqueue a pending_summaries row and
 	// return immediately." The index call no longer blocks on summary
-	// generation; a separate `mcsearch summarize` drainer (or watch
+	// generation; a separate `mcsearch index summarize` drainer (or watch
 	// idle ticks) picks the queue up later. Package and repo summaries
 	// are skipped entirely in this mode — they have cascading data
 	// dependencies on file_summary chunks that don't exist yet at
