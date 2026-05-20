@@ -4,10 +4,10 @@
 //
 // Where the chunk index answers "what code is *about* X", the graph
 // answers structural questions like "what methods belong to (*Store)",
-// "what does package P import", "where does this type embed". Layer
-// 1 (this package) covers nodes + the contains/imports/has_method/
-// has_field/embeds edges; calls, references, and interface-implements
-// edges land in follow-up layers.
+// "what does package P import", "where does this type embed", "who
+// calls this function". Edges emitted today: contains, imports,
+// has_method, has_field, embeds, implements, calls (Go-only via
+// go/types). `references` lands with the LSP-as-consumer work.
 package graph
 
 import (
@@ -40,9 +40,9 @@ const (
 	NodeImport    NodeKind = "import"
 )
 
-// EdgeKind enumerates the structural relationships extracted in layer 1.
-// `calls`, `references`, `returns`, and `parameter` are reserved for
-// follow-up layers but not emitted here.
+// EdgeKind enumerates the structural relationships emitted by the
+// extractor. `references`, `returns`, and `parameter` are reserved
+// for follow-up work but not emitted yet.
 type EdgeKind string
 
 const (
@@ -52,6 +52,13 @@ const (
 	EdgeHasField   EdgeKind = "has_field"
 	EdgeEmbeds     EdgeKind = "embeds"
 	EdgeImplements EdgeKind = "implements"
+	// EdgeCalls is emitted per *ast.CallExpr in extractCalls. Src is
+	// the enclosing function/method node; dst is the resolved callee
+	// (function, method, or interface method). Cross-package edges
+	// are emitted only when both endpoints are in the loaded set —
+	// std lib and unindexed dependencies are skipped to keep the
+	// graph navigable.
+	EdgeCalls EdgeKind = "calls"
 )
 
 // Node is a structural symbol persisted in graph_nodes.

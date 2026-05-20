@@ -412,3 +412,87 @@ func bytesNoNewline(b []byte) []byte {
 	}
 	return b
 }
+
+// TestExtractGoCalls asserts the calls-edge extractor lights up the
+// expected edges on the existing `simple` fixture. The fixture
+// already exercises: cross-package function call (main → NewStore),
+// cross-package method call (main → (*Store).Get), and same-package
+// method calls on an embedded receiver ((*Store).Get → (*Inner).lookup,
+// (*Store).Set → (*Inner).write). Calls into the stdlib (fmt.Println)
+// must NOT produce an edge — the inTree filter is the line of defence
+// against dangling dst IDs.
+func TestExtractGoCalls(t *testing.T) {
+	root := copyFixture(t, "simple")
+	res, err := ExtractGo(context.Background(), root)
+	if err != nil {
+		t.Fatalf("ExtractGo: %v", err)
+	}
+	mod := modulePathOf(res)
+	if mod == "" {
+		t.Fatalf("could not infer module path")
+	}
+
+	storePkg := "example.com/simple/store"
+	mainPkg := "example.com/simple"
+
+	mainID := NodeID(mod, mainPkg, NodeFunction, "main")
+	newStoreID := NodeID(mod, storePkg, NodeFunction, "NewStore")
+	storeGetID := NodeID(mod, storePkg, NodeMethod, "(*Store).Get")
+	storeSetID := NodeID(mod, storePkg, NodeMethod, "(*Store).Set")
+	innerLookupID := NodeID(mod, storePkg, NodeMethod, "(*Inner).lookup")
+	innerWriteID := NodeID(mod, storePkg, NodeMethod, "(*Inner).write")
+
+	cases := []struct {
+		name         string
+		src, dst     string
+		wantExists   bool
+		failHelpMsg  string
+	}{
+		{"main → NewStore", mainID, newStoreID, true, "cross-package function call should emit an edge"},
+		{"main → (*Store).Get", mainID, storeGetID, true, "cross-package method call should emit an edge"},
+		{"(*Store).Get → (*Inner).lookup", storeGetID, innerLookupID, true, "same-package method call on embedded receiver should emit an edge"},
+		{"(*Store).Set → (*Inner).write", storeSetID, innerWriteID, true, "same-package method call on embedded receiver should emit an edge"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if findEdge(res.Edges, EdgeCalls, c.src, c.dst) == nil {
+				t.Errorf("missing calls edge %s; calls=%v\nhelp: %s",
+					c.name, edgeKinds(res.Edges, EdgeCalls), c.failHelpMsg)
+			}
+		})
+	}
+
+	// Negative case: nothing in the project calls fmt.Println, but
+	// even if main did, the inTree filter must skip stdlib targets.
+	// Confirm by checking no calls edge has a dst with "fmt" anywhere.
+	for _, e := range res.Edges {
+		if e.Kind != EdgeCalls {
+			continue
+		}
+		if strings.Contains(e.DstID, "::fmt::") {
+			t.Errorf("calls edge leaks stdlib target: %s → %s", e.SrcID, e.DstID)
+		}
+	}
+
+	// Idempotency: re-extract and confirm the same edge IDs collide
+	// (set count stays stable). Mirrors how the persister upserts.
+	res2, err := ExtractGo(context.Background(), root)
+	if err != nil {
+		t.Fatalf("ExtractGo (second pass): %v", err)
+	}
+	n1, n2 := countCalls(res.Edges), countCalls(res2.Edges)
+	if n1 != n2 {
+		t.Errorf("calls edge count changed across runs: %d → %d", n1, n2)
+	}
+}
+
+func countCalls(edges []Edge) int {
+	n := 0
+	for _, e := range edges {
+		if e.Kind == EdgeCalls {
+			n++
+		}
+	}
+	return n
+}

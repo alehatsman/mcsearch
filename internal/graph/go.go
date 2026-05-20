@@ -83,6 +83,18 @@ func ExtractGo(ctx context.Context, projectRoot string) (*ExtractResult, error) 
 	nodeSet := newNodeSet()
 	edgeSet := newEdgeSet()
 
+	// inTree bounds calls-edge resolution to the project's own
+	// packages. Without this we'd synthesize dst node IDs for std-lib
+	// and external deps that have no corresponding graph_nodes row —
+	// loadGraphView would fail to dereference them and the agent
+	// would see dangling edges.
+	inTree := make(map[string]bool, len(pkgs))
+	for _, p := range pkgs {
+		if p.PkgPath != "" {
+			inTree[p.PkgPath] = true
+		}
+	}
+
 	for _, p := range pkgs {
 		for _, e := range p.Errors {
 			res.Warnings = append(res.Warnings, fmt.Sprintf("%s: %s", p.PkgPath, e.Msg))
@@ -93,7 +105,7 @@ func ExtractGo(ctx context.Context, projectRoot string) (*ExtractResult, error) 
 			continue
 		}
 		res.Packages++
-		extractPackage(p, projectRoot, modulePath, nodeSet, edgeSet)
+		extractPackage(p, projectRoot, modulePath, inTree, nodeSet, edgeSet)
 	}
 
 	res.Nodes = nodeSet.flatten()
@@ -115,7 +127,7 @@ func inferModulePath(pkgs []*packages.Package) string {
 	return ""
 }
 
-func extractPackage(p *packages.Package, projectRoot, modulePath string, nodes *nodeSet, edges *edgeSet) {
+func extractPackage(p *packages.Package, projectRoot, modulePath string, inTree map[string]bool, nodes *nodeSet, edges *edgeSet) {
 	pkgID := NodeID(modulePath, p.PkgPath, NodePackage, p.PkgPath)
 	nodes.add(Node{
 		ID:            pkgID,
@@ -157,7 +169,7 @@ func extractPackage(p *packages.Package, projectRoot, modulePath string, nodes *
 	fset := p.Fset
 
 	for _, file := range p.Syntax {
-		extractFile(p, file, fset, pkgID, projectRoot, modulePath, nodes, edges)
+		extractFile(p, file, fset, pkgID, projectRoot, modulePath, inTree, nodes, edges)
 	}
 
 	extractImplements(p, modulePath, nodes, edges)
@@ -168,6 +180,7 @@ func extractFile(
 	file *ast.File,
 	fset *token.FileSet,
 	pkgID, projectRoot, modulePath string,
+	inTree map[string]bool,
 	nodes *nodeSet, edges *edgeSet,
 ) {
 	pos := fset.Position(file.Pos())
@@ -206,7 +219,7 @@ func extractFile(
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *ast.FuncDecl:
-			extractFunc(p, d, fset, fileID, rel, modulePath, nodes, edges)
+			extractFunc(p, d, fset, fileID, rel, modulePath, inTree, nodes, edges)
 		case *ast.GenDecl:
 			if d.Tok == token.TYPE {
 				extractTypes(p, d, fset, fileID, rel, modulePath, nodes, edges)
@@ -220,6 +233,7 @@ func extractFunc(
 	fn *ast.FuncDecl,
 	fset *token.FileSet,
 	fileID, rel, modulePath string,
+	inTree map[string]bool,
 	nodes *nodeSet, edges *edgeSet,
 ) {
 	startLine := fset.Position(fn.Pos()).Line
@@ -249,6 +263,7 @@ func extractFunc(
 			StartLine: startLine,
 			EndLine:   endLine,
 		})
+		extractCalls(p, fn.Body, fset, fnID, rel, modulePath, inTree, edges)
 		return
 	}
 
@@ -303,6 +318,149 @@ func extractFunc(
 		StartLine: startLine,
 		EndLine:   endLine,
 	})
+	extractCalls(p, fn.Body, fset, methodID, rel, modulePath, inTree, edges)
+}
+
+// extractCalls walks the function body and emits one `calls` edge per
+// resolvable call expression. Idempotent — re-extracting the same
+// source yields the same edge IDs (start_line is the call expression's
+// line, so unchanged call sites collide on PK).
+//
+// What gets resolved:
+//   - Bare `Foo()` in the same package      → function node in p.PkgPath
+//   - `pkg.Foo()` for an imported package   → function node in pkg
+//   - `x.Method()` (method on a value/ptr)  → method node on the
+//                                              receiver type's package
+//   - `iface.Method()`                       → interface-method node
+//
+// What gets skipped (silently — these are not graph-noteworthy):
+//   - Builtins (`len`, `make`, `new`, `append`, `panic`, …)
+//   - Calls into packages outside the project (inTree miss)
+//   - Function-typed fields / variables (no *types.Func resolution)
+//   - Type conversions that happen to syntactically look like calls
+func extractCalls(
+	p *packages.Package,
+	body *ast.BlockStmt,
+	fset *token.FileSet,
+	srcID, rel, modulePath string,
+	inTree map[string]bool,
+	edges *edgeSet,
+) {
+	if body == nil || p.TypesInfo == nil {
+		return
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		dstID := resolveCallee(p, call, modulePath, inTree)
+		if dstID == "" {
+			return true
+		}
+		line := fset.Position(call.Pos()).Line
+		edges.add(Edge{
+			ID:        EdgeID(srcID, EdgeCalls, dstID, rel, line),
+			Kind:      EdgeCalls,
+			SrcID:     srcID,
+			DstID:     dstID,
+			FilePath:  rel,
+			StartLine: line,
+			EndLine:   line,
+		})
+		return true
+	})
+}
+
+// resolveCallee maps a *ast.CallExpr to a graph node ID, or "" if the
+// callee is unresolvable / out of project scope. Mirrors the QN
+// encoding used by extractFunc and extractInterfaceMethods so the
+// edges line up with the dst nodes those emit.
+func resolveCallee(p *packages.Package, call *ast.CallExpr, modulePath string, inTree map[string]bool) string {
+	switch fun := call.Fun.(type) {
+
+	case *ast.Ident:
+		// Bare call: same-package function, dot-imported function, or builtin.
+		obj := p.TypesInfo.Uses[fun]
+		fn, ok := obj.(*types.Func)
+		if !ok {
+			return ""
+		}
+		if fn.Pkg() == nil {
+			return "" // builtin
+		}
+		pkgPath := fn.Pkg().Path()
+		if !inTree[pkgPath] {
+			return ""
+		}
+		// Methods are never spelled bare (Go disallows it outside the
+		// owning type's methods, where the method's receiver isn't
+		// implicit at the call expression). So a *types.Func resolved
+		// from a bare identifier is a top-level function.
+		return NodeID(modulePath, pkgPath, NodeFunction, fn.Name())
+
+	case *ast.SelectorExpr:
+		// SelectorExpr covers two distinct call shapes:
+		//   1) sel := TypesInfo.Selections[fun]  — method or field
+		//      access on a value/ptr (x.M(), iface.M(), T.M for method
+		//      expressions). When sel.Obj() is a *types.Func, it's a
+		//      method call.
+		//   2) Otherwise, fun.X is the imported package name and
+		//      fun.Sel is the function within it.
+		if sel := p.TypesInfo.Selections[fun]; sel != nil {
+			fn, ok := sel.Obj().(*types.Func)
+			if !ok {
+				return ""
+			}
+			sig, ok := fn.Type().(*types.Signature)
+			if !ok || sig.Recv() == nil {
+				return ""
+			}
+			recv := sig.Recv().Type()
+			isPtr := false
+			if ptr, isP := recv.(*types.Pointer); isP {
+				isPtr = true
+				recv = ptr.Elem()
+			}
+			named, ok := recv.(*types.Named)
+			if !ok {
+				return ""
+			}
+			obj := named.Obj()
+			if obj == nil || obj.Pkg() == nil {
+				return ""
+			}
+			pkgPath := obj.Pkg().Path()
+			if !inTree[pkgPath] {
+				return ""
+			}
+			recvName := obj.Name()
+			recvDisplay := recvName
+			// Interface methods are encoded *without* the pointer
+			// prefix (extractInterfaceMethods produces "(T).M"); for
+			// concrete types we keep the pointer marker so the QN
+			// matches what extractFunc emits.
+			if _, isIface := named.Underlying().(*types.Interface); !isIface && isPtr {
+				recvDisplay = "*" + recvName
+			}
+			qn := "(" + recvDisplay + ")." + fn.Name()
+			return NodeID(modulePath, pkgPath, NodeMethod, qn)
+		}
+		// Package-qualified call: fun.X resolves to a PkgName.
+		funObj, ok := p.TypesInfo.Uses[fun.Sel].(*types.Func)
+		if !ok {
+			return ""
+		}
+		if funObj.Pkg() == nil {
+			return ""
+		}
+		pkgPath := funObj.Pkg().Path()
+		if !inTree[pkgPath] {
+			return ""
+		}
+		return NodeID(modulePath, pkgPath, NodeFunction, funObj.Name())
+	}
+	return ""
 }
 
 // recvTypeName extracts the receiver type name and whether it's a
