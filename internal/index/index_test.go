@@ -527,6 +527,113 @@ func countByKind(t *testing.T, ctx context.Context, st *store.Store) map[string]
 	return out
 }
 
+// TestDeferSummariesEnqueuesWithoutChat verifies that DeferSummaries=true
+// makes the indexer queue summary jobs into pending_summaries instead of
+// running them through the chat client. The chat endpoint is stubbed
+// with a counter so we can assert it's never called. Package and repo
+// summaries are skipped entirely in defer mode — they have cascading
+// dependencies on file_summary chunks that don't exist yet, so the
+// drainer (Phase 3) will handle them later.
+func TestDeferSummariesEnqueuesWithoutChat(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		http.Error(w, "chat should not be called in defer mode", 500)
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// One short file (file_summary only) and one with a long structural
+	// chunk (both file_summary and chunk_summary).
+	writeFile(t, filepath.Join(projDir, "short.go"),
+		"package main\n\nfunc S() string { return \"x\" }\n")
+
+	long := "package main\n\nfunc LongFunc() {\n"
+	for i := range chunkSummaryMinLines {
+		long += fmt.Sprintf("\t// line %d\n", i+1)
+	}
+	long += "}\n"
+	writeFile(t, filepath.Join(projDir, "long.go"), long)
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	ix := New(p, st, em, ig, Options{
+		Summarize:      true,
+		DeferSummaries: true,
+		Chat:           cc,
+	})
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("defer mode must not call chat; got %d calls", got)
+	}
+
+	pending, err := st.ListPendingSummaries(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var fileCount, chunkCount, pkgCount, repoCount int
+	for _, p := range pending {
+		switch p.Kind {
+		case chunk.KindFileSummary:
+			fileCount++
+		case chunk.KindChunkSummary:
+			chunkCount++
+		case chunk.KindPackageSummary:
+			pkgCount++
+		case chunk.KindRepoSummary:
+			repoCount++
+		}
+	}
+	if fileCount != 2 {
+		t.Errorf("expected 2 file_summary pending rows (short.go + long.go); got %d", fileCount)
+	}
+	if chunkCount != 1 {
+		t.Errorf("expected 1 chunk_summary pending row (LongFunc); got %d", chunkCount)
+	}
+	if pkgCount != 0 {
+		t.Errorf("package_summary should be skipped in defer mode; got %d", pkgCount)
+	}
+	if repoCount != 0 {
+		t.Errorf("repo_summary should be skipped in defer mode; got %d", repoCount)
+	}
+
+	// Source chunks must still be indexed and embedded — defer mode only
+	// changes the summary handling, not the chunk pipeline.
+	stats, _ := st.Stats(ctx)
+	if stats.Files < 2 {
+		t.Errorf("source files should still be indexed; got %d", stats.Files)
+	}
+
+	// Re-running in defer mode is idempotent — same pending rows, no
+	// chat calls.
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run (2nd): %v", err)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("2nd defer run still must not call chat; got %d", got)
+	}
+	pending2, _ := st.ListPendingSummaries(ctx, 0)
+	if len(pending2) != len(pending) {
+		t.Errorf("re-run should not duplicate pending rows: before=%d after=%d", len(pending), len(pending2))
+	}
+}
+
 // TestSummarizeConcurrencyParallelizesAcrossFiles pins the perf invariant
 // from Layer 1 of the indexing-perf plan: file_summary chat calls run in a
 // single global pool across all slowFiles rather than serializing per file.

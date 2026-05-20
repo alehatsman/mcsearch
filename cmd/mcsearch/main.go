@@ -455,6 +455,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_SUMMARY_URL is set)")
+	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `mcsearch summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -508,10 +509,17 @@ func cmdIndex(ctx context.Context, args []string) error {
 		// Auto-enable summarize when a dedicated summary endpoint is
 		// configured. MCSEARCH_CHAT_URL is NOT a trigger — users often
 		// set it for generate/ask_codebase without wanting per-chunk
-		// chat calls on every index. Set --summarize or
-		// MCSEARCH_SUMMARY_URL explicitly to opt in.
-		if *summarize || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
+		// chat calls on every index. Set --summarize, --summarize-defer,
+		// or MCSEARCH_SUMMARY_URL explicitly to opt in.
+		//
+		// --summarize-defer implies --summarize and routes job dispatch
+		// through pending_summaries instead of inline chat calls; the
+		// chat client is unused at index time but we still wire it so
+		// the future `mcsearch summarize` drainer can reuse the same
+		// Options shape.
+		if *summarize || *summarizeDefer || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
 			opts.Summarize = true
+			opts.DeferSummaries = *summarizeDefer
 			opts.Chat = newSummaryClient()
 			opts.SummaryConcurrency = envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4)
 			opts.ChunkSummaryMinLines = envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0)
