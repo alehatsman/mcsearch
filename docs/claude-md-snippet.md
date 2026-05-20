@@ -1,8 +1,8 @@
-# CLAUDE.md snippet — wiring `mcsearch_context` into agent workflow
+# CLAUDE.md snippet — wiring `ask` into agent workflow
 
 Drop the block below into a project's `CLAUDE.md` (or
 `~/.claude/CLAUDE.md` for cross-project defaults) to make agents call
-`mcsearch_context` before grep/Read loops.
+`ask` before grep/Read loops.
 
 The point is *forced adoption*: agents will reach for `grep` first
 unless explicitly told otherwise, because grep is in their muscle
@@ -18,10 +18,10 @@ missing or the embedding service is offline.
 # Repository understanding — tool routing
 
 Before any Grep / Glob / Read fan-out on a code-understanding question,
-call **`mcsearch_context`**. It is the single planner: it picks intent,
-runs semantic search + symbol lookup (and graph queries when available),
-and returns `suggested_reads`, a prose `next_action`, and an `avoid`
-line you can follow verbatim.
+call **`ask`**. It is the single planner: it picks intent, runs
+semantic search + symbol lookup + graph expansion (including `calls`
+edges for Go), and returns `suggested_reads`, a prose `next_action`,
+and an `avoid` line you can follow verbatim.
 
 **Inputs:**
 - `project` — absolute path to the repo root (current dir if omitted).
@@ -35,7 +35,9 @@ line you can follow verbatim.
 **What you get back:**
 - `semantic_hits` — top semantic chunks (path + line range + score).
 - `symbols` — exact-identifier hits with kind and location.
-- `graph` — nodes/edges from the graph layer (empty until that lands).
+- `graph` — nodes/edges from the static graph (includes `calls` for Go).
+- `references` — call-site usages: precise for Go (from `calls`
+  edges), ripgrep-backed for other languages.
 - `suggested_reads` — file ranges to open in full. Prefer these over
   reading entire files.
 - `next_action` — **prose** directive. Execute it as-written.
@@ -53,14 +55,23 @@ line you can follow verbatim.
   run the graph phase, or re-indexed with `--graph=off`); symbol/
   architecture intents work but won't surface sibling methods, package
   imports, etc. Suggest re-running `mcsearch index <project>` once.
-- `avoid` mentions "`calls` edges are not yet extracted" → call-graph
-  queries (callers/callees) fall back to grep on the symbol name.
+- `avoid` mentions "`calls` edges are Go-only" → call-graph queries
+  for non-Go languages fall back to a ripgrep `references` list;
+  treat that list as best-effort and verify edge cases.
 
-**When NOT to call mcsearch_context:**
+**When NOT to call ask:**
 - You already have an exact file path and need to read it — use `Read`.
 - You're hunting an exact literal (error message, magic number) — use
   Grep. Semantic search wins on intent; grep wins on exact strings.
 - You're editing — use `Edit`.
+
+**Sister tools** (call directly only when you already know the leg you want):
+- `search_semantic`, `search_symbol` — raw retrieval legs.
+- `graph_neighbors` — cosine neighbours of a known chunk.
+- `graph_deps` — `imports` for a file or package.
+- `graph_callers`, `graph_callees` — precise call edges (Go-only).
+- `view_summarize` — chat-model file/range gist.
+- `index_status` — endpoint health + indexed projects.
 ```
 
 ---
@@ -72,8 +83,7 @@ If your CLAUDE.md is already dense:
 ```markdown
 # Tool routing
 - Code understanding (where / how / callers / architecture / edit):
-  **`mcsearch_context`** first, then follow its `next_action` and
-  honor `avoid`.
+  **`ask`** first, then follow its `next_action` and honor `avoid`.
 - Exact strings / literals: `Grep`.
 - Known path: `Read`.
 - Edits: `Edit`.
@@ -104,11 +114,11 @@ The model responds strongly to usage guidance embedded in tool
 descriptions and instruction files — much more than to clever tool
 APIs. Three reinforcing layers:
 
-1. **Tool descriptions**: `mcsearch_context` is labeled "PRIMARY
-   ENTRY POINT" and "Call this BEFORE Grep/Glob/Read fan-out." Each
-   leg (`semantic_search`, `find_symbol`, `related_chunks`,
-   `summarize_path`) begins with "Prefer `mcsearch_context` …; use
-   this directly only when …".
+1. **Tool descriptions**: `ask` is labeled "PRIMARY ENTRY POINT" and
+   "Call this BEFORE Grep/Glob/Read fan-out." Each leg
+   (`search_semantic`, `search_symbol`, `graph_neighbors`,
+   `graph_deps`, `graph_callers`, `graph_callees`, `view_summarize`)
+   begins with "Prefer `ask` …; use this directly only when …".
 2. **CLAUDE.md** (this snippet): codifies the rule in the
    project's instruction file Claude actually reads.
 3. **Prose `next_action` / `avoid`**: every router response carries

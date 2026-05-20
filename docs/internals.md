@@ -53,7 +53,7 @@ and skip the backfill.
 
 The SHA fast-path also backfills the `name` column on unchanged chunks,
 so upgrading to a binary with identifier extraction (used by
-`find_symbol`) doesn't need a full `reindex` — the next ordinary `index`
+`search_symbol`) doesn't need a full `reindex` — the next ordinary `index`
 populates names for free. Changing the embedding model (different
 vector dim) does require `mcsearch reindex <path>`; mixed dims are
 rejected at upsert.
@@ -88,7 +88,7 @@ on unreachable, results fall back to the pre-rerank fused order silently.
 
 ## Vector index
 
-`semantic_search` is a single SQL query against `chunk_vecs`:
+`search_semantic` is a single SQL query against `chunk_vecs`:
 
 ```sql
 SELECT rowid, distance FROM chunk_vecs
@@ -151,7 +151,7 @@ rejected at upsert time.
 ## Offline behavior
 
 Endpoint unreachable: `mcsearch query` exits non-zero with an
-informative error. The MCP `semantic_search` tool returns
+informative error. The MCP `search_semantic` tool returns
 `{ "status": "embedding-service-unreachable", ... }` so Claude can
 fall back to grep without crashing.
 
@@ -162,5 +162,5 @@ fall back to grep without crashing.
 result to `MCSEARCH_CHAT_URL`. Flags: `-k`, `--no-rag`, `--system`,
 `--temperature`, `--max-tokens`, `--show-context`. Mid-size local
 chat models (≤32B) tend to generate from training data rather than
-strictly from `CONTEXT` — use `semantic_search` for ground-truth
+strictly from `CONTEXT` — use `search_semantic` for ground-truth
 retrieval; treat generated output as a starting point.

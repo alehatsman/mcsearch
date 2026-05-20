@@ -38,7 +38,7 @@ var allEnvVars = []envVar{
 	{"MCSEARCH_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B", "Model name forwarded as `model`.", "core", false},
 	{"MCSEARCH_INDEX_DIR", "~/.cache/mcsearch", "Where per-project index files live.", "core", false},
 
-	// chat — required for generate / summarize_path / ask_codebase.
+	// chat — required for generate / view_summarize / ask_codebase.
 	{"MCSEARCH_CHAT_URL", "http://127.0.0.1:8081", "OpenAI-compatible /v1/chat/completions base URL.", "chat", false},
 	{"MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct", "Model for the chat leg.", "chat", false},
 

@@ -827,48 +827,57 @@ func TestBuildNextAction(t *testing.T) {
 		syms       []SymbolHit
 		topSem     float32
 		graphEdges int
+		refs       int
 		hasBlame   bool
 		want       string // substring match
 	}{
-		{IntentSymbolLookup, reads, syms, 0.8, 0, false, "Read x.go lines 10-30"},
+		{IntentSymbolLookup, reads, syms, 0.8, 0, 0, false, "Read x.go lines 10-30"},
 		// symbol_lookup ambiguous: 3 symbols across 3 distinct paths —
 		// next_action must signal the count, not say "the definition".
 		{IntentSymbolLookup, reads, []SymbolHit{
 			{QualifiedName: "Options", Path: "a.go"},
 			{QualifiedName: "Options", Path: "b.go"},
 			{QualifiedName: "Options", Path: "c.go"},
-		}, 0.8, 0, false, "3 definitions across files"},
+		}, 0.8, 0, 0, false, "3 definitions across files"},
 		// symbol_lookup with NO symbols but a strong semantic hit:
 		// next_action must not claim "the definition" — that lied
 		// when the symbol genuinely wasn't found. Soft fallback.
-		{IntentSymbolLookup, reads, nil, 0.8, 0, false, "No exact symbol match"},
-		{IntentEditingContext, reads, syms, 0.8, 0, false, "before editing"},
-		{IntentBehaviorSearch, reads, syms, 0.8, 0, false, "ground your answer"},
-		{IntentArchitecture, reads, syms, 0.8, 0, false, "structural overview"},
-		{IntentCallers, nil, syms, 0.8, 0, false, "Call-graph edges are not yet extracted"},
-		{IntentSymbolLookup, nil, nil, 0, 0, false, "Rephrase"},
+		{IntentSymbolLookup, reads, nil, 0.8, 0, 0, false, "No exact symbol match"},
+		{IntentEditingContext, reads, syms, 0.8, 0, 0, false, "before editing"},
+		{IntentBehaviorSearch, reads, syms, 0.8, 0, 0, false, "ground your answer"},
+		{IntentArchitecture, reads, syms, 0.8, 0, 0, false, "structural overview"},
+		// callers with graph edges: directive points at the graph lane.
+		{IntentCallers, nil, syms, 0.8, 4, 0, false, "4 callers edges"},
+		// singular fallback for "1 edge".
+		{IntentCallers, nil, syms, 0.8, 1, 0, false, "1 callers edge"},
+		// callers without graph edges but with rg-backed references.
+		{IntentCallers, nil, syms, 0.8, 0, 3, false, "3 call sites"},
+		{IntentCallers, nil, syms, 0.8, 0, 1, false, "1 call site"},
+		// callers with neither: soft "start from the symbol" line.
+		{IntentCallers, nil, syms, 0.8, 0, 0, false, "No callers found"},
+		{IntentSymbolLookup, nil, nil, 0, 0, 0, false, "Rephrase"},
 		// Low-confidence: no symbols and top semantic score below the
 		// threshold should route to the "weak match" branch instead of
 		// confidently pointing at a noise hit.
-		{IntentBehaviorSearch, reads, nil, 0.30, 0, false, "Top semantic match is weak"},
+		{IntentBehaviorSearch, reads, nil, 0.30, 0, 0, false, "Top semantic match is weak"},
 		// Symbols present — confidence comes from the structural lane,
 		// so the low-score branch must NOT trigger.
-		{IntentBehaviorSearch, reads, syms, 0.30, 0, false, "ground your answer"},
+		{IntentBehaviorSearch, reads, syms, 0.30, 0, 0, false, "ground your answer"},
 		// package_topology with graph edges populated: weak-score branch
 		// must NOT fire — the graph IS the payload. Expect the graph
 		// directive, not the rephrase fallback.
-		{IntentPackageTopology, reads, nil, 0.30, 47, false, "graph.edges"},
-		{IntentPackageTopology, reads, nil, 0.30, 47, false, "47 imports"},
+		{IntentPackageTopology, reads, nil, 0.30, 47, 0, false, "graph.edges"},
+		{IntentPackageTopology, reads, nil, 0.30, 47, 0, false, "47 imports"},
 		// editing_context with blame annotations: weak-score branch
 		// must NOT fire — point at the primary site.
-		{IntentEditingContext, reads, nil, 0.30, 0, true, "before editing"},
+		{IntentEditingContext, reads, nil, 0.30, 0, 0, true, "before editing"},
 		// package_topology with empty graph still routes to weak-match
 		// fallback when scores are low (the genuine no-signal case).
-		{IntentPackageTopology, reads, nil, 0.30, 0, false, "Top semantic match is weak"},
+		{IntentPackageTopology, reads, nil, 0.30, 0, 0, false, "Top semantic match is weak"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.intent+" "+tc.want, func(t *testing.T) {
-			got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem, tc.graphEdges, tc.hasBlame)
+			got := buildNextAction(tc.intent, tc.reads, tc.syms, tc.topSem, tc.graphEdges, tc.refs, tc.hasBlame)
 			if !strings.Contains(got, tc.want) {
 				t.Errorf("got %q, want substring %q", got, tc.want)
 			}
@@ -888,8 +897,8 @@ func TestBuildAvoid(t *testing.T) {
 		graphIndexed bool
 		want         string
 	}{
-		{"callers always warns", IntentCallers, sem, syms, true, "`calls` edges are not yet extracted"},
-		{"callers without graph still warns", IntentCallers, sem, syms, false, "`calls` edges are not yet extracted"},
+		{"callers warns non-Go fallback", IntentCallers, sem, syms, true, "`calls` edges are Go-only"},
+		{"callers without graph still warns", IntentCallers, sem, syms, false, "`calls` edges are Go-only"},
 		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `mcsearch index"},
 		{"symbol_lookup with graph: don't grep", IntentSymbolLookup, sem, syms, true, "Do not grep"},
 		{"behavior + both lanes", IntentBehaviorSearch, sem, syms, true, "Do not grep for the identifier"},
@@ -998,7 +1007,7 @@ func TestContextRouterSymbolLookup(t *testing.T) {
 	}
 }
 
-func TestContextRouterCallersGraphDeferred(t *testing.T) {
+func TestContextRouterCallersAvoid(t *testing.T) {
 	srv := fakeEmbed(t, 16)
 	defer srv.Close()
 	cacheDir := t.TempDir()
@@ -1018,13 +1027,15 @@ func TestContextRouterCallersGraphDeferred(t *testing.T) {
 	if out.Intent != IntentCallers {
 		t.Errorf("intent=%s, want callers", out.Intent)
 	}
-	// avoid message branches on whether the references lane (rg) found
-	// usages. With rg available + a real usage in UsesSearch we expect
-	// the "references already lists usages" variant; if rg isn't on
-	// PATH or returned empty we fall back to the original "calls edges
-	// not extracted" line. Both mention `calls` graph caveat.
-	if !strings.Contains(out.Avoid, "calls") {
-		t.Errorf("avoid should flag the calls-graph caveat: %q", out.Avoid)
+	// avoid branches on whether the references lane resolved usages.
+	// With the calls-edge graph live (Go-only) or rg available, refs
+	// should populate; otherwise we fall back to the Go-only-caveat
+	// variant. Both reference the calls/refs concept.
+	if out.Avoid == "" {
+		t.Errorf("expected non-empty avoid for callers intent")
+	}
+	if !strings.Contains(out.Avoid, "calls") && !strings.Contains(out.Avoid, "references") {
+		t.Errorf("avoid should mention `calls` or `references`: %q", out.Avoid)
 	}
 	// If rg is available, references should be populated for this fixture.
 	if hasRg() && len(out.References) == 0 {
@@ -1080,7 +1091,7 @@ func TestContextRouterTruncatedReadFlagsNextAction(t *testing.T) {
 func TestContextRouterSymbolLookupMissNearMissCandidates(t *testing.T) {
 	// When the user asks for a specific identifier via symbol_lookup
 	// and we find nothing exact, the router should surface substring
-	// matches in `hint` — mirroring what find_symbol does — so the
+	// matches in `hint` — mirroring what search_symbol does — so the
 	// agent has real names to retry with instead of guessing.
 	srv := fakeEmbed(t, 16)
 	defer srv.Close()

@@ -1,20 +1,17 @@
-// Package mcp — mcsearch_context tool.
+// Package mcp — the `ask` tool.
 //
-// context.go wires up `mcsearch_context`, a query planner for code
-// understanding. The goal is to be the single entry point an agent
-// reaches for instead of fanning out to grep / Read / semantic_search
-// loops. Given a project and a free-text question (plus optional
-// intent override), the router picks a strategy, runs the right
-// combination of legs (semantic_search, find_symbol, related_chunks,
-// and — when it lands — graph queries), and returns a compact bundle
-// with `suggested_reads`, a prose `next_action`, and an `avoid` line.
+// context.go wires up `ask`, a query planner for code understanding.
+// The goal is to be the single entry point an agent reaches for
+// instead of fanning out to grep / Read / search_semantic loops.
+// Given a project and a free-text question (plus optional intent
+// override), the router picks a strategy, runs the right combination
+// of legs (search_semantic, search_symbol, graph queries) and
+// returns a compact bundle with `suggested_reads`, a prose
+// `next_action`, and an `avoid` line.
 //
-// Schema, field names, and intent vocabulary follow issue #5.
-//
-// Graph integration: when internal/graph lands, plug a graphExpander
-// into Server (or pass via StoreOpts). Until then `callers`,
-// `callees`, and `package_topology` degrade to a semantic + symbol
-// fallback with an `avoid` line flagging the missing capability.
+// Graph integration: callers/callees use the `calls` edges from
+// internal/graph (Go-only). Other languages still get a ripgrep-
+// backed `references` list as a fallback.
 package mcp
 
 import (
@@ -54,19 +51,8 @@ var validIntents = map[string]struct{}{
 	IntentPackageTopology: {}, IntentEditingContext: {},
 }
 
-// graphDeferredIntents tags intents whose primary leg requires graph
-// edges the layer 1 extractor doesn't yet emit. Layer 1 ships
-// contains/imports/has_method/has_field/embeds — enough for
-// symbol_lookup, editing_context, architecture, package_topology.
-// callers/callees still need `calls` edges (deferred to a follow-up
-// layer per internal/graph). The router emits an `avoid` line so the
-// agent doesn't trust the symbols list as exhaustive for those.
-var graphDeferredIntents = map[string]struct{}{
-	IntentCallers: {}, IntentCallees: {},
-}
-
 // Identifier detection patterns. Conservative — false positives are
-// cheap (we just run find_symbol and get nothing) but false negatives
+// cheap (we just run search_symbol and get nothing) but false negatives
 // mean we miss the structural fast path.
 var (
 	// (*Type).Method or Type.Method — receiver-qualified Go-style names.
@@ -93,7 +79,7 @@ var (
 	reEditing = regexp.MustCompile(`\b(edit|modify|refactor|rename|extend|fix|patch|implement|add)\b`)
 )
 
-// ─── tool: mcsearch_context ───────────────────────────────────────────────
+// ─── tool: ask ────────────────────────────────────────────────────────────
 
 type ContextInput struct {
 	Project  string `json:"project,omitempty" jsonschema:"absolute path to the project root; defaults to the server's working directory"`
@@ -348,7 +334,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	// clearly asked for an identifier (intent is symbol_lookup AND we
 	// extracted identifier candidates) but the symbols lane found
 	// nothing, scan the chunks table for substring matches and surface
-	// them in the hint. Mirrors find_symbol's behavior so the agent
+	// them in the hint. Mirrors search_symbol's behavior so the agent
 	// gets candidate names without a follow-up tool call.
 	if intent == IntentSymbolLookup && len(out.Symbols) == 0 && len(candidates.identifiers) > 0 {
 		var cands []string
@@ -384,7 +370,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		graphEdgeCount = len(out.Graph.Edges)
 	}
 	out.NextAction = buildNextAction(intent, out.SuggestedReads, out.Symbols, topSem,
-		graphEdgeCount, hasBlameAnnotations(out.Annotations))
+		graphEdgeCount, len(out.References), hasBlameAnnotations(out.Annotations))
 	// If the directive's primary read was truncated at inline time,
 	// flag that so the agent knows the inlined Content isn't the full
 	// chunk and can Read the original line range for the rest.
@@ -402,7 +388,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 // ─── intent classification ────────────────────────────────────────────────
 
 // intentCandidates carries side data the lanes consume: identifiers
-// detected in the question that should feed find_symbol.
+// detected in the question that should feed search_symbol.
 type intentCandidates struct {
 	identifiers []string // ranked best-first (qualified before bare)
 }
@@ -528,7 +514,7 @@ func extractIdentifiers(q string) []string {
 // isAllIdentChars reports whether every byte in s is a valid Go
 // identifier character (letter, digit, or underscore). Used by the
 // single-token fallback in extractIdentifiers to avoid passing
-// punctuation/whitespace to find_symbol.
+// punctuation/whitespace to search_symbol.
 func isAllIdentChars(s string) bool {
 	for i := 0; i < len(s); i++ {
 		if !isIdentChar(s[i]) {
@@ -540,7 +526,7 @@ func isAllIdentChars(s string) bool {
 
 // ─── lanes ────────────────────────────────────────────────────────────────
 
-// runSymbolLane runs find_symbol for each detected identifier and
+// runSymbolLane runs search_symbol for each detected identifier and
 // returns deduplicated symbol hits plus a set of file paths the lane
 // touched (used by pickSuggestedReads). At most `k` hits returned.
 func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intentCandidates, k int) ([]SymbolHit, map[string]struct{}) {
@@ -551,7 +537,7 @@ func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intent
 	seen := map[string]struct{}{}
 	var out []SymbolHit
 	for _, id := range cand.identifiers {
-		// find_symbol expects the bare name; strip a "(*T)." prefix.
+		// search_symbol expects the bare name; strip a "(*T)." prefix.
 		bare := id
 		if i := strings.LastIndex(bare, "."); i >= 0 {
 			bare = bare[i+1:]
@@ -952,7 +938,7 @@ const lowConfidenceScore = 0.45
 // annotations count likewise. This prevents the misleading
 // "rephrase or grep" message on calls that actually returned useful
 // structural data.
-func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, topSemScore float32, graphEdgeCount int, hasBlame bool) string {
+func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, topSemScore float32, graphEdgeCount, refCount int, hasBlame bool) string {
 	if len(reads) == 0 && len(symbols) == 0 && graphEdgeCount == 0 {
 		return "Rephrase the question with concrete keywords or fall back to grep."
 	}
@@ -991,13 +977,30 @@ func buildNextAction(intent string, reads []SuggestedRead, symbols []SymbolHit, 
 				reads[0].Path, reads[0].StartLine, reads[0].EndLine)
 		}
 	case IntentCallers, IntentCallees:
-		if len(symbols) > 0 {
-			rel := "callers"
-			if intent == IntentCallees {
-				rel = "callees"
+		rel := "callers"
+		if intent == IntentCallees {
+			rel = "callees"
+		}
+		// Prefer the precise graph lane when it resolved calls edges.
+		// Falls back to the ripgrep `references` list (populated for
+		// non-Go languages where `calls` extraction isn't wired yet).
+		if graphEdgeCount > 0 {
+			noun := "edge"
+			if graphEdgeCount != 1 {
+				noun = "edges"
 			}
-			return fmt.Sprintf("Call-graph edges are not yet extracted — start from %s (%s) and grep for %s.",
-				symbols[0].Path, symbols[0].QualifiedName, rel)
+			return fmt.Sprintf("Read the `graph.edges` list — it carries %d %s %s from the static graph; open each `to` node for its body.", graphEdgeCount, rel, noun)
+		}
+		if refCount > 0 {
+			noun := "site"
+			if refCount != 1 {
+				noun = "sites"
+			}
+			return fmt.Sprintf("The `references` field lists %d call %s (ripgrep-backed for non-Go targets). Walk them before reaching for grep.", refCount, noun)
+		}
+		if len(symbols) > 0 {
+			return fmt.Sprintf("No %s found via graph or refs — start from %s (%s) and confirm the symbol is actually used.",
+				rel, symbols[0].Path, symbols[0].QualifiedName)
 		}
 	case IntentPackageTopology:
 		if graphEdgeCount > 0 {
@@ -1067,17 +1070,17 @@ func hasBlameAnnotations(anns map[string]PathMeta) bool {
 // buildAvoid emits a "what not to do" hint. Strong claims when we
 // have strong signals (exact symbol found → don't grep); softer
 // otherwise. `graphIndexed` is true when the project has a graph
-// available — `callers`/`callees` still warn because layer 1 doesn't
-// emit `calls` edges, regardless. `hasRefs` softens the callers/callees
-// message: when ripgrep already populated a reference list the agent
-// has the surface it needs, so the message shifts from "verify with
-// grep" to "do not re-grep, the list is here."
+// available. `hasRefs` softens the callers/callees message: when
+// either calls-edges populated `references` or ripgrep filled it as
+// fallback, the agent has the surface it needs, so the message
+// shifts from "verify with grep" to "do not re-grep, the list is
+// here."
 func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndexed, hasRefs bool) string {
-	if _, deferred := graphDeferredIntents[intent]; deferred {
+	if intent == IntentCallers || intent == IntentCallees {
 		if hasRefs {
-			return "Do not grep for the identifier — the `references` field already lists usages. Treat it as a best-effort lexical list (no `calls` graph yet); rely on it for navigation, verify edge cases by reading the snippets."
+			return "Do not grep for the identifier — the `references` field already lists call sites. For Go this comes from the static graph; for other languages it's a ripgrep-backed lexical list (verify edge cases by reading the snippets)."
 		}
-		return "Do not trust the symbols list as exhaustive — `calls` edges are not yet extracted, so caller/callee coverage is best-effort. Verify with grep on the symbol name."
+		return "Do not trust the symbols list as exhaustive for non-Go callees — `calls` edges are Go-only today. Verify with grep on the symbol name for other languages."
 	}
 	if !graphIndexed {
 		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch index <project>` to refresh both layers (graph extraction is part of the default index run)."

@@ -24,7 +24,7 @@ import (
 // Server holds everything the MCP handlers need.
 type Server struct {
 	EmbedClient    *embed.Client
-	ChatClient     *chat.Client         // optional — when nil, summarize_path is not registered
+	ChatClient     *chat.Client         // optional — when nil, view_summarize is not registered
 	RerankClient   rerank.HealthChecker // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
 	CompressClient *chat.Client         // optional — health reported by status
 	DraftClient    *chat.Client         // optional — health reported by status
@@ -32,7 +32,7 @@ type Server struct {
 	StoreOpts      store.Options        // applied to every Store opened by the server
 }
 
-// ─── tool: semantic_search ────────────────────────────────────────────────
+// ─── tool: search_semantic ────────────────────────────────────────────────
 
 type SearchInput struct {
 	Query       string   `json:"query" jsonschema:"natural-language or code query"`
@@ -189,7 +189,7 @@ func excluded(path string, exclude []string) bool {
 	return false
 }
 
-// ─── tool: find_symbol ────────────────────────────────────────────────────
+// ─── tool: search_symbol ──────────────────────────────────────────────────
 
 type FindSymbolInput struct {
 	Name        string `json:"name" jsonschema:"exact identifier name to look up (case-sensitive, e.g. 'MyFunc', 'HTTPHandler')"`
@@ -223,7 +223,7 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	defer st.Close()
 	hits, err := st.FindSymbol(ctx, in.Name, in.K)
 	if err != nil {
-		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("find_symbol: %v", err)}, nil
+		return nil, FindSymbolOutput{Status: "error", Hint: fmt.Sprintf("search_symbol: %v", err)}, nil
 	}
 	out := FindSymbolOutput{Status: "ok", Project: p.Root}
 	if len(hits) == 0 {
@@ -251,7 +251,7 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	return nil, out, nil
 }
 
-// ─── tool: related_chunks ─────────────────────────────────────────────────
+// ─── tool: graph_neighbors ────────────────────────────────────────────────
 
 type RelatedInput struct {
 	Path        string `json:"path" jsonschema:"relative file path of the source chunk (e.g. 'internal/store/store.go')"`
@@ -316,7 +316,7 @@ func (s *Server) related(ctx context.Context, _ *sdk.CallToolRequest, in Related
 	return nil, out, nil
 }
 
-// ─── tool: summarize_path ─────────────────────────────────────────────────
+// ─── tool: view_summarize ─────────────────────────────────────────────────
 
 type SummarizeInput struct {
 	Path        string  `json:"path" jsonschema:"file path to summarize; relative paths are resolved against project_root"`
@@ -503,7 +503,7 @@ func buildSummarizeSystem(focus string) string {
 	return base
 }
 
-// ─── tool: mcsearch_status ────────────────────────────────────────────────
+// ─── tool: index_status ───────────────────────────────────────────────────
 
 type StatusInput struct{}
 
@@ -664,9 +664,9 @@ func (s *Server) RunStdio(ctx context.Context) error {
 	}, nil)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "semantic_search",
-		Description: "Prefer `mcsearch_context` for general code-understanding questions — it composes this " +
-			"tool with symbol lookup and graph expansion. Use semantic_search directly only when you specifically " +
+		Name: "search_semantic",
+		Description: "Prefer `ask` for general code-understanding questions — it composes this " +
+			"tool with symbol lookup and graph expansion. Use search_semantic directly only when you specifically " +
 			"want raw semantic ranking without intent routing. " +
 			"Embeds the query and returns top-k matching chunks. Supports exclude list to skip paths. " +
 			"On error, returns a structured status: 'no-index' (run mcsearch index first), " +
@@ -674,39 +674,63 @@ func (s *Server) RunStdio(ctx context.Context) error {
 	}, s.search)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "find_symbol",
-		Description: "Prefer `mcsearch_context` — it detects identifiers in your question and runs this " +
-			"lookup automatically as part of a fused response. Use find_symbol directly only when you " +
+		Name: "search_symbol",
+		Description: "Prefer `ask` — it detects identifiers in your question and runs this " +
+			"lookup automatically as part of a fused response. Use search_symbol directly only when you " +
 			"already have the exact identifier name and want nothing else. " +
 			"Fast SQL lookup — no embedding required. Returns 'not-found' when no chunk with that name exists.",
 	}, s.findSymbol)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "related_chunks",
-		Description: "Prefer `mcsearch_context` — it includes neighborhood expansion as part of routing. " +
-			"Use related_chunks directly only when you already have the exact (path, start_line) of a chunk " +
+		Name: "graph_neighbors",
+		Description: "Prefer `ask` — it includes neighborhood expansion as part of routing. " +
+			"Use graph_neighbors directly only when you already have the exact (path, start_line) of a chunk " +
 			"and want its cosine neighbors. " +
 			"Finds code that is semantically related even without keyword overlap.",
 	}, s.related)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name:        "mcsearch_status",
+		Name: "graph_deps",
+		Description: "Return the `imports` edges for a file or package — the package the file belongs to, " +
+			"and the list of packages it depends on. Sourced from the static graph (no embedding, no chat). " +
+			"Pass `path` (relative file inside the project) OR `package` (full package path). " +
+			"Returns 'no-index' / 'no-graph' / 'not-found' when the project, graph, or symbol is missing.",
+	}, s.graphDeps)
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "graph_callers",
+		Description: "Return functions that CALL the given symbol, from the static graph's `calls` edges. " +
+			"Go-only for now (Python/JS/Rust callers fall back to ripgrep via `ask`). " +
+			"Accepts a bare name (`Foo`), a qualified method (`(*Server).RunStdio`), or a package-qualified " +
+			"name (`mcp.NewServer`). Multiple matches are returned with their package paths so the agent can " +
+			"disambiguate. Returns 'no-graph' when calls edges haven't been indexed yet.",
+	}, s.graphCallers)
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name: "graph_callees",
+		Description: "Return functions that the given symbol CALLS, from the static graph's `calls` edges. " +
+			"Go-only for now. Same name resolution as graph_callers. " +
+			"Returns 'no-graph' when calls edges haven't been indexed yet.",
+	}, s.graphCallees)
+
+	sdk.AddTool(srv, &sdk.Tool{
+		Name:        "index_status",
 		Description: "Report mcsearch endpoint health and the list of indexed projects with their chunk counts and last-indexed times.",
 	}, s.status)
 
 	sdk.AddTool(srv, &sdk.Tool{
-		Name: "mcsearch_context",
+		Name: "ask",
 		Description: "PRIMARY ENTRY POINT for code-understanding questions. Call this BEFORE Grep/Glob/Read fan-out. " +
-			"Given a free-text question (and optional intent override), it picks a strategy, composes semantic_search " +
-			"+ find_symbol + graph expansion, and returns a compact bundle: `semantic_hits`, `symbols`, `suggested_reads` " +
+			"Given a free-text question (and optional intent override), it picks a strategy, composes search_semantic " +
+			"+ search_symbol + graph expansion, and returns a compact bundle: `semantic_hits`, `symbols`, `suggested_reads` " +
 			"(both lanes carry their CONTENTS inlined by default — no follow-up Read needed in the common case), a prose " +
 			"`next_action` directive you can execute verbatim, and an `avoid` line telling you what NOT to do. Each " +
 			"SymbolHit carries `signature` (declaration line) and `doc` (leading comment block) so you can see the API " +
 			"without reading the body. `annotations` is a per-path map populated by intent: always-on entries include " +
 			"sibling `tests` (foo.go ↔ foo_test.go) and `nearest_doc` (closest CLAUDE.md / doc.go / README.md walking " +
 			"up); editing_context adds `last_commit` / `last_author` (git blame) and `owners` (CODEOWNERS); architecture " +
-			"and editing_context add `build_tags` and `package`. `references` is populated for callers/callees with a " +
-			"ripgrep-backed list of usage sites (stand-in until the `calls` graph layer lands). Inline content " +
+			"and editing_context add `build_tags` and `package`. `references` carries the `calls` graph edges for " +
+			"callers/callees intents (Go-only; other languages fall back to a ripgrep usage list). Inline content " +
 			"shares ONE per-intent byte pool across both lanes: targeted intents budget ~60 lines / 4 KB per range " +
 			"and ~20 KB total; exploration intents (architecture, package_topology) widen to ~120 lines / 8 KB per " +
 			"range and ~40 KB total. Suggested_reads (~2 targeted / ~5 exploration) are filled first as the curated " +
@@ -720,9 +744,9 @@ func (s *Server) RunStdio(ctx context.Context) error {
 
 	if s.ChatClient != nil {
 		sdk.AddTool(srv, &sdk.Tool{
-			Name: "summarize_path",
-			Description: "Prefer `mcsearch_context` first — its `suggested_reads` will name the file worth " +
-				"summarizing. Use summarize_path directly only when you already know which file you need digested. " +
+			Name: "view_summarize",
+			Description: "Prefer `ask` first — its `suggested_reads` will name the file worth " +
+				"summarizing. Use view_summarize directly only when you already know which file you need digested. " +
 				"Sends the file slice directly to the chat model. Pass `focus` to steer (e.g. 'public API surface'). " +
 				"Path must resolve inside project_root. Files larger than 64 KB are truncated. " +
 				"On error, returns 'chat-service-unreachable' or 'error'.",

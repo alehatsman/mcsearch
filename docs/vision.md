@@ -71,44 +71,34 @@ PATH, `graph.callers` and `graph.usages` become precise; otherwise
 they're tree-sitter-approximate. The daemon owns the language-server
 lifecycle and the cache.
 
-## Tool surface, after the rename
+## Tool surface
 
-Today the MCP tools are `mcsearch_context`, `semantic_search`,
-`find_symbol`, `related_chunks`, `summarize_path`, `mcsearch_status`.
-The naming mixes verbs and nouns and the prefix is noise.
-
-Proposed shape — verbs grouped into four namespaces:
+The MCP tools are grouped by verb. Underscore separators (not dots)
+for cross-client compatibility:
 
 ```
 ask                       # high-level router; what most agents call
-search.semantic           # cosine + BM25 + RRF
-search.symbol             # exact / qualified name
-search.text               # ripgrep-equivalent, for completeness
-graph.deps                # file→file, module→module imports
-graph.callers             # who calls X
-graph.callees             # what X calls
-graph.neighbors           # current related_chunks
-view.summarize            # current summarize_path
-view.expand               # widen a chunk to its enclosing scope
-index.status              # current mcsearch_status
-index.refresh             # force reindex
+search_semantic           # cosine + BM25 + RRF
+search_symbol             # exact / qualified name
+search_text               # ripgrep-equivalent (not yet shipped)
+graph_deps                # file→pkg, pkg→pkg imports
+graph_callers             # incoming calls edges (Go-only today)
+graph_callees             # outgoing calls edges (Go-only today)
+graph_neighbors           # cosine neighbours of a known chunk
+view_summarize            # chat-model file/range gist
+view_expand               # widen a chunk to its enclosing scope (not yet shipped)
+index_status              # endpoint health + indexed projects
+index_refresh             # force reindex (not yet shipped)
 ```
-
-Renames that matter most:
-
-- `mcsearch_context` → `ask`. It's the verb the agent is performing.
-- `related_chunks` → `graph.neighbors`. Says what it does.
-- `summarize_path` → `view.summarize`. Groups with other read-side ops.
 
 ## Scope cuts, in priority order
 
-1. **Tighten the agent API.** Rename and regroup into the four
-   namespaces above. One high-level `ask` that internally routes. This
-   is pure refactor — no new capability — but it's the foundation
-   everything else hangs off.
-2. **Add `graph.deps` and `graph.callers/callees`.** Tree-sitter-based
-   first. This is the missing primitive agents most want, and the
-   current `related_chunks` only half-delivers.
+1. ✅ **Tighten the agent API.** Done. Tools regrouped into `search_*`,
+   `graph_*`, `view_*`, `index_*`; `mcsearch_context` is now `ask`.
+2. ✅ **Add `graph_deps` and `graph_callers`/`graph_callees`.** Done
+   for Go via `go/types`. Tree-sitter-based extraction for Python /
+   JS / Rust is deferred — non-Go callers fall back to the ripgrep
+   `references` lane in the `ask` bundle.
 3. **Ship the LSP server, read-side only.** Hover-with-summary,
    semantic goto, find-related. No completion yet. Unlocks every
    editor without a per-editor extension.

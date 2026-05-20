@@ -12,11 +12,11 @@ flowchart TB
     bm25 --> store
   end
 
-  subgraph Query["Query path: mcsearch_context"]
+  subgraph Query["Query path: ask"]
     q[Free-text question] --> router{Intent router<br/>behavior · symbol · callers<br/>callees · architecture · etc.}
-    router --> sem[semantic_search<br/>cosine]
-    router --> sym[find_symbol]
-    router --> gx[graph expansion]
+    router --> sem[search_semantic<br/>cosine]
+    router --> sym[search_symbol]
+    router --> gx[graph expansion<br/>incl. calls edges]
     sem --> rrf[RRF fusion<br/>cosine + BM25]
     bm25 -.-> rrf
     rrf --> rerank[Cross-encoder rerank<br/>optional]

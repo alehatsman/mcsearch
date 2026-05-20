@@ -1,4 +1,4 @@
-// Package mcp — enrichment legs for mcsearch_context.
+// Package mcp — enrichment legs for the `ask` router.
 //
 // enrich.go holds the secondary lanes that the router calls *after*
 // the semantic + symbol lanes have produced the primary bundle. They

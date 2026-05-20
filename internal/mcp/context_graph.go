@@ -1,10 +1,9 @@
-// Package mcp provides graph integration for mcsearch_context.
+// Package mcp provides graph integration for the `ask` router.
 //
-// Layer 1 of internal/graph supplies nodes (package/file/function/
-// method/type/struct/interface/field/import) and structural edges
-// (contains/imports/has_method/has_field/embeds). It does NOT yet
-// emit `calls` edges — so the callers/callees intents still degrade
-// to a semantic + symbol fallback. The intents that benefit today:
+// internal/graph emits nodes (package/file/function/method/type/
+// struct/interface/field/import) and edges (contains/imports/
+// has_method/has_field/embeds/implements/calls — the last Go-only).
+// The intents and what they get:
 //
 //	symbol_lookup     — neighbors of the matched symbol (sibling
 //	                    methods, fields, embedded types) so the agent
@@ -16,6 +15,10 @@
 //	                    by the semantic lane.
 //	package_topology  — import edges between packages in the
 //	                    semantic neighborhood.
+//	callers           — incoming calls edges into matched symbols
+//	                    (Go-only; falls back to ripgrep usage list
+//	                    for other languages via context.go).
+//	callees           — outgoing calls edges from matched symbols.
 //
 // Loader strategy: a single in-memory view per request. With the
 // current scale (~800 nodes for this repo) that's a few hundred KB;
@@ -56,10 +59,11 @@ type graphNode struct {
 }
 
 type graphEdge struct {
-	Kind     graph.EdgeKind
-	SrcID    string
-	DstID    string
-	FilePath string
+	Kind      graph.EdgeKind
+	SrcID     string
+	DstID     string
+	FilePath  string
+	StartLine int
 }
 
 // loadGraphView pulls every node and edge from the store and indexes
@@ -120,10 +124,11 @@ func loadGraphView(ctx context.Context, st *store.Store) (*graphView, error) {
 	}
 	for _, r := range edgeRows {
 		e := graphEdge{
-			Kind:     graph.EdgeKind(r.Kind),
-			SrcID:    r.SrcID,
-			DstID:    r.DstID,
-			FilePath: r.FilePath,
+			Kind:      graph.EdgeKind(r.Kind),
+			SrcID:     r.SrcID,
+			DstID:     r.DstID,
+			FilePath:  r.FilePath,
+			StartLine: r.StartLine,
 		}
 		v.edgesBySrc[e.SrcID] = append(v.edgesBySrc[e.SrcID], e)
 		v.edgesByDst[e.DstID] = append(v.edgesByDst[e.DstID], e)
@@ -259,12 +264,60 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 		}
 	}
 
+	// callsExpansion walks the calls-edges in or out of the matched
+	// symbols. Direction picks which side the symbol is on:
+	// `dst` = callers (edges arriving at the symbol), `src` = callees.
+	callsExpansion := func(direction string) {
+		for _, sym := range symbols {
+			lookup := view.nodesByQualified[sym.QualifiedName]
+			if len(lookup) == 0 {
+				lookup = view.nodesByName[sym.QualifiedName]
+			}
+			for _, n := range lookup {
+				addNode(n)
+				var edges []graphEdge
+				if direction == "dst" {
+					edges = view.edgesByDst[n.ID]
+				} else {
+					edges = view.edgesBySrc[n.ID]
+				}
+				for _, e := range edges {
+					if e.Kind != graph.EdgeCalls {
+						continue
+					}
+					peerID := e.SrcID
+					if direction == "src" {
+						peerID = e.DstID
+					}
+					if peer, ok := view.nodesByID[peerID]; ok {
+						addNode(peer)
+						addEdge(e)
+					}
+				}
+			}
+		}
+	}
+
 	switch intent {
 	case IntentSymbolLookup, IntentEditingContext:
 		// For each matched symbol, surface its container (parent type
 		// for methods/fields) and its siblings (other methods/fields
 		// on the same type, embedded types).
 		symbolNeighborhood()
+
+	case IntentCallers:
+		// Incoming calls edges. Falls back to neighborhood when no
+		// calls edges resolve (e.g. a non-Go file matched the symbol).
+		callsExpansion("dst")
+		if len(gr.Nodes) == 0 {
+			symbolNeighborhood()
+		}
+
+	case IntentCallees:
+		callsExpansion("src")
+		if len(gr.Nodes) == 0 {
+			symbolNeighborhood()
+		}
 
 	case IntentArchitecture:
 		// Package + top-level type/function rollup for packages
@@ -299,10 +352,10 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 		}
 
 	default:
-		// behavior_search / callers / callees / unrecognized — fall
-		// back to the union of symbol-neighborhood + package rollup so
-		// the caller always sees structural context when a graph
-		// exists. Cheap: the view is already in memory.
+		// behavior_search / unrecognized — fall back to the union of
+		// symbol-neighborhood + package rollup so the caller always
+		// sees structural context when a graph exists. Cheap: the
+		// view is already in memory.
 		symbolNeighborhood()
 		packageRollup()
 	}

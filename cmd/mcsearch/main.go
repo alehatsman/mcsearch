@@ -725,7 +725,7 @@ func cmdQuery(ctx context.Context, args []string) error {
 
 // ─── context ──────────────────────────────────────────────────────────────
 
-// cmdContext mirrors the `mcsearch_context` MCP tool so agents and
+// cmdContext mirrors the `ask` MCP tool so agents and
 // humans share one implementation. The flag surface maps 1-to-1 onto
 // mcp.ContextInput so a CLI invocation can stand in for a tool call
 // when an agent is offline.

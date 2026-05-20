@@ -14,7 +14,7 @@ $ mcsearch query ./ "where is filesystem event debouncing handled"
 func (w *Watcher) markDirty() { … }
 ```
 
-## Primary entry point: `mcsearch_context`
+## Primary entry point: `ask`
 
 Claude's headline tool. One free-text question, one compact bundle:
 `semantic_hits`, `symbols`, `suggested_reads`, plus a prose
@@ -23,8 +23,8 @@ Claude's headline tool. One free-text question, one compact bundle:
 `architecture` / `package_topology` / `editing_context`) is inferred
 from the question shape; pass `intent` to override.
 
-The other MCP tools are the legs `mcsearch_context` composes — call
-them directly only when you already know which leg you want.
+The other MCP tools are the legs `ask` composes — call them directly
+only when you already know which leg you want.
 
 Drop [`docs/claude-md-snippet.md`](docs/claude-md-snippet.md) into your
 `CLAUDE.md` to route the agent here before its grep/Read reflex kicks
@@ -32,8 +32,8 @@ in.
 
 ### When to call it via MCP
 
-Reach for `mcsearch_context` whenever you'd otherwise start with a
-broad grep, a speculative Read, or a "find references" fan-out. One
+Reach for `ask` whenever you'd otherwise start with a broad grep, a
+speculative Read, or a "find references" fan-out. One
 MCP call collapses the loop: intent routing + semantic top-k + symbol
 hits + (where available) call-site references, each carrying enough
 inline content that you usually don't need a follow-up Read.
@@ -60,8 +60,9 @@ range with a file-level summary already in hand.
 
 **Example 2 — symbol with an explicit verb.** Question:
 *"callers of buildNextAction"*. Intent auto-routes to `callers` and
-the bundle ships call sites pre-resolved by a ripgrep pass, so Claude
-never has to run one itself:
+the bundle ships call sites pre-resolved by the static graph's `calls`
+edges (Go) or a ripgrep pass (other languages), so Claude never has to
+run one itself:
 
 ```jsonc
 "symbols":    [{ "path": "internal/mcp/context.go", "qualified_name": "buildNextAction",
@@ -125,7 +126,7 @@ the full list.
 | `MCSEARCH_EMBED_URL`   | `http://127.0.0.1:8082`          | OpenAI-shape `/v1/embeddings` base URL.                                          |
 | `MCSEARCH_EMBED_MODEL` | `Qwen/Qwen3-Embedding-4B`        | Embedding model name forwarded as `model`.                                       |
 | `MCSEARCH_INDEX_DIR`   | `~/.cache/mcsearch`              | Per-project index files.                                                         |
-| `MCSEARCH_CHAT_URL`    | `http://127.0.0.1:8081`          | `/v1/chat/completions` — `generate`, `summarize_path`, index-time summaries.     |
+| `MCSEARCH_CHAT_URL`    | `http://127.0.0.1:8081`          | `/v1/chat/completions` — `generate`, `view_summarize`, index-time summaries.     |
 | `MCSEARCH_CHAT_MODEL`  | `Qwen/Qwen2.5-Coder-7B-Instruct` | Chat model.                                                                      |
 
 Tuning knobs (rerank, compress, draft, summary, batch sizes, timeouts,
@@ -146,28 +147,31 @@ embedding contract, code-gen details: [docs/internals.md](docs/internals.md).
 ## Go static graph
 
 `mcsearch index` adds a Go-specific structural layer built on
-`go/packages` + `go/types` (type-resolved, not regex). Layer 1 emits
-`package` / `file` / `function` / `method` / `type` / `field` /
+`go/packages` + `go/types` (type-resolved, not regex). The extractor
+emits `package` / `file` / `function` / `method` / `type` / `field` /
 `import` nodes and `contains` / `imports` / `has_method` / `has_field`
-/ `embeds` edges. Function and method nodes link back to chunks via
-`graph_nodes.chunk_id`, so a single SQL join surfaces graph
-neighbourhood + source code for any hit. `calls` and `references`
-edges land in follow-up releases.
+/ `embeds` / `implements` / `calls` edges. Function and method nodes
+link back to chunks via `graph_nodes.chunk_id`, so a single SQL join
+surfaces graph neighbourhood + source code for any hit. `references`
+edges land with the planned LSP integration.
 
 ## MCP tools
 
 When running as `mcsearch mcp`, the server registers:
 
-| Tool                | Always on? | What it does                                                                |
-| ------------------- | ---------- | --------------------------------------------------------------------------- |
-| `mcsearch_context`  | yes        | **Primary entry point.** Router + composed bundle.                          |
-| `semantic_search`   | yes        | Hybrid (cosine + BM25 + optional rerank) top-k chunks. Supports `exclude`.  |
-| `find_symbol`       | yes        | Exact identifier lookup (SQL scan, no embedding).                           |
-| `related_chunks`    | yes        | Vector neighbours of a known chunk at `path:start_line`.                    |
-| `mcsearch_status`   | yes        | Endpoint health (embed / chat / rerank) + indexed projects.                 |
-| `summarize_path`    | needs chat | One-shot file-or-range gist via the chat model. No retrieval.               |
+| Tool              | Always on? | What it does                                                                |
+| ----------------- | ---------- | --------------------------------------------------------------------------- |
+| `ask`             | yes        | **Primary entry point.** Router + composed bundle.                          |
+| `search_semantic` | yes        | Hybrid (cosine + BM25 + optional rerank) top-k chunks. Supports `exclude`.  |
+| `search_symbol`   | yes        | Exact identifier lookup (SQL scan, no embedding).                           |
+| `graph_neighbors` | yes        | Vector neighbours of a known chunk at `path:start_line`.                    |
+| `graph_deps`      | yes        | `imports` edges for a file or package. Sourced from the static graph.       |
+| `graph_callers`   | yes        | Incoming `calls` edges (Go-only today).                                     |
+| `graph_callees`   | yes        | Outgoing `calls` edges (Go-only today).                                     |
+| `index_status`    | yes        | Endpoint health (embed / chat / rerank) + indexed projects.                 |
+| `view_summarize`  | needs chat | One-shot file-or-range gist via the chat model. No retrieval.               |
 
-All tools return `status` (`ok` / `no-index` /
+All tools return `status` (`ok` / `no-index` / `no-graph` /
 `embedding-service-unreachable` / `chat-service-unreachable` / `error`)
 with a human-readable `hint` so Claude can fall back to grep instead of
 pretending success.

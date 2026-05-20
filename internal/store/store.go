@@ -548,7 +548,7 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 // When startLine > 0, also refreshes start_line/end_line. Required for
 // the chunker fast-path: a chunk's content can stay byte-identical
 // (same SHA) while its position in the file shifts because some earlier
-// chunk in the same file grew or shrank. Without this update, find_symbol
+// chunk in the same file grew or shrank. Without this update, search_symbol
 // returns the chunk's ORIGINAL line range even after the file was edited
 // above it. Callers that don't have line info (file/package/repo summary
 // touches) pass 0 to skip the position update.
@@ -1327,7 +1327,7 @@ func (s *Store) findSymbolInGraph(ctx context.Context, name string, k int) ([]Hi
 // FindSymbolCandidates returns up to k distinct chunk names whose
 // `name` column contains `query` as a substring. Ordered by length
 // (shorter ≈ closer-in-spirit) then alphabetically. Intended as a
-// "did you mean" surface for find_symbol misses — callers should pass
+// "did you mean" surface for search_symbol misses — callers should pass
 // the exact-name lookup query and surface the results in a hint so
 // the agent can retry with a real identifier instead of guessing.
 func (s *Store) FindSymbolCandidates(ctx context.Context, query string, k int) ([]string, error) {
