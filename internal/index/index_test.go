@@ -526,3 +526,89 @@ func countByKind(t *testing.T, ctx context.Context, st *store.Store) map[string]
 	}
 	return out
 }
+
+// TestSummarizeConcurrencyParallelizesAcrossFiles pins the perf invariant
+// from Layer 1 of the indexing-perf plan: file_summary chat calls run in a
+// single global pool across all slowFiles rather than serializing per file.
+// With per-call latency dominating, an 8-file run at SummaryConcurrency=4
+// should finish in roughly two waves (~2× call latency + overhead), not
+// eight (~8× call latency).
+//
+// The bound is intentionally loose so the test isn't flaky on slow boxes:
+// a fully serial implementation at 8 calls × 100 ms = 800 ms would blow
+// past 500 ms; a properly parallel one at ~2 waves should land near 250
+// ms even with goroutine + HTTP + sqlite overhead.
+func TestSummarizeConcurrencyParallelizesAcrossFiles(t *testing.T) {
+	const (
+		nFiles    = 8
+		callDelay = 100 * time.Millisecond
+		// Serial would be ~nFiles*callDelay = 800ms. Concurrency=4 should
+		// be ~2*callDelay + overhead ≈ 250ms. 500ms is the wedge.
+		upperBound = 500 * time.Millisecond
+	)
+
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		time.Sleep(callDelay)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "Stub summary."}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// Short files in distinct dirs: each produces exactly one
+	// file_summary call and no chunk_summary calls (every function body
+	// is under chunkSummaryMinLines). Distinct dirs would also produce
+	// package_summary calls, which are themselves parallel in Layer 1 —
+	// but to keep the perf invariant on just file summaries, group all
+	// files in one dir.
+	for i := range nFiles {
+		content := fmt.Sprintf("package main\n\nfunc F%d() string { return \"x\" }\n", i)
+		writeFile(t, filepath.Join(projDir, fmt.Sprintf("f%d.go", i)), content)
+	}
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	ix := New(p, st, em, ig, Options{
+		Summarize:          true,
+		Chat:               cc,
+		SummaryConcurrency: 4,
+	})
+
+	start := time.Now()
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	gotCalls := atomic.LoadInt32(&chatCalls)
+	// nFiles file summaries + 1 package summary + 1 repo summary.
+	const wantCallsAtLeast = nFiles
+	if gotCalls < wantCallsAtLeast {
+		t.Errorf("expected ≥ %d chat calls; got %d", wantCallsAtLeast, gotCalls)
+	}
+
+	if elapsed > upperBound {
+		t.Errorf("indexing %d files with SummaryConcurrency=4 took %v; "+
+			"serial would be ~%v, concurrent should be ~%v. "+
+			"This usually means file summaries are running serially across slowFiles.",
+			nFiles, elapsed, time.Duration(nFiles)*callDelay, 2*callDelay)
+	}
+}

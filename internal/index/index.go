@@ -107,8 +107,9 @@ type slowFile struct {
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	var (
-		toEmbed []pending
-		seen    int
+		toEmbed            []pending
+		seen               int
+		summariesGenerated int
 	)
 
 	prevStats, statsErr := ix.Store.Stats(ctx)
@@ -371,7 +372,35 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		return fmt.Errorf("existing SHAs: %w", err)
 	}
 
-	// Pass 3: process each slow-path file using the pre-fetched SHA sets.
+	// Pass 3a: serial plan phase.
+	//
+	// Walk slowFiles once to resolve the cheap, IO-bound work — chunk SHA
+	// lookups, TouchSeen UPDATEs for cache hits, and file_summary cache
+	// resolution (so pkgFiles is fully populated before Pass 5). Chat
+	// calls are NOT issued here. Instead, each cache-miss summary is
+	// queued as a job for the parallel execute phase below.
+	//
+	// Keeping TouchSeen calls serial avoids piling contention on
+	// SQLite's writer lock; only the chat-bound work crosses the
+	// concurrency boundary.
+	type fileSummaryJob struct {
+		rel       string
+		slice     []byte
+		fileSHA   string
+		endLine   int
+		truncated bool
+		size      int
+	}
+	type chunkSummaryJob struct {
+		rel    string
+		c      chunk.Chunk
+		sumSHA string
+	}
+	var (
+		fileSummaryJobs  []fileSummaryJob
+		chunkSummaryJobs []chunkSummaryJob
+	)
+
 	for _, sf := range slowFiles {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -394,7 +423,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		// actually send to the model (so a file growing past the cap
 		// doesn't re-summarize on every run). If we already have a
 		// summary chunk for this exact slice, just bump last_seen_at
-		// and skip the chat round-trip.
+		// and skip the chat round-trip; otherwise queue a job.
 		if ix.Options.Summarize && ix.Options.Chat != nil && len(sf.chunks) > 0 {
 			slice := sf.data
 			truncated := false
@@ -413,26 +442,14 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				}
 				seen++
 			} else {
-				summary, err := summarizeFile(ctx, ix.Options.Chat, sf.rel, slice)
-				if err != nil {
-					ix.Options.Logger.Warn("summarize failed", "path", sf.rel, "err", err)
-				} else if strings.TrimSpace(summary) != "" {
-					if ix.Options.Verbose && truncated {
-						ix.Options.Logger.Info("summarize truncated", "path", sf.rel, "size", len(sf.data))
-					}
-					toEmbed = append(toEmbed, pending{
-						rel: sf.rel,
-						chunk: chunk.Chunk{
-							Path:      sf.rel,
-							Kind:      chunk.KindFileSummary,
-							StartLine: 1,
-							EndLine:   chunk.LineCount(sf.data),
-							Content:   summary,
-						},
-						sha: fileSHA,
-					})
-					seen++
-				}
+				fileSummaryJobs = append(fileSummaryJobs, fileSummaryJob{
+					rel:       sf.rel,
+					slice:     slice,
+					fileSHA:   fileSHA,
+					endLine:   chunk.LineCount(sf.data),
+					truncated: truncated,
+					size:      len(sf.data),
+				})
 			}
 		}
 		// Per-chunk summary, opt-in. Only structural chunks (functions,
@@ -445,15 +462,6 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			if minLines <= 0 {
 				minLines = chunkSummaryMinLines
 			}
-			// Cache-hit handling stays serial (cheap UPDATE). New chunks
-			// are queued and dispatched through a bounded worker pool so
-			// HTTP RTT to the chat endpoint can overlap with inference
-			// on the previous request.
-			type chunkJob struct {
-				c   chunk.Chunk
-				sha string
-			}
-			var jobs []chunkJob
 			for _, c := range sf.chunks {
 				if !isStructural(c.Kind) || (c.EndLine-c.StartLine+1) < minLines {
 					continue
@@ -466,54 +474,103 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					seen++
 					continue
 				}
-				jobs = append(jobs, chunkJob{c: c, sha: sumSHA})
-			}
-			if len(jobs) > 0 {
-				conc := ix.Options.SummaryConcurrency
-				if conc < 1 {
-					conc = 1
-				}
-				results := make([]*pending, len(jobs))
-				eg, egctx := errgroup.WithContext(ctx)
-				eg.SetLimit(conc)
-				for i := range jobs {
-					eg.Go(func() error {
-						summary, err := summarizeChunk(egctx, ix.Options.Chat, sf.rel, jobs[i].c)
-						if err != nil {
-							ix.Options.Logger.Warn("chunk summarize failed", "path", sf.rel, "start", jobs[i].c.StartLine, "err", err)
-							return nil
-						}
-						if strings.TrimSpace(summary) == "" {
-							return nil
-						}
-						results[i] = &pending{
-							rel: sf.rel,
-							chunk: chunk.Chunk{
-								Path:      sf.rel,
-								Kind:      chunk.KindChunkSummary,
-								StartLine: jobs[i].c.StartLine,
-								EndLine:   jobs[i].c.EndLine,
-								Content:   summary,
-							},
-							sha: jobs[i].sha,
-						}
-						return nil
-					})
-				}
-				if err := eg.Wait(); err != nil {
-					return err
-				}
-				for _, p := range results {
-					if p != nil {
-						toEmbed = append(toEmbed, *p)
-						seen++
-					}
-				}
+				chunkSummaryJobs = append(chunkSummaryJobs, chunkSummaryJob{rel: sf.rel, c: c, sumSHA: sumSHA})
 			}
 		}
 		// Old rows for this file whose SHA disappeared get pruned at the
 		// end via PruneUnseen — they never had last_seen_at bumped on this
 		// run.
+	}
+
+	// Pass 3b: parallel execute phase.
+	//
+	// One global errgroup processes every cache-miss summary across every
+	// slowFile. Bounded by SummaryConcurrency so a local chat endpoint
+	// isn't overwhelmed. Workers are independent: file and chunk
+	// summaries draw from the same pool, so a file with no chunk
+	// summaries doesn't sit idle while a sibling churns through 50.
+	// Chat failures log-and-skip (return nil) so one bad job doesn't
+	// poison the whole run; the parent ctx still aborts cleanly on
+	// cancellation via egctx.
+	if len(fileSummaryJobs) > 0 || len(chunkSummaryJobs) > 0 {
+		conc := ix.Options.SummaryConcurrency
+		if conc < 1 {
+			conc = 1
+		}
+		fileResults := make([]*pending, len(fileSummaryJobs))
+		chunkResults := make([]*pending, len(chunkSummaryJobs))
+		eg, egctx := errgroup.WithContext(ctx)
+		eg.SetLimit(conc)
+		for i := range fileSummaryJobs {
+			j := fileSummaryJobs[i]
+			eg.Go(func() error {
+				summary, err := summarizeFile(egctx, ix.Options.Chat, j.rel, j.slice)
+				if err != nil {
+					ix.Options.Logger.Warn("summarize failed", "path", j.rel, "err", err)
+					return nil
+				}
+				if strings.TrimSpace(summary) == "" {
+					return nil
+				}
+				if ix.Options.Verbose && j.truncated {
+					ix.Options.Logger.Info("summarize truncated", "path", j.rel, "size", j.size)
+				}
+				fileResults[i] = &pending{
+					rel: j.rel,
+					chunk: chunk.Chunk{
+						Path:      j.rel,
+						Kind:      chunk.KindFileSummary,
+						StartLine: 1,
+						EndLine:   j.endLine,
+						Content:   summary,
+					},
+					sha: j.fileSHA,
+				}
+				return nil
+			})
+		}
+		for i := range chunkSummaryJobs {
+			j := chunkSummaryJobs[i]
+			eg.Go(func() error {
+				summary, err := summarizeChunk(egctx, ix.Options.Chat, j.rel, j.c)
+				if err != nil {
+					ix.Options.Logger.Warn("chunk summarize failed", "path", j.rel, "start", j.c.StartLine, "err", err)
+					return nil
+				}
+				if strings.TrimSpace(summary) == "" {
+					return nil
+				}
+				chunkResults[i] = &pending{
+					rel: j.rel,
+					chunk: chunk.Chunk{
+						Path:      j.rel,
+						Kind:      chunk.KindChunkSummary,
+						StartLine: j.c.StartLine,
+						EndLine:   j.c.EndLine,
+						Content:   summary,
+					},
+					sha: j.sumSHA,
+				}
+				return nil
+			})
+		}
+		if err := eg.Wait(); err != nil {
+			return err
+		}
+		for _, p := range fileResults {
+			if p != nil {
+				toEmbed = append(toEmbed, *p)
+				seen++
+				summariesGenerated++
+			}
+		}
+		for _, p := range chunkResults {
+			if p != nil {
+				toEmbed = append(toEmbed, *p)
+				seen++
+				summariesGenerated++
+			}
+		}
 	}
 
 	if len(toEmbed) > 0 {
@@ -564,8 +621,18 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// Pass 5: package summaries — one per directory, generated from the
 	// file summaries stored in the previous passes. Runs after embedding
 	// so file_summary rows are already committed and queryable.
+	//
+	// Plan + execute split mirrors Pass 3: serial walk does cache-hit
+	// TouchSeen and SHA computation; parallel errgroup runs the chat
+	// calls (and the read of FileSummariesForPaths, which goes through
+	// SQLite's connection pool and is safe to call concurrently).
 	if len(pkgFiles) > 0 {
-		var pkgEmbed []pending
+		type pkgJob struct {
+			dir       string
+			filePaths []string
+			pkgSHA    string
+		}
+		var pkgJobs []pkgJob
 		for dir, entries := range pkgFiles {
 			if ctx.Err() != nil {
 				break
@@ -585,27 +652,54 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				}
 				continue
 			}
-			fileSummaries, err := ix.Store.FileSummariesForPaths(ctx, filePaths)
-			if err != nil || len(fileSummaries) == 0 {
-				continue
+			pkgJobs = append(pkgJobs, pkgJob{dir: dir, filePaths: filePaths, pkgSHA: pkgSHA})
+		}
+
+		var pkgEmbed []pending
+		if len(pkgJobs) > 0 {
+			conc := ix.Options.SummaryConcurrency
+			if conc < 1 {
+				conc = 1
 			}
-			summary, err := summarizePackage(ctx, ix.Options.Chat, dir, fileSummaries)
-			if err != nil {
-				ix.Options.Logger.Warn("package summarize failed", "dir", dir, "err", err)
-				continue
+			pkgResults := make([]*pending, len(pkgJobs))
+			eg, egctx := errgroup.WithContext(ctx)
+			eg.SetLimit(conc)
+			for i := range pkgJobs {
+				j := pkgJobs[i]
+				eg.Go(func() error {
+					fileSummaries, err := ix.Store.FileSummariesForPaths(egctx, j.filePaths)
+					if err != nil || len(fileSummaries) == 0 {
+						return nil
+					}
+					summary, err := summarizePackage(egctx, ix.Options.Chat, j.dir, fileSummaries)
+					if err != nil {
+						ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
+						return nil
+					}
+					if strings.TrimSpace(summary) == "" {
+						return nil
+					}
+					pkgResults[i] = &pending{
+						rel: j.dir,
+						chunk: chunk.Chunk{
+							Path:    j.dir,
+							Kind:    chunk.KindPackageSummary,
+							Content: summary,
+						},
+						sha: j.pkgSHA,
+					}
+					return nil
+				})
 			}
-			if strings.TrimSpace(summary) == "" {
-				continue
+			if err := eg.Wait(); err != nil {
+				return err
 			}
-			pkgEmbed = append(pkgEmbed, pending{
-				rel: dir,
-				chunk: chunk.Chunk{
-					Path:    dir,
-					Kind:    chunk.KindPackageSummary,
-					Content: summary,
-				},
-				sha: pkgSHA,
-			})
+			for _, p := range pkgResults {
+				if p != nil {
+					pkgEmbed = append(pkgEmbed, *p)
+					summariesGenerated++
+				}
+			}
 		}
 		if len(pkgEmbed) > 0 {
 			if ix.Options.Verbose {
@@ -687,6 +781,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			"chunks_seen", seen,
 			"files_fast_path", mtimeSkips.Load(),
 			"embedded", len(toEmbed),
+			"summaries_generated", summariesGenerated,
 			"pruned", pruned,
 			"skipped", skipped.Load())
 	}
