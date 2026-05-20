@@ -1293,10 +1293,26 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, syms []Sym
 			return
 		}
 		if sem[i].Content != "" {
+			// Summary chunks (file_summary / package_summary / repo_summary)
+			// arrive with synthesized prose already in Content via
+			// runSemanticLane — useful even for test files, since the
+			// summary distils signal rather than fixture boilerplate.
+			// Charge the budget but don't refetch.
 			budget -= len(sem[i].Content)
 			continue
 		}
 		if suppressLowScore && sem[i].Score < noiseFloorScore {
+			continue
+		}
+		// Skip inlining raw test source for non-editing intents. A
+		// test_test.go function body is rarely the answer to "how does
+		// X work" / "callers of Y" / architecture — but at ~4 KB per
+		// hit, it displaces implementation chunks from the shared byte
+		// pool. The Path / StartLine / EndLine pointer stays so the
+		// agent can Read the test on its own if it turns out to be
+		// relevant. editing_context is the exception: when you're about
+		// to modify a file, the sibling test is real context.
+		if intent != IntentEditingContext && isTestPath(sem[i].Path) {
 			continue
 		}
 		content, truncated, charged := fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)

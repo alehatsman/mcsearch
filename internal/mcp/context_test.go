@@ -653,6 +653,64 @@ func TestContextRouterNoInline(t *testing.T) {
 	}
 }
 
+// TestInlineContentSkipsTestSourceForNonEditing verifies that raw test
+// source in semantic_hits arrives with Path/Range only (no Content) for
+// non-editing intents, while the matching implementation chunk is
+// inlined. Test bodies displaced implementation from the shared inline
+// budget before this filter — surfaced when "architecture" / behavior
+// queries pulled foo_test.go above foo.go and burned ~4 KB on fixture
+// boilerplate. editing_context is the exception: sibling tests are
+// real context when modifying a file.
+//
+// Unit-tests inlineContent directly with pre-populated hits so the
+// suppressLowScore branch (fake-embed cosines are too low to clear the
+// confidence threshold) doesn't mask the filter's behavior.
+func TestInlineContentSkipsTestSourceForNonEditing(t *testing.T) {
+	projDir := t.TempDir()
+	implPath := filepath.Join(projDir, "greet.go")
+	testPath := filepath.Join(projDir, "greet_test.go")
+	writeFile(t, implPath,
+		"package main\n\nfunc Greet(name string) string { return \"hi \" + name }\n")
+	writeFile(t, testPath,
+		"package main\n\nimport \"testing\"\n\nfunc TestGreet(t *testing.T) {\n\tif Greet(\"x\") == \"\" {\n\t\tt.Fatal(\"oops\")\n\t}\n}\n")
+
+	mkHits := func() []SemHit {
+		// Scores set above lowConfidenceScore so suppressLowScore stays
+		// off — isolates the test-path filter as the only suppression.
+		return []SemHit{
+			{Path: "greet.go", StartLine: 3, EndLine: 3, Score: 0.9, Kind: "function_declaration"},
+			{Path: "greet_test.go", StartLine: 5, EndLine: 9, Score: 0.8, Kind: "function_declaration"},
+		}
+	}
+
+	t.Run("behavior_search drops test content", func(t *testing.T) {
+		sem := mkHits()
+		inlineContent(projDir, IntentBehaviorSearch, nil, nil, sem)
+		if sem[0].Content == "" {
+			t.Errorf("impl greet.go should be inlined; got empty")
+		}
+		if sem[1].Content != "" {
+			t.Errorf("test greet_test.go should be path-only; got %d bytes", len(sem[1].Content))
+		}
+	})
+
+	t.Run("architecture drops test content", func(t *testing.T) {
+		sem := mkHits()
+		inlineContent(projDir, IntentArchitecture, nil, nil, sem)
+		if sem[1].Content != "" {
+			t.Errorf("architecture: test should be path-only; got %d bytes", len(sem[1].Content))
+		}
+	})
+
+	t.Run("editing_context keeps test content", func(t *testing.T) {
+		sem := mkHits()
+		inlineContent(projDir, IntentEditingContext, nil, nil, sem)
+		if sem[1].Content == "" {
+			t.Errorf("editing_context: sibling test should be inlined; got empty")
+		}
+	})
+}
+
 func TestMaxSemanticScore(t *testing.T) {
 	// Observed in production: the router was reading score from
 	// hits[0], but semantic_hits is reordered by mergeSummaryHits and
