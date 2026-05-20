@@ -126,7 +126,14 @@ type SymbolHit struct {
 	// Shares the per-intent inline byte budget with suggested_reads /
 	// semantic_hits via inlineContent; oversized symbols are clipped at
 	// the per-range cap with Truncated=true.
-	Body      string `json:"body,omitempty"`
+	Body string `json:"body,omitempty"`
+	// Role is the compact call-graph tag (e.g. "central:13/2pkg",
+	// "exported-unused", "leaf") composed from centrality columns by
+	// formatRole. Empty when the symbol has no graph node (non-Go file,
+	// missing graph) or sits in the unremarkable middle. Mirrors the
+	// Role field on SearchHit and CallSite so all symbol surfaces look
+	// the same to an agent.
+	Role      string `json:"role,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
@@ -562,6 +569,7 @@ func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intent
 				StartLine:     h.StartLine,
 				EndLine:       h.EndLine,
 				Kind:          h.Kind,
+				Role:          formatRole(h.Name, h.InDegree, h.OutDegree, h.CrossPkgCallers),
 			})
 			paths[h.Path] = struct{}{}
 			if len(out) >= k {
