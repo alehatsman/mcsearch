@@ -765,6 +765,63 @@ func TestFindSymbolFallsBackToGraphNodes(t *testing.T) {
 	}
 }
 
+func TestFindSymbolSortsByCentrality(t *testing.T) {
+	// Two chunks with the same name. Wire one to a graph_node with a
+	// high in_degree and PageRank; the other to a zero-centrality node.
+	// FindSymbol should now return the central one first regardless of
+	// path order. Prevents the regression where a same-named glue
+	// function shipped ahead of the real domain symbol.
+	st, ctx := newStore(t)
+	now := time.Now()
+
+	if err := st.UpsertMany(ctx, []PendingChunk{
+		{Path: "a/glue.go", Kind: "fn", Name: "Run", StartLine: 1, EndLine: 3, ContentSHA: "g", Content: "x", Vec: []float32{1, 0, 0, 0}},
+		{Path: "b/core.go", Kind: "fn", Name: "Run", StartLine: 1, EndLine: 3, ContentSHA: "c", Content: "x", Vec: []float32{0, 1, 0, 0}},
+	}, now); err != nil {
+		t.Fatal(err)
+	}
+	// Recover chunk IDs so the graph node's chunk_id link is correct.
+	var glueID, coreID int64
+	if err := st.db.QueryRowContext(ctx, `SELECT id FROM chunks WHERE path='a/glue.go'`).Scan(&glueID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT id FROM chunks WHERE path='b/core.go'`).Scan(&coreID); err != nil {
+		t.Fatal(err)
+	}
+	nodes := []GraphNodeRow{
+		{ID: "n-glue", Kind: "function", Name: "Run", QualifiedName: "Run", PackagePath: "pkg/glue", FilePath: "a/glue.go", StartLine: 1, EndLine: 3, ChunkID: glueID, ContentHash: "h1"},
+		{ID: "n-core", Kind: "function", Name: "Run", QualifiedName: "Run", PackagePath: "pkg/core", FilePath: "b/core.go", StartLine: 1, EndLine: 3, ChunkID: coreID, ContentHash: "h2"},
+	}
+	if err := st.GraphUpsertNodes(ctx, nodes, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.GraphSetCentrality(ctx, []GraphCentralityRow{
+		{ID: "n-glue", InDegree: 0, PageRank: 0.001},
+		{ID: "n-core", InDegree: 8, CrossPkgCallers: 3, PageRank: 0.12},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hits, err := st.FindSymbol(ctx, "Run", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hits) != 2 {
+		t.Fatalf("want 2 hits, got %d", len(hits))
+	}
+	// Central node should sort first even though "a/" precedes "b/" by
+	// path.
+	if hits[0].Path != "b/core.go" {
+		t.Errorf("hits[0].Path = %q, want b/core.go (the central one); raw=%+v", hits[0].Path, hits)
+	}
+	if hits[0].InDegree != 8 || hits[0].CrossPkgCallers != 3 {
+		t.Errorf("centrality columns not propagated: %+v", hits[0])
+	}
+	if hits[1].Path != "a/glue.go" || hits[1].InDegree != 0 {
+		t.Errorf("hits[1] should be the glue (zero centrality); got %+v", hits[1])
+	}
+}
+
 func TestFindSymbolCandidates(t *testing.T) {
 	st, ctx := newStore(t)
 	now := time.Now()

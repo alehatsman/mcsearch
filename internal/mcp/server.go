@@ -58,7 +58,13 @@ type SearchHit struct {
 	// RerankScore is the cross-encoder relevance score in [0, 1] when
 	// rerank ran. Zero when no reranker was wired or it failed open.
 	RerankScore float32 `json:"rerank_score,omitempty"`
-	Content     string  `json:"content"`
+	// Role is a compact tag describing how the symbol sits in the call
+	// graph — e.g. "central:47/9pkg" (47 callers from 9 packages),
+	// "leaf" (no callees), "exported-unused" (exported but no callers).
+	// Empty when the symbol has no graph node (non-Go file, top-level
+	// const, etc.) or sits in the unremarkable middle. See formatRole.
+	Role    string `json:"role,omitempty"`
+	Content string `json:"content"`
 }
 
 type SearchOutput struct {
@@ -245,6 +251,7 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 			StartLine: h.StartLine,
 			EndLine:   h.EndLine,
 			Score:     1.0,
+			Role:      formatRole(h.Name, h.InDegree, h.OutDegree, h.CrossPkgCallers),
 			Content:   h.Content,
 		})
 	}

@@ -18,9 +18,24 @@ type GraphStore interface {
 	GraphStats(ctx context.Context) (nodes, edges int64, err error)
 	GraphAllNodes(ctx context.Context) ([]Node, error)
 	GraphAllEdges(ctx context.Context) ([]Edge, error)
+	// GraphSetCentrality batch-updates centrality columns (in/out
+	// degree, cross-package fanin, PageRank) on already-upserted nodes.
+	// Run as the post-edge pass in Indexer.Run.
+	GraphSetCentrality(ctx context.Context, rows []CentralityRow) error
 	// ChunksByPaths returns (chunk_id, start_line, end_line) for every
 	// chunk under any of paths. Used only by the chunk-linkage pass.
 	ChunksByPaths(ctx context.Context, paths []string) (map[string][]ChunkLocation, error)
+}
+
+// CentralityRow is the slice of a node's columns that the centrality
+// pass writes back to the store. Mirrors store.GraphCentralityRow so
+// callers don't have to import internal/store transitively.
+type CentralityRow struct {
+	ID              string
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
 }
 
 // ChunkLocation is the minimal chunk projection the chunk-linkage pass
@@ -85,6 +100,20 @@ func (a *storeAdapter) GraphAllEdges(ctx context.Context) ([]Edge, error) {
 	return out, nil
 }
 
+func (a *storeAdapter) GraphSetCentrality(ctx context.Context, rows []CentralityRow) error {
+	storeRows := make([]store.GraphCentralityRow, 0, len(rows))
+	for _, r := range rows {
+		storeRows = append(storeRows, store.GraphCentralityRow{
+			ID:              r.ID,
+			InDegree:        r.InDegree,
+			OutDegree:       r.OutDegree,
+			CrossPkgCallers: r.CrossPkgCallers,
+			PageRank:        r.PageRank,
+		})
+	}
+	return a.s.GraphSetCentrality(ctx, storeRows)
+}
+
 func (a *storeAdapter) ChunksByPaths(ctx context.Context, paths []string) (map[string][]ChunkLocation, error) {
 	raw, err := a.s.ChunksByPaths(ctx, paths)
 	if err != nil {
@@ -138,16 +167,20 @@ func edgeToRow(e Edge) store.GraphEdgeRow {
 
 func rowToNode(r store.GraphNodeRow) Node {
 	return Node{
-		ID:            r.ID,
-		Kind:          NodeKind(r.Kind),
-		Name:          r.Name,
-		QualifiedName: r.QualifiedName,
-		PackagePath:   r.PackagePath,
-		FilePath:      r.FilePath,
-		StartLine:     r.StartLine,
-		EndLine:       r.EndLine,
-		ChunkID:       r.ChunkID,
-		Metadata:      unmarshalMetadata(r.MetadataJSON),
+		ID:              r.ID,
+		Kind:            NodeKind(r.Kind),
+		Name:            r.Name,
+		QualifiedName:   r.QualifiedName,
+		PackagePath:     r.PackagePath,
+		FilePath:        r.FilePath,
+		StartLine:       r.StartLine,
+		EndLine:         r.EndLine,
+		ChunkID:         r.ChunkID,
+		Metadata:        unmarshalMetadata(r.MetadataJSON),
+		InDegree:        r.InDegree,
+		OutDegree:       r.OutDegree,
+		CrossPkgCallers: r.CrossPkgCallers,
+		PageRank:        r.PageRank,
 	}
 }
 

@@ -148,8 +148,12 @@ type CallSite struct {
 	EndLine       int    `json:"end_line"`
 	CallSitePath  string `json:"call_site_path,omitempty"` // file containing the call expression
 	CallSiteLine  int    `json:"call_site_line,omitempty"` // line of the call expression
-	Content       string `json:"content,omitempty"`
-	Truncated     bool   `json:"truncated,omitempty"`
+	// Role tags the peer the same way SearchHit.Role does: how this
+	// function sits in the call graph. Empty for unremarkable peers.
+	// See formatRole for the threshold/tiering rules.
+	Role      string `json:"role,omitempty"`
+	Content   string `json:"content,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
 }
 
 // TargetMatch is one resolved interpretation of the input `name`.
@@ -273,6 +277,7 @@ func (s *Server) callEdges(ctx context.Context, in CallEdgeInput, callers bool) 
 				EndLine:       peer.EndLine,
 				CallSitePath:  e.FilePath,
 				CallSiteLine:  e.StartLine,
+				Role:          formatRole(peer.Name, peer.InDegree, peer.OutDegree, peer.CrossPkgCallers),
 			}
 			out.Hits = append(out.Hits, hit)
 			if len(out.Hits) >= k {
@@ -284,18 +289,43 @@ func (s *Server) callEdges(ctx context.Context, in CallEdgeInput, callers bool) 
 		}
 	}
 
-	// Stable ordering: file path, then start line. Keeps two runs of
-	// the same query identical even when the in-memory edge slice
-	// reorders.
-	sort.Slice(out.Hits, func(i, j int) bool {
-		a, b := out.Hits[i], out.Hits[j]
-		if a.Path != b.Path {
-			return a.Path < b.Path
+	// Sort hits by peer centrality, then by path/line for determinism.
+	// peerCentrality is a closure over view.nodesByID so we don't
+	// re-resolve per hit. PageRank dominates; in_degree breaks ties
+	// for peers that didn't pick up rank (e.g. callees with no
+	// incoming edges in the indexed slice).
+	peerCentrality := func(h CallSite) (float64, int) {
+		// Resolve peer node by qualified name + package — the same key
+		// we used when populating the hit.
+		for _, n := range view.nodesByQualified[h.QualifiedName] {
+			if n.PackagePath == h.Package {
+				return n.PageRank, n.InDegree
+			}
 		}
-		if a.StartLine != b.StartLine {
-			return a.StartLine < b.StartLine
+		for _, n := range view.nodesByName[h.QualifiedName] {
+			if n.PackagePath == h.Package {
+				return n.PageRank, n.InDegree
+			}
 		}
-		return a.CallSiteLine < b.CallSiteLine
+		return 0, 0
+	}
+	sort.SliceStable(out.Hits, func(i, j int) bool {
+		ai, aj := out.Hits[i], out.Hits[j]
+		pi, di := peerCentrality(ai)
+		pj, dj := peerCentrality(aj)
+		if pi != pj {
+			return pi > pj
+		}
+		if di != dj {
+			return di > dj
+		}
+		if ai.Path != aj.Path {
+			return ai.Path < aj.Path
+		}
+		if ai.StartLine != aj.StartLine {
+			return ai.StartLine < aj.StartLine
+		}
+		return ai.CallSiteLine < aj.CallSiteLine
 	})
 
 	// Inline a short slice of each hit's containing function so the

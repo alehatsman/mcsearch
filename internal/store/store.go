@@ -283,6 +283,31 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: name_col flag: %w", err)
 		}
 	}
+	// Centrality columns on graph_nodes — populated post-extract from
+	// the `calls` edges. All four default to 0 so untouched rows behave
+	// as "unknown" (sort_by_centrality just deprioritises them). Added
+	// idempotently per the name_col pattern.
+	var centralityColsAdded string
+	_ = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='centrality_cols_added'`).Scan(&centralityColsAdded)
+	if centralityColsAdded != "1" {
+		alters := []string{
+			`ALTER TABLE graph_nodes ADD COLUMN in_degree INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE graph_nodes ADD COLUMN out_degree INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE graph_nodes ADD COLUMN cross_pkg_callers INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE graph_nodes ADD COLUMN pagerank REAL NOT NULL DEFAULT 0`,
+		}
+		for _, q := range alters {
+			if _, err := s.db.ExecContext(ctx, q); err != nil &&
+				!strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("migrate: %s: %w", q, err)
+			}
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`INSERT INTO meta(key, value) VALUES('centrality_cols_added', '1')
+			 ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+			return fmt.Errorf("migrate: centrality flag: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -653,6 +678,17 @@ type Hit struct {
 	// the (query, chunk) pair. Zero when rerank didn't run (no client
 	// wired, pool ≤ k, or endpoint unreachable). Larger = more relevant.
 	RerankScore float32
+
+	// Centrality fields — populated from graph_nodes via the
+	// chunk_id join when the symbol has a corresponding graph node.
+	// Zero when no graph node exists (the file is in an unindexed
+	// language, the chunk isn't a function/method, or the graph hasn't
+	// been built yet). Callers use these to sort and to compose the
+	// role-hint shown to agents.
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
 }
 
 // FormatHits renders a slice of hits as a fenced CONTEXT block for
@@ -1268,10 +1304,28 @@ func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, erro
 	if k <= 0 {
 		k = 10
 	}
+	// LEFT JOIN graph_nodes on chunk_id surfaces centrality columns for
+	// the (typically single) graph node bound to each chunk. When the
+	// graph hasn't been built — or the chunk isn't a function/method —
+	// the COALESCEd zeros sink the row to the natural path-order tail,
+	// preserving the pre-centrality default.
+	//
+	// Sort key: pagerank DESC, in_degree DESC, then path/line for
+	// determinism on ties. Centrality is per-symbol, so two callers
+	// asking "search_symbol Indexer" land on the SAME top result every
+	// run, instead of whichever chunk happens to come first in path
+	// order.
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, path, kind, name, start_line, end_line, content
-		 FROM chunks WHERE name = ?
-		 ORDER BY path, start_line LIMIT ?`,
+		`SELECT c.id, c.path, c.kind, c.name, c.start_line, c.end_line, c.content,
+		        COALESCE(g.in_degree, 0), COALESCE(g.out_degree, 0),
+		        COALESCE(g.cross_pkg_callers, 0), COALESCE(g.pagerank, 0)
+		 FROM chunks c
+		 LEFT JOIN graph_nodes g ON g.chunk_id = c.id
+		 WHERE c.name = ?
+		 ORDER BY COALESCE(g.pagerank, 0) DESC,
+		          COALESCE(g.in_degree, 0) DESC,
+		          c.path, c.start_line
+		 LIMIT ?`,
 		name, k)
 	if err != nil {
 		return nil, err
@@ -1281,7 +1335,8 @@ func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, erro
 	for rows.Next() {
 		var id int64
 		var h Hit
-		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.Name, &h.StartLine, &h.EndLine, &h.Content); err != nil {
+		if err := rows.Scan(&id, &h.Path, &h.Kind, &h.Name, &h.StartLine, &h.EndLine, &h.Content,
+			&h.InDegree, &h.OutDegree, &h.CrossPkgCallers, &h.PageRank); err != nil {
 			return nil, err
 		}
 		out = append(out, h)
@@ -1303,10 +1358,11 @@ func (s *Store) FindSymbol(ctx context.Context, name string, k int) ([]Hit, erro
 // surrounding lookup.
 func (s *Store) findSymbolInGraph(ctx context.Context, name string, k int) ([]Hit, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT kind, name, file_path, start_line, end_line
+		`SELECT kind, name, file_path, start_line, end_line,
+		        in_degree, out_degree, cross_pkg_callers, pagerank
 		 FROM graph_nodes
 		 WHERE name = ? AND file_path != '' AND start_line > 0
-		 ORDER BY file_path, start_line LIMIT ?`,
+		 ORDER BY pagerank DESC, in_degree DESC, file_path, start_line LIMIT ?`,
 		name, k)
 	if err != nil {
 		// graph_nodes may not exist on older indexes — degrade silently.
@@ -1316,7 +1372,8 @@ func (s *Store) findSymbolInGraph(ctx context.Context, name string, k int) ([]Hi
 	var out []Hit
 	for rows.Next() {
 		var h Hit
-		if err := rows.Scan(&h.Kind, &h.Name, &h.Path, &h.StartLine, &h.EndLine); err != nil {
+		if err := rows.Scan(&h.Kind, &h.Name, &h.Path, &h.StartLine, &h.EndLine,
+			&h.InDegree, &h.OutDegree, &h.CrossPkgCallers, &h.PageRank); err != nil {
 			return nil, err
 		}
 		out = append(out, h)

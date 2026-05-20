@@ -78,6 +78,17 @@ type Node struct {
 	EndLine       int
 	ChunkID       int64 // 0 = unlinked
 	Metadata      map[string]any
+
+	// Centrality fields — populated by ComputeCentrality from the
+	// `calls` edges, persisted via GraphStore.GraphSetCentrality.
+	// Zero on freshly-extracted Nodes; only the centrality pass writes
+	// them, so ContentHash deliberately ignores them (a changed
+	// in_degree must not look like a node-payload change to the prune
+	// pass).
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
 }
 
 // Edge is a directed relationship persisted in graph_edges.
@@ -275,6 +286,24 @@ func (g *Indexer) Run(ctx context.Context) (*Stats, error) {
 	prunedNodes, prunedEdges, err := g.store.GraphPruneUnseen(ctx, t0)
 	if err != nil {
 		return nil, fmt.Errorf("prune: %w", err)
+	}
+
+	// Centrality pass — must run after prune so deleted nodes don't
+	// linger with stale ranks. Cheap on the current scale (<10k
+	// nodes); a single SQLite transaction even at full repo size.
+	centrality := ComputeCentrality(result.Nodes, result.Edges)
+	centralityRows := make([]CentralityRow, 0, len(centrality))
+	for id, r := range centrality {
+		centralityRows = append(centralityRows, CentralityRow{
+			ID:              id,
+			InDegree:        r.InDegree,
+			OutDegree:       r.OutDegree,
+			CrossPkgCallers: r.CrossPkgCallers,
+			PageRank:        r.PageRank,
+		})
+	}
+	if err := g.store.GraphSetCentrality(ctx, centralityRows); err != nil {
+		return nil, fmt.Errorf("set centrality: %w", err)
 	}
 
 	return &Stats{

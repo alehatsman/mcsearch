@@ -29,6 +29,24 @@ type GraphNodeRow struct {
 	ChunkID       int64 // 0 = NULL
 	MetadataJSON  []byte
 	ContentHash   string
+	// Centrality columns. Populated by graph.ComputeCentrality after the
+	// upsert pass. Zero on freshly-upserted rows; stays zero for nodes
+	// the centrality computation skips (non-calls-graph nodes).
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
+}
+
+// GraphCentralityRow is the minimal slice of GraphNodeRow needed to
+// update a node's centrality columns. Used by GraphSetCentrality so
+// the centrality pass doesn't have to rewrite every other field.
+type GraphCentralityRow struct {
+	ID              string
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
 }
 
 // GraphEdgeRow mirrors one graph_edges row. Same rationale as
@@ -182,7 +200,8 @@ func (s *Store) GraphStats(ctx context.Context) (nodes, edges int64, err error) 
 func (s *Store) GraphAllNodes(ctx context.Context) ([]GraphNodeRow, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, kind, name, qualified_name, package_path, file_path,
-		        start_line, end_line, COALESCE(chunk_id, 0), metadata_json, content_hash
+		        start_line, end_line, COALESCE(chunk_id, 0), metadata_json, content_hash,
+		        in_degree, out_degree, cross_pkg_callers, pagerank
 		   FROM graph_nodes
 		  ORDER BY id`)
 	if err != nil {
@@ -194,13 +213,48 @@ func (s *Store) GraphAllNodes(ctx context.Context) ([]GraphNodeRow, error) {
 		var r GraphNodeRow
 		var md string
 		if err := rows.Scan(&r.ID, &r.Kind, &r.Name, &r.QualifiedName, &r.PackagePath, &r.FilePath,
-			&r.StartLine, &r.EndLine, &r.ChunkID, &md, &r.ContentHash); err != nil {
+			&r.StartLine, &r.EndLine, &r.ChunkID, &md, &r.ContentHash,
+			&r.InDegree, &r.OutDegree, &r.CrossPkgCallers, &r.PageRank); err != nil {
 			return nil, err
 		}
 		r.MetadataJSON = []byte(md)
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// GraphSetCentrality batch-updates centrality columns on graph_nodes.
+// Run after GraphUpsertNodes / GraphUpsertEdges have settled — the
+// caller computes degrees + PageRank from the in-memory edge slice and
+// writes the result here in a single transaction. Rows whose ID is not
+// in the table are silently ignored (UPDATE is a no-op).
+func (s *Store) GraphSetCentrality(ctx context.Context, rows []GraphCentralityRow) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx,
+		`UPDATE graph_nodes
+		    SET in_degree         = ?,
+		        out_degree        = ?,
+		        cross_pkg_callers = ?,
+		        pagerank          = ?
+		  WHERE id = ?`)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range rows {
+		if _, err := stmt.ExecContext(ctx, r.InDegree, r.OutDegree, r.CrossPkgCallers, r.PageRank, r.ID); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("set centrality %s: %w", r.ID, err)
+		}
+	}
+	return tx.Commit()
 }
 
 // GraphAllEdges streams every edge row.

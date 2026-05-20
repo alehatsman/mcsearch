@@ -56,6 +56,13 @@ type graphNode struct {
 	FilePath      string
 	StartLine     int
 	EndLine       int
+	// Centrality columns, populated from graph_nodes. Used by call-edge
+	// tools to sort peers by importance and to compose the role hint
+	// attached to each result.
+	InDegree        int
+	OutDegree       int
+	CrossPkgCallers int
+	PageRank        float64
 }
 
 type graphEdge struct {
@@ -99,14 +106,18 @@ func loadGraphView(ctx context.Context, st *store.Store) (*graphView, error) {
 	}
 	for _, r := range nodeRows {
 		n := graphNode{
-			ID:            r.ID,
-			Kind:          graph.NodeKind(r.Kind),
-			Name:          r.Name,
-			QualifiedName: r.QualifiedName,
-			PackagePath:   r.PackagePath,
-			FilePath:      r.FilePath,
-			StartLine:     r.StartLine,
-			EndLine:       r.EndLine,
+			ID:              r.ID,
+			Kind:            graph.NodeKind(r.Kind),
+			Name:            r.Name,
+			QualifiedName:   r.QualifiedName,
+			PackagePath:     r.PackagePath,
+			FilePath:        r.FilePath,
+			StartLine:       r.StartLine,
+			EndLine:         r.EndLine,
+			InDegree:        r.InDegree,
+			OutDegree:       r.OutDegree,
+			CrossPkgCallers: r.CrossPkgCallers,
+			PageRank:        r.PageRank,
 		}
 		v.nodesByID[n.ID] = n
 		if n.Name != "" {
