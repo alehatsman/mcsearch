@@ -215,6 +215,35 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_src       ON graph_edges(src_id, kind)`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_dst       ON graph_edges(dst_id, kind)`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_last_seen ON graph_edges(last_seen_at)`,
+		// pending_summaries holds work queued by `mcsearch index --summarize`
+		// when running in deferred mode. Each row is one summarization job
+		// that the drainer (`mcsearch summarize` or watch idle ticks) will
+		// pick up later. UNIQUE(path,kind,content_sha1) makes Enqueue
+		// idempotent — repeating an index run on the same source content
+		// doesn't multiply queue entries.
+		//
+		// content_sha1 is the SHA of the *target* summary chunk (what
+		// ultimately lands in chunks.content_sha1 once drained), so a
+		// pending row that already has a matching chunks row can be
+		// deduped at enqueue time. source_sha1 is set on chunk_summary
+		// rows to let the drainer look up the source chunk's content in
+		// chunks (path, content_sha1=source_sha1) without re-parsing.
+		`CREATE TABLE IF NOT EXISTS pending_summaries (
+		   id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		   path          TEXT NOT NULL,
+		   kind          TEXT NOT NULL,
+		   content_sha1  TEXT NOT NULL,
+		   start_line    INTEGER NOT NULL DEFAULT 0,
+		   end_line      INTEGER NOT NULL DEFAULT 0,
+		   chunk_kind    TEXT NOT NULL DEFAULT '',
+		   chunk_name    TEXT NOT NULL DEFAULT '',
+		   source_sha1   TEXT NOT NULL DEFAULT '',
+		   queued_at     INTEGER NOT NULL,
+		   attempts      INTEGER NOT NULL DEFAULT 0,
+		   last_error    TEXT NOT NULL DEFAULT '',
+		   UNIQUE(path, kind, content_sha1)
+		 )`,
+		`CREATE INDEX IF NOT EXISTS idx_pending_summaries_queued ON pending_summaries(queued_at)`,
 	}
 	for _, q := range stmts {
 		if _, err := s.db.ExecContext(ctx, q); err != nil {
