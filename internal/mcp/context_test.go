@@ -116,7 +116,7 @@ func TestPickSuggestedReadsSymbolIntent(t *testing.T) {
 		{QualifiedName: "Foo", Path: "a.go", StartLine: 10, EndLine: 20},
 		{QualifiedName: "Bar", Path: "b.go", StartLine: 5, EndLine: 15},
 	}
-	got := pickSuggestedReads(IntentSymbolLookup, nil, syms, nil)
+	got := pickSuggestedReads(IntentSymbolLookup, nil, syms, nil, nil)
 	if len(got) != 2 || got[0].Path != "a.go" || got[1].Path != "b.go" {
 		t.Fatalf("got %+v", got)
 	}
@@ -134,7 +134,7 @@ func TestPickSuggestedReadsCrossLaneBias(t *testing.T) {
 	}
 	symbolPaths := map[string]struct{}{"b.go": {}}
 
-	got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, symbolPaths)
+	got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, symbolPaths, nil)
 	if len(got) != 2 {
 		t.Fatalf("got %+v", got)
 	}
@@ -155,13 +155,13 @@ func TestPickSuggestedReadsCodePreferredOverDocs(t *testing.T) {
 		{Path: "README.md", Score: 0.66},
 		{Path: "internal/store/store.go", Score: 0.51},
 	}
-	got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, nil)
+	got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, nil, nil)
 	if len(got) == 0 || got[0].Path != "internal/store/store.go" {
 		t.Errorf("behavior_search should prefer .go over .md tiebreaker; got %+v", got)
 	}
 
 	// Architecture explicitly welcomes README — no demotion.
-	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil, nil)
 	if len(gotArch) == 0 || gotArch[0].Path != "README.md" {
 		t.Errorf("architecture should keep README on top; got %+v", gotArch)
 	}
@@ -175,14 +175,94 @@ func TestPickSuggestedReadsCodePreferredOverBuildFiles(t *testing.T) {
 		{Path: "Taskfile.yml", Score: 0.66},
 		{Path: "internal/mcp/server.go", Score: 0.40},
 	}
-	got := pickSuggestedReads(IntentEditingContext, sem, nil, nil)
+	got := pickSuggestedReads(IntentEditingContext, sem, nil, nil, nil)
 	if len(got) == 0 || got[0].Path != "internal/mcp/server.go" {
 		t.Errorf("editing_context should prefer .go over Taskfile.yml; got %+v", got)
 	}
-	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	gotArch := pickSuggestedReads(IntentArchitecture, sem, nil, nil, nil)
 	if len(gotArch) == 0 || gotArch[0].Path != "Taskfile.yml" {
 		t.Errorf("architecture should leave score order intact; got %+v", gotArch)
 	}
+}
+
+// TestPickSuggestedReadsPageRankTiebreaker verifies that for
+// architecture / package_topology intents, two hits whose scores fall
+// in the same 0.05-wide bucket are reordered by PageRank — so a
+// structural hub like `Indexer.Run` beats a near-tied non-hub.
+// Outside that bucket, score continues to dominate. Non-exploration
+// intents keep the strict score order untouched.
+func TestPickSuggestedReadsPageRankTiebreaker(t *testing.T) {
+	// view stub: hub.go has a node with PageRank 0.8, ordinary.go is
+	// 0.05. Both files have one whole-file-spanning function node so
+	// chunkPageRank's "covering" path resolves.
+	view := &graphView{
+		nodesByPath: map[string][]graphNode{
+			"hub.go":      {{ID: "hub", Kind: graph.NodeFunction, FilePath: "hub.go", StartLine: 1, EndLine: 100, PageRank: 0.8}},
+			"ordinary.go": {{ID: "ord", Kind: graph.NodeFunction, FilePath: "ordinary.go", StartLine: 1, EndLine: 100, PageRank: 0.05}},
+		},
+	}
+
+	t.Run("hub wins inside same score bucket for architecture", func(t *testing.T) {
+		// 0.55 and 0.58 both land in bucket 11 (int(score*20) == 11).
+		// Without centrality the higher-scored ordinary.go would win.
+		sem := []SemHit{
+			{Path: "ordinary.go", StartLine: 1, EndLine: 10, Score: 0.58},
+			{Path: "hub.go", StartLine: 1, EndLine: 10, Score: 0.55},
+		}
+		got := pickSuggestedReads(IntentArchitecture, sem, nil, nil, view)
+		if len(got) == 0 || got[0].Path != "hub.go" {
+			t.Errorf("PageRank should flip ordering within score bucket; got %+v", got)
+		}
+	})
+
+	t.Run("score still dominates across buckets for architecture", func(t *testing.T) {
+		// 0.70 vs 0.50 — different buckets (14 vs 10). Hub's PageRank
+		// can't flip this: the score gap is real, not marginal.
+		sem := []SemHit{
+			{Path: "ordinary.go", StartLine: 1, EndLine: 10, Score: 0.70},
+			{Path: "hub.go", StartLine: 1, EndLine: 10, Score: 0.50},
+		}
+		got := pickSuggestedReads(IntentArchitecture, sem, nil, nil, view)
+		if len(got) == 0 || got[0].Path != "ordinary.go" {
+			t.Errorf("score-bucket gap should keep ordinary.go on top; got %+v", got)
+		}
+	})
+
+	t.Run("package_topology also uses centrality", func(t *testing.T) {
+		sem := []SemHit{
+			{Path: "ordinary.go", StartLine: 1, EndLine: 10, Score: 0.58},
+			{Path: "hub.go", StartLine: 1, EndLine: 10, Score: 0.55},
+		}
+		got := pickSuggestedReads(IntentPackageTopology, sem, nil, nil, view)
+		if len(got) == 0 || got[0].Path != "hub.go" {
+			t.Errorf("package_topology should also reorder by PageRank; got %+v", got)
+		}
+	})
+
+	t.Run("behavior_search ignores PageRank — strict score order", func(t *testing.T) {
+		sem := []SemHit{
+			{Path: "ordinary.go", StartLine: 1, EndLine: 10, Score: 0.58},
+			{Path: "hub.go", StartLine: 1, EndLine: 10, Score: 0.55},
+		}
+		got := pickSuggestedReads(IntentBehaviorSearch, sem, nil, nil, view)
+		if len(got) == 0 || got[0].Path != "ordinary.go" {
+			t.Errorf("behavior_search should keep score order regardless of PageRank; got %+v", got)
+		}
+	})
+
+	t.Run("nil view degrades to pure score order for architecture", func(t *testing.T) {
+		// No graph loaded — chunkPageRank returns 0 for everyone, so
+		// the bucket tiebreaker is a wash and the comparator falls
+		// through to the final score-compare line.
+		sem := []SemHit{
+			{Path: "ordinary.go", StartLine: 1, EndLine: 10, Score: 0.58},
+			{Path: "hub.go", StartLine: 1, EndLine: 10, Score: 0.55},
+		}
+		got := pickSuggestedReads(IntentArchitecture, sem, nil, nil, nil)
+		if len(got) == 0 || got[0].Path != "ordinary.go" {
+			t.Errorf("nil view should fall back to score order; got %+v", got)
+		}
+	})
 }
 
 func TestIsBuildOrConfigPath(t *testing.T) {
@@ -792,7 +872,7 @@ func TestPickSuggestedReadsFiltersRollupSummaries(t *testing.T) {
 		{Path: ".", Kind: "repo_summary", Score: 0.90},
 		{Path: "internal/store/store.go", StartLine: 100, EndLine: 150, Kind: "method_declaration", Score: 0.85},
 	}
-	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil, nil)
 	for _, r := range got {
 		if r.Path == "internal/index" || r.Path == "." {
 			t.Errorf("rollup-summary path %q leaked into suggested_reads", r.Path)
@@ -816,7 +896,7 @@ func TestPickSuggestedReadsArchitectureCap(t *testing.T) {
 		{Path: "c.go", Score: 0.7}, {Path: "d.go", Score: 0.6},
 		{Path: "e.go", Score: 0.5}, {Path: "f.go", Score: 0.4},
 	}
-	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil)
+	got := pickSuggestedReads(IntentArchitecture, sem, nil, nil, nil)
 	// Exploration intents widen to 5 reads so the initial bundle gives
 	// the caller a real cross-file picture.
 	if len(got) != 5 {

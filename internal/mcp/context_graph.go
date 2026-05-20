@@ -148,6 +148,45 @@ func loadGraphView(ctx context.Context, st *store.Store) (*graphView, error) {
 	return v, nil
 }
 
+// chunkPageRank resolves a chunk's PageRank via the in-memory graph
+// view. Used by pickSuggestedReads as a tiebreaker for exploration
+// intents (architecture / package_topology) so a high-centrality hub
+// like Indexer.Run beats a marginally-higher-scored tuning doc when
+// scores cluster.
+//
+// Resolution prefers the node whose declared line range covers
+// startLine; falls back to the highest-PageRank node in the file when
+// none matches (file-level summary chunks point at line 0-0 and we
+// want the file's most-central symbol to represent them). Returns 0
+// when no graph node exists for the path — non-Go files, top-level
+// consts, no graph indexed — which makes the tiebreaker degrade
+// silently to "no preference."
+func chunkPageRank(view *graphView, path string, startLine int) float64 {
+	if view == nil {
+		return 0
+	}
+	nodes := view.nodesByPath[path]
+	if len(nodes) == 0 {
+		return 0
+	}
+	var bestCovering float64
+	for _, n := range nodes {
+		if startLine >= n.StartLine && startLine <= n.EndLine && n.PageRank > bestCovering {
+			bestCovering = n.PageRank
+		}
+	}
+	if bestCovering > 0 {
+		return bestCovering
+	}
+	var bestAny float64
+	for _, n := range nodes {
+		if n.PageRank > bestAny {
+			bestAny = n.PageRank
+		}
+	}
+	return bestAny
+}
+
 // enrichGraph populates GraphResult based on the resolved intent.
 // Mutates out.Graph in place. Returns whether anything was emitted —
 // the caller uses this to keep avoid/next_action consistent.
