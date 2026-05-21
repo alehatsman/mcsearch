@@ -106,7 +106,7 @@ func TestCheckIndexableAllowlistTildeExpansion(t *testing.T) {
 	if err != nil || home == "" {
 		t.Skip("no $HOME available")
 	}
-	parent := filepath.Join(home, ".cache", "mcsearch-guard-test")
+	parent := filepath.Join(home, ".cache", "dex-guard-test")
 	if err := os.MkdirAll(parent, 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -66,7 +66,7 @@ func TestGitignoreAndMcsearchIgnore(t *testing.T) {
 		[]byte("# project\n*.tmp\n/build\ndocs/private/\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root, ".mcsearch-ignore"),
+	if err := os.WriteFile(filepath.Join(root, ".dex-ignore"),
 		[]byte("scratch/\n!scratch/keep.md\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -102,7 +102,7 @@ func TestGitignoreAndMcsearchIgnore(t *testing.T) {
 
 func TestDoubleStarPatterns(t *testing.T) {
 	root := t.TempDir()
-	if err := os.WriteFile(filepath.Join(root, ".mcsearch-ignore"),
+	if err := os.WriteFile(filepath.Join(root, ".dex-ignore"),
 		[]byte("**/__pycache__/\n**/*.bak\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

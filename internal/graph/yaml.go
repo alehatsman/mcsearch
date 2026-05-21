@@ -40,7 +40,7 @@ var mooncakeRefKeys = map[string]struct{}{
 var yamlRefLine = regexp.MustCompile(`^\s*-?\s*(import|vars\.load|use)\s*:\s*(.+?)\s*$`)
 
 // ExtractYAML walks projectRoot for .yml/.yaml files (honoring
-// .gitignore + .mcsearch-ignore via internal/ignore) and emits file
+// .gitignore + .dex-ignore via internal/ignore) and emits file
 // nodes + `imports` edges for mooncake-style `import:` / `vars.load:`
 // references. Returns an empty ExtractResult on a tree with no YAML.
 func ExtractYAML(ctx context.Context, projectRoot string) (*ExtractResult, error) {
