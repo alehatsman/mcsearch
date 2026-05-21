@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/mcp"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/mcp"
+	"github.com/alehatsman/dex/internal/store"
 )
 
-// endpointProbe captures one configured backend for `mcsearch index status`
+// endpointProbe captures one configured backend for `dex index status`
 // to report. health is nil for probes that aren't reachable to begin with
 // (unset opt-in URL, summary inheriting chat) — those skip the HTTP call
 // and use the pre-set status string.
@@ -30,7 +30,7 @@ type endpointProbe struct {
 // collectEndpoints builds the probe list the status command displays.
 // Mirrors the env wiring in main.go: embed/chat always present (they
 // have defaults); rerank/compress/draft are opt-in; summary falls back
-// to chat when MCSEARCH_SUMMARY_URL is unset.
+// to chat when DEX_SUMMARY_URL is unset.
 func collectEndpoints() []endpointProbe {
 	probes := []endpointProbe{}
 
@@ -58,9 +58,9 @@ func collectEndpoints() []endpointProbe {
 		probes = append(probes, endpointProbe{name: "draft", status: "not configured"})
 	}
 
-	// summary inherits chat unless MCSEARCH_SUMMARY_URL is set explicitly;
+	// summary inherits chat unless DEX_SUMMARY_URL is set explicitly;
 	// we report it as its own row so users can see which leg indexing uses.
-	if os.Getenv("MCSEARCH_SUMMARY_URL") == "" {
+	if os.Getenv("DEX_SUMMARY_URL") == "" {
 		probes = append(probes, endpointProbe{name: "summary", status: "inherits chat"})
 	} else {
 		sc := newSummaryClient()
@@ -114,7 +114,7 @@ func displayCell(s string) string {
 	return s
 }
 
-// queryJSONHit is the wire shape for `mcsearch search semantic --format=json`.
+// queryJSONHit is the wire shape for `dex search semantic --format=json`.
 // Mirrors mcp.SearchHit so the two CLI/MCP surfaces stay aligned.
 type queryJSONHit struct {
 	Path        string  `json:"path"`

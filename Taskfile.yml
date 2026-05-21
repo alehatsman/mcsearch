@@ -1,4 +1,4 @@
-# go-task entry point for mcsearch — https://taskfile.dev
+# go-task entry point for dex — https://taskfile.dev
 #
 # Quick reference:
 #   task                  # list available tasks
@@ -11,7 +11,7 @@ version: '3'
 
 vars:
   PKG: ./...
-  BIN: mcsearch
+  BIN: dex
   # mattn/go-sqlite3 ships FTS5 only with this tag enabled; the project's
   # chunks_fts virtual table and hybrid BM25 leg require it.
   GO_TAGS: sqlite_fts5
@@ -70,13 +70,13 @@ tasks:
   # Build / install / clean
   # ---------------------------------------------------------------------------
   build:
-    desc: Build the mcsearch binary
+    desc: Build the dex binary
     cmds:
       - go mod download
-      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/dex
 
   install:
-    desc: Build, install mcsearch to ~/.local/bin, and restart any running instances
+    desc: Build, install dex to ~/.local/bin, and restart any running instances
     vars:
       INSTALL_PATH: '{{.INSTALL_PATH | default (printf "%s/.local/bin" .HOME)}}'
     cmds:
@@ -86,10 +86,10 @@ tasks:
       - mv -f {{.INSTALL_PATH}}/{{.BIN}}.new {{.INSTALL_PATH}}/{{.BIN}}
       - echo "✓ Installed {{.INSTALL_PATH}}/{{.BIN}}"
       - |
-        count=$(pgrep -x mcsearch | wc -l | tr -d ' ')
+        count=$(pgrep -x dex | wc -l | tr -d ' ')
         if [ "$count" -gt 0 ]; then
-          pkill -x mcsearch || true
-          echo "✓ Restarted $count mcsearch process(es) — MCP clients will reconnect automatically"
+          pkill -x dex || true
+          echo "✓ Restarted $count dex process(es) — MCP clients will reconnect automatically"
         fi
 
   clean:
@@ -254,7 +254,7 @@ tasks:
     internal: true
     cmds:
       - 'echo "[1/7] build"'
-      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/mcsearch
+      - go build -trimpath -tags '{{.GO_TAGS}}' -ldflags "-s -w" -o {{.BIN}} ./cmd/dex
 
   ci:test:
     internal: true

@@ -12,8 +12,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chunk"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/chunk"
+	"github.com/alehatsman/dex/internal/store"
 	"golang.org/x/sync/errgroup"
 )
 

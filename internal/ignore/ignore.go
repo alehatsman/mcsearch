@@ -110,7 +110,7 @@ var DefaultPatterns = []string{
 	"LEGAL.*",
 }
 
-// IndexableExtensions are the file extensions mcsearch will attempt to
+// IndexableExtensions are the file extensions dex will attempt to
 // chunk. Everything else is skipped. Add to this list when extending the
 // chunker to a new language.
 var IndexableExtensions = map[string]bool{
@@ -225,7 +225,7 @@ func (m *Matcher) Match(relPath string, isDir bool) bool {
 	return m.g.MatchesPath(p)
 }
 
-// IndexableExt returns true if the file extension is one mcsearch will
+// IndexableExt returns true if the file extension is one dex will
 // attempt to chunk.
 func IndexableExt(path string) bool {
 	return IndexableExtensions[strings.ToLower(filepath.Ext(path))]

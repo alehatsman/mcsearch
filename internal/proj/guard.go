@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-const EnvAllowPaths = "MCSEARCH_ALLOW_PATHS"
+const EnvAllowPaths = "DEX_ALLOW_PATHS"
 
 var systemHardDeny = map[string]struct{}{
 	"/":             {},

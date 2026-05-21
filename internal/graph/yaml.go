@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/alehatsman/mcsearch/internal/ignore"
+	"github.com/alehatsman/dex/internal/ignore"
 )
 
 // yamlPkg is the synthetic "package" used to namespace YAML-graph IDs
@@ -30,9 +30,9 @@ var mooncakeRefKeys = map[string]struct{}{
 
 // yamlRefLine matches a single list-item line of the form
 //
-//	- import: ./path.yml
-//	- vars.load: "./other.yml"
-//	  import: ../sibling.yml   # without leading dash
+//   - import: ./path.yml
+//   - vars.load: "./other.yml"
+//     import: ../sibling.yml   # without leading dash
 //
 // Group 1 = key, group 2 = the rest of the line (path + optional
 // trailing comment). The leading dash is optional so block-mapping

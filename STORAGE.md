@@ -1,10 +1,10 @@
-# mcsearch Storage Architecture (`internal/store`)
+# dex Storage Architecture (`internal/store`)
 
 ## One SQLite file per project
 
-`$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`. Driver: `mattn/go-sqlite3` with `sqlite_fts5`; sqlite-vec is statically linked via `asg017/sqlite-vec-go-bindings/cgo` and **auto-registered globally** in `init()` (`store.go:34-38`) so every connection has `vec0` and `vec_distance_cosine()` available.
+`$DEX_INDEX_DIR/<sha256(realpath(project_root))>/index.db`. Driver: `mattn/go-sqlite3` with `sqlite_fts5`; sqlite-vec is statically linked via `asg017/sqlite-vec-go-bindings/cgo` and **auto-registered globally** in `init()` (`store.go:34-38`) so every connection has `vec0` and `vec_distance_cosine()` available.
 
-Connection settings (`store.go:92-98`): WAL journal, `synchronous=NORMAL`, `busy_timeout=5000` (so concurrent `mcsearch index` + `mcsearch watch` don't crash on writer lock), foreign keys on.
+Connection settings (`store.go:92-98`): WAL journal, `synchronous=NORMAL`, `busy_timeout=5000` (so concurrent `dex index` + `dex watch` don't crash on writer lock), foreign keys on.
 
 ## Schema (set up in `migrate`, `store.go:132`)
 
@@ -45,7 +45,7 @@ chunks_vec_au AFTER UPDATE OF vec   → delete + reinsert
 1. Create `chunk_vecs` with the known dim and the three triggers.
 2. **Backfill for pre-vec0 indexes**: if `chunk_vecs` is empty but `chunks` is not, run one `INSERT INTO chunk_vecs(rowid, embedding) SELECT id, vec FROM chunks` (`store.go:365-369`). Idempotent — a populated table skips it.
 
-**Dim is fixed for the life of the index.** `UpsertMany` rejects vectors with `len != dim` (`store.go:553-555`); changing the embedding model requires `mcsearch reindex`.
+**Dim is fixed for the life of the index.** `UpsertMany` rejects vectors with `len != dim` (`store.go:553-555`); changing the embedding model requires `dex reindex`.
 
 ## Write path — `UpsertMany` (`store.go:508-567`)
 
@@ -100,7 +100,7 @@ Separate file. `GraphUpsertNodes`, `GraphUpsertEdges` are `INSERT … ON CONFLIC
 
 ## Summary queue (`store_pending.go`)
 
-Backs `DeferSummaries` mode in the chunk indexer. Enqueue is idempotent via the UNIQUE(path, kind, content_sha1). Drained by `mcsearch index summarize` and by watch idle ticks.
+Backs `DeferSummaries` mode in the chunk indexer. Enqueue is idempotent via the UNIQUE(path, kind, content_sha1). Drained by `dex index summarize` and by watch idle ticks.
 
 ## Layout at a glance
 

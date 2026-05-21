@@ -16,8 +16,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/alehatsman/mcsearch/internal/graph"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/graph"
+	"github.com/alehatsman/dex/internal/store"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -73,7 +73,7 @@ func (s *Server) graphDeps(ctx context.Context, _ *sdk.CallToolRequest, in Graph
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, GraphDepsOutput{Status: "no-index", Project: p.Root,
-			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("no index for %s — run `dex index %s` first.", p.Root, p.Root)}, nil
 	}
 	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
 	if err != nil {
@@ -87,7 +87,7 @@ func (s *Server) graphDeps(ctx context.Context, _ *sdk.CallToolRequest, in Graph
 	}
 	if view == nil {
 		return nil, GraphDepsOutput{Status: "no-graph", Project: p.Root,
-			Hint: fmt.Sprintf("graph not indexed for %s — run `mcsearch index %s --graph=only`.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("graph not indexed for %s — run `dex index %s --graph=only`.", p.Root, p.Root)}, nil
 	}
 
 	// Resolve target package. `package` wins over `path` when both are set.
@@ -213,7 +213,7 @@ func (s *Server) callEdges(ctx context.Context, in CallEdgeInput, callers bool) 
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, CallEdgeOutput{Status: "no-index", Project: p.Root,
-			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("no index for %s — run `dex index %s` first.", p.Root, p.Root)}, nil
 	}
 	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
 	if err != nil {
@@ -227,11 +227,11 @@ func (s *Server) callEdges(ctx context.Context, in CallEdgeInput, callers bool) 
 	}
 	if view == nil {
 		return nil, CallEdgeOutput{Status: "no-graph", Project: p.Root,
-			Hint: fmt.Sprintf("graph not indexed for %s — run `mcsearch index %s --graph=only`.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("graph not indexed for %s — run `dex index %s --graph=only`.", p.Root, p.Root)}, nil
 	}
 	if len(view.edgesByKind[graph.EdgeCalls]) == 0 {
 		return nil, CallEdgeOutput{Status: "no-graph", Project: p.Root,
-			Hint: "graph has no `calls` edges — reindex the project with this release (`mcsearch index . --graph=only`) to extract them."}, nil
+			Hint: "graph has no `calls` edges — reindex the project with this release (`dex index . --graph=only`) to extract them."}, nil
 	}
 
 	targets := resolveCallTargets(view, in.Name, in.Package)

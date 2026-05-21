@@ -1,4 +1,4 @@
-# Build stage: compile a static `mcsearch` binary.
+# Build stage: compile a static `dex` binary.
 #
 # Tree-sitter grammars are wrapped in CGO, so we need a C toolchain.
 # Alpine's musl + `-extldflags -static` gives us a single static binary
@@ -16,7 +16,7 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux \
     go build -trimpath -tags 'sqlite_fts5' \
         -ldflags '-s -w -extldflags "-static"' \
-        -o /out/mcsearch ./cmd/mcsearch
+        -o /out/dex ./cmd/dex
 
 # Pre-create /cache owned by the nonroot uid so named volumes get
 # correct ownership on first use. Distroless has no shell or `chown`.
@@ -24,14 +24,14 @@ RUN mkdir -p /out/cache && chown -R 65532:65532 /out/cache
 
 # Runtime stage: distroless static, ~3 MB on top of the binary.
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/mcsearch /usr/local/bin/mcsearch
+COPY --from=build /out/dex /usr/local/bin/dex
 COPY --from=build --chown=nonroot:nonroot /out/cache /cache
 
 # Mount the project tree read-only at /work and the index cache at
-# /cache. The MCP/CLI defaults to ~/.cache/mcsearch, so override it.
-ENV MCSEARCH_INDEX_DIR=/cache \
-    MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
-    MCSEARCH_EMBED_MODEL=Qwen/Qwen3-Embedding-4B
+# /cache. The MCP/CLI defaults to ~/.cache/dex, so override it.
+ENV DEX_INDEX_DIR=/cache \
+    DEX_EMBED_URL=http://host.docker.internal:8082 \
+    DEX_EMBED_MODEL=Qwen/Qwen3-Embedding-4B
 
 WORKDIR /work
 USER nonroot:nonroot
@@ -45,13 +45,13 @@ USER nonroot:nonroot
 # ownership and work without --user.
 #
 #   # one-shot index using a named volume
-#   docker run --rm -v "$PWD":/work:ro -v mcsearch-cache:/cache \
-#     -e MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
-#     mcsearch index /work
+#   docker run --rm -v "$PWD":/work:ro -v dex-cache:/cache \
+#     -e DEX_EMBED_URL=http://host.docker.internal:8082 \
+#     dex index /work
 #
 #   # as an MCP server over stdio
-#   docker run --rm -i -v "$PWD":/work:ro -v mcsearch-cache:/cache \
-#     -e MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
-#     mcsearch
-ENTRYPOINT ["/usr/local/bin/mcsearch"]
+#   docker run --rm -i -v "$PWD":/work:ro -v dex-cache:/cache \
+#     -e DEX_EMBED_URL=http://host.docker.internal:8082 \
+#     dex
+ENTRYPOINT ["/usr/local/bin/dex"]
 CMD ["mcp"]

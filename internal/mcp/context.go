@@ -26,9 +26,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chunk"
-	"github.com/alehatsman/mcsearch/internal/embed"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/chunk"
+	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/store"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -249,7 +249,7 @@ type ContextOutput struct {
 }
 
 // ContextRouter is the exported entry point used by the CLI
-// (`mcsearch ask`). It delegates to the MCP-registered handler.
+// (`dex ask`). It delegates to the MCP-registered handler.
 func (s *Server) ContextRouter(ctx context.Context, in ContextInput) (*sdk.CallToolResult, ContextOutput, error) {
 	return s.contextRouter(ctx, nil, in)
 }
@@ -269,7 +269,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 	if _, err := os.Stat(p.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			out.Status = "no-index"
-			out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first; fall back to grep until then.", p.Root, p.Root)
+			out.Hint = fmt.Sprintf("no index for %s — run `dex index %s` first; fall back to grep until then.", p.Root, p.Root)
 			return nil, out, nil
 		}
 		out.Status = "error"
@@ -293,7 +293,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 
 	if stats, statsErr := st.Stats(ctx); statsErr == nil && !stats.LastIndex.IsZero() && time.Since(stats.LastIndex) > 24*time.Hour {
 		out.Stale = true
-		out.Hint = fmt.Sprintf("index is %s old — run `mcsearch index %s` to refresh.",
+		out.Hint = fmt.Sprintf("index is %s old — run `dex index %s` to refresh.",
 			time.Since(stats.LastIndex).Round(time.Hour), p.Root)
 	}
 
@@ -1117,7 +1117,7 @@ func buildAvoid(intent string, semHits []SemHit, symbols []SymbolHit, graphIndex
 		return "Do not trust the symbols list as exhaustive for non-Go callees — `calls` edges are Go-only today. Verify with grep on the symbol name for other languages."
 	}
 	if !graphIndexed {
-		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `mcsearch index <project>` to refresh both layers (graph extraction is part of the default index run)."
+		return "Graph not indexed for this project — results from semantic + symbol lanes only. Run `dex index <project>` to refresh both layers (graph extraction is part of the default index run)."
 	}
 	// Exploration intents — the user is forming a mental model, so
 	// the failure mode to discourage is breadth (enumerating files,

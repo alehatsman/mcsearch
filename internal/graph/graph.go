@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/proj"
+	"github.com/alehatsman/dex/internal/proj"
 )
 
 // NodeKind enumerates the kinds of structural symbols the extractor

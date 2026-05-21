@@ -102,7 +102,7 @@ linters:
         linters: [errcheck]
         text: "Error return value of `st\\.Close` is not checked"
 
-      - path: cmd/mcsearch/(main|graph)\.go
+      - path: cmd/dex/(main|graph)\.go
         linters: [errcheck]
         text: "Error return value of `(st|in|out)\\.Close` is not checked"
 
@@ -161,7 +161,7 @@ linters:
       - path: internal/index/index\.go
         linters: [cyclop]
 
-      - path: cmd/mcsearch/main\.go
+      - path: cmd/dex/main\.go
         linters: [cyclop]
 
 issues:

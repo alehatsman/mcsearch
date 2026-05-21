@@ -18,12 +18,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chat"
-	"github.com/alehatsman/mcsearch/internal/chunk"
-	"github.com/alehatsman/mcsearch/internal/embed"
-	"github.com/alehatsman/mcsearch/internal/ignore"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/chat"
+	"github.com/alehatsman/dex/internal/chunk"
+	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/ignore"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/store"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -58,7 +58,7 @@ type Options struct {
 	// DeferSummaries, when true (alongside Summarize), changes Pass 3
 	// from "run chat inline" to "enqueue a pending_summaries row and
 	// return immediately." The index call no longer blocks on summary
-	// generation; a separate `mcsearch index summarize` drainer (or watch
+	// generation; a separate `dex index summarize` drainer (or watch
 	// idle ticks) picks the queue up later. Package and repo summaries
 	// are skipped entirely in this mode — they have cascading data
 	// dependencies on file_summary chunks that don't exist yet at
@@ -321,9 +321,9 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		// so the missing summaries get generated.
 		//
 		// Caveat: this trusts that whatever chunk_summary set the previous
-		// run produced is still complete. Lowering MCSEARCH_CHUNK_SUMMARY_MIN_LINES
+		// run produced is still complete. Lowering DEX_CHUNK_SUMMARY_MIN_LINES
 		// between runs leaves previously-too-short chunks without summaries
-		// — operators changing the threshold should `mcsearch reindex` once.
+		// — operators changing the threshold should `dex reindex` once.
 		fastPathSummary := ""
 		canFastPath := !ix.Options.Summarize
 		if !canFastPath {

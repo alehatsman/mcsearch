@@ -1,4 +1,4 @@
-// Package mcp wires the mcsearch toolset onto the official MCP Go SDK
+// Package mcp wires the dex toolset onto the official MCP Go SDK
 // and runs it over stdio.
 package mcp
 
@@ -12,12 +12,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chat"
-	"github.com/alehatsman/mcsearch/internal/chunk"
-	"github.com/alehatsman/mcsearch/internal/embed"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/rerank"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/chat"
+	"github.com/alehatsman/dex/internal/chunk"
+	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/rerank"
+	"github.com/alehatsman/dex/internal/store"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -139,7 +139,7 @@ func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchIn
 	if _, err := os.Stat(p.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			out.Status = "no-index"
-			out.Hint = fmt.Sprintf("no index for %s — run `mcsearch index %s` first, then retry. Fall back to grep / Glob in the meantime.", p.Root, p.Root)
+			out.Hint = fmt.Sprintf("no index for %s — run `dex index %s` first, then retry. Fall back to grep / Glob in the meantime.", p.Root, p.Root)
 			return nil, out, nil
 		}
 		out.Status = "error"
@@ -180,7 +180,7 @@ func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchIn
 	stats, err := st.Stats(ctx)
 	if err == nil && !stats.LastIndex.IsZero() && time.Since(stats.LastIndex) > 24*time.Hour {
 		out.Stale = true
-		out.Hint = fmt.Sprintf("index is %s old — results may be stale; run `mcsearch index %s` to refresh.",
+		out.Hint = fmt.Sprintf("index is %s old — results may be stale; run `dex index %s` to refresh.",
 			time.Since(stats.LastIndex).Round(time.Hour), p.Root)
 	}
 
@@ -250,7 +250,7 @@ func (s *Server) findSymbol(ctx context.Context, _ *sdk.CallToolRequest, in Find
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, FindSymbolOutput{Status: "no-index", Project: p.Root,
-			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("no index for %s — run `dex index %s` first.", p.Root, p.Root)}, nil
 	}
 	st, err := store.OpenWith(ctx, p.DBPath, s.StoreOpts)
 	if err != nil {
@@ -317,7 +317,7 @@ func (s *Server) related(ctx context.Context, _ *sdk.CallToolRequest, in Related
 	}
 	if _, err := os.Stat(p.DBPath); errors.Is(err, os.ErrNotExist) {
 		return nil, RelatedOutput{Status: "no-index", Project: p.Root,
-			Hint: fmt.Sprintf("no index for %s — run `mcsearch index %s` first.", p.Root, p.Root)}, nil
+			Hint: fmt.Sprintf("no index for %s — run `dex index %s` first.", p.Root, p.Root)}, nil
 	}
 	k := in.K
 	if k <= 0 {
@@ -696,7 +696,7 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 // RunStdio starts the MCP server bound to stdin/stdout.
 func (s *Server) RunStdio(ctx context.Context) error {
 	srv := sdk.NewServer(&sdk.Implementation{
-		Name:    "mcsearch",
+		Name:    "dex",
 		Version: Version,
 	}, nil)
 
@@ -706,7 +706,7 @@ func (s *Server) RunStdio(ctx context.Context) error {
 			"tool with symbol lookup and graph expansion. Use search_semantic directly only when you specifically " +
 			"want raw semantic ranking without intent routing. " +
 			"Embeds the query and returns top-k matching chunks. Supports exclude list to skip paths. " +
-			"On error, returns a structured status: 'no-index' (run mcsearch index first), " +
+			"On error, returns a structured status: 'no-index' (run dex index first), " +
 			"'embedding-service-unreachable' (fall back to grep), or 'ok'.",
 	}, s.search)
 
@@ -752,7 +752,7 @@ func (s *Server) RunStdio(ctx context.Context) error {
 
 	sdk.AddTool(srv, &sdk.Tool{
 		Name:        "index_status",
-		Description: "Report mcsearch endpoint health and the list of indexed projects with their chunk counts and last-indexed times.",
+		Description: "Report dex endpoint health and the list of indexed projects with their chunk counts and last-indexed times.",
 	}, s.status)
 
 	sdk.AddTool(srv, &sdk.Tool{

@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/store"
 )
 
 // copyFixture copies testdata/<name> into a fresh temp dir and returns
@@ -443,10 +443,10 @@ func TestExtractGoCalls(t *testing.T) {
 	innerWriteID := NodeID(mod, storePkg, NodeMethod, "(*Inner).write")
 
 	cases := []struct {
-		name         string
-		src, dst     string
-		wantExists   bool
-		failHelpMsg  string
+		name        string
+		src, dst    string
+		wantExists  bool
+		failHelpMsg string
 	}{
 		{"main → NewStore", mainID, newStoreID, true, "cross-package function call should emit an edge"},
 		{"main → (*Store).Get", mainID, storeGetID, true, "cross-package method call should emit an edge"},

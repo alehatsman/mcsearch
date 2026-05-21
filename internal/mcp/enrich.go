@@ -421,7 +421,7 @@ func isCommentLine(s string) bool {
 }
 
 // declarationKeywords are the first tokens that mark a declaration
-// line in the languages mcsearch's chunker indexes (Go, Python, JS/TS,
+// line in the languages dex's chunker indexes (Go, Python, JS/TS,
 // Rust, plus a few common visibility modifiers). The list is
 // deliberately conservative — false negatives are cheap (empty
 // signature/doc) but false positives let stale-index noise leak

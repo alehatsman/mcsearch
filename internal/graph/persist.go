@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/store"
 )
 
 // GraphStore is the persistence surface the Indexer needs. Production

@@ -1,6 +1,6 @@
-# mcsearch Data Pipeline Architecture
+# dex Data Pipeline Architecture
 
-mcsearch is a local semantic code-search service. The pipeline has **three indexers writing to one SQLite per project** (keyed by `sha256(realpath(root))` at `$MCSEARCH_INDEX_DIR/<hash>/index.db`).
+dex is a local semantic code-search service. The pipeline has **three indexers writing to one SQLite per project** (keyed by `sha256(realpath(root))` at `$DEX_INDEX_DIR/<hash>/index.db`).
 
 ## Three indexers, one DB
 
@@ -26,20 +26,20 @@ Comment at top of the file is literal: *"walk → chunk → embed → upsert"*. 
 
 ## Graph pipeline (`internal/graph/graph.go:254`)
 
-Independent of chunks; runs after them in `cmd/mcsearch/main.go:cmdIndex`. `ExtractGo` (go/types) + `ExtractYAML` → `linkChunks` joins nodes to their chunk rows → `GraphUpsertNodes`/`GraphUpsertEdges` → `GraphPruneUnseen` → `ComputeCentrality` (PageRank + in/out degree + cross-pkg callers) → `GraphSetCentrality`. Skippable via `--graph=off`; `--graph=only` skips chunk passes.
+Independent of chunks; runs after them in `cmd/dex/main.go:cmdIndex`. `ExtractGo` (go/types) + `ExtractYAML` → `linkChunks` joins nodes to their chunk rows → `GraphUpsertNodes`/`GraphUpsertEdges` → `GraphPruneUnseen` → `ComputeCentrality` (PageRank + in/out degree + cross-pkg callers) → `GraphSetCentrality`. Skippable via `--graph=off`; `--graph=only` skips chunk passes.
 
 ## Retrieval (read side)
 
 `store.Search` runs **two rankers in parallel and fuses with RRF** (`docs/internals.md:61-87`):
 - **cosine** — `SELECT … FROM chunk_vecs WHERE embedding MATCH :blob AND k=:pool` (sqlite-vec); query is embedded via the same `/v1/embeddings` endpoint.
 - **BM25** — `bm25()` against `chunks_fts`.
-- final score `Σ 1/(60 + rank)`; optional cross-encoder rerank (`MCSEARCH_RERANK_URL`).
+- final score `Σ 1/(60 + rank)`; optional cross-encoder rerank (`DEX_RERANK_URL`).
 
-`internal/mcp` wraps this for the MCP tool surface (`ask`, `search_semantic`, `search_symbol`, `graph_*`, `view_summarize`). `cmd/mcsearch/main.go` provides the CLI mirrors and the MCP stdio server entrypoint.
+`internal/mcp` wraps this for the MCP tool surface (`ask`, `search_semantic`, `search_symbol`, `graph_*`, `view_summarize`). `cmd/dex/main.go` provides the CLI mirrors and the MCP stdio server entrypoint.
 
 ## Live updates (`internal/watch/watch.go`)
 
-`Watcher.Run`: fsnotify subscribes to the project tree → events filtered through the same `ignore.Matcher` → debounced (`Options.Debounce`, default 500ms) → dirty set drained by re-invoking `Indexer.Run` → `AfterIndex` hook re-runs the graph phase. Used by `mcsearch watch` (`cmd/mcsearch/main.go:1512`).
+`Watcher.Run`: fsnotify subscribes to the project tree → events filtered through the same `ignore.Matcher` → debounced (`Options.Debounce`, default 500ms) → dirty set drained by re-invoking `Indexer.Run` → `AfterIndex` hook re-runs the graph phase. Used by `dex watch` (`cmd/dex/main.go:1512`).
 
 ## Flow at a glance
 

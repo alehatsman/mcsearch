@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Setup git hooks for mcsearch development.
+# Setup git hooks for dex development.
 #
 #   pre-commit → task ci:fast
 #     Fast gate (<5s on warm cache): go vet, gofmt on staged files,
@@ -20,7 +20,7 @@ case "$HOOKS_DIR" in
 esac
 
 mkdir -p "$HOOKS_DIR"
-echo "Setting up mcsearch development hooks in: $HOOKS_DIR"
+echo "Setting up dex development hooks in: $HOOKS_DIR"
 
 # ----- pre-commit ------------------------------------------------------------
 cat > "$HOOKS_DIR/pre-commit" << 'HOOK_EOF'

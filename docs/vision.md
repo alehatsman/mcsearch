@@ -1,6 +1,6 @@
 # Vision
 
-Where mcsearch could go beyond "an MCP server that does semantic search".
+Where dex could go beyond "an MCP server that does semantic search".
 This is a direction note, not a committed roadmap.
 
 ## The pitch
@@ -10,14 +10,14 @@ daemon and a CLI. One process owns the index, the warm connections to
 local model servers, and the cached language-server handles. It's
 reachable three ways:
 
-- **MCP** — for coding agents (Claude Code, Cursor, etc.). What mcsearch
+- **MCP** — for coding agents (Claude Code, Cursor, etc.). What dex
   is today.
 - **LSP** — for editors. Same primitives exposed as
   `textDocument/hover`, semantic goto, `inlineCompletion`, etc. Any
   LSP-aware editor (VS Code, Neovim, Helix, Zed, JetBrains) plugs in
   without a per-editor extension.
-- **CLI** — for humans and CI. `mcsearch ask`, `mcsearch graph deps`,
-  `mcsearch index status`.
+- **CLI** — for humans and CI. `dex ask`, `dex graph deps`,
+  `dex index status`.
 
 The point of "one daemon, three faces" is that the agent and the editor
 hit the *same* live index and the *same* warm models. No duplicated
@@ -40,7 +40,7 @@ useful for `pre-commit`, code review bots, ad-hoc investigation.
 
 ## Local-GPU awareness is the differentiator
 
-mcsearch already does the right thing on inference: talk to a local
+dex already does the right thing on inference: talk to a local
 OpenAI-compatible server (llama-server / vLLM / Ollama / TEI) rather
 than embed inference in-process. Keep that. The binary's job is
 *awareness*, not bundling llama.cpp via cgo:
@@ -94,7 +94,7 @@ index_refresh             # force reindex (not yet shipped)
 ## Scope cuts, in priority order
 
 1. ✅ **Tighten the agent API.** Done. Tools regrouped into `search_*`,
-   `graph_*`, `view_*`, `index_*`; `mcsearch_context` is now `ask`.
+   `graph_*`, `view_*`, `index_*`; `dex_context` is now `ask`.
 2. ✅ **Add `graph_deps` and `graph_callers`/`graph_callees`.** Done
    for Go via `go/types`. Tree-sitter-based extraction for Python /
    JS / Rust is deferred — non-Go callers fall back to the ripgrep
@@ -111,7 +111,7 @@ index_refresh             # force reindex (not yet shipped)
 
 ## What this is *not*
 
-- Not an inference engine. mcsearch will not embed llama.cpp.
+- Not an inference engine. dex will not embed llama.cpp.
 - Not a cloud product. Local-first; if your hardware can't host the
   models, you bring your own endpoint.
 - Not a VS Code extension. The LSP server is the integration point;

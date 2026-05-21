@@ -1,13 +1,13 @@
-// `mcsearch env` — print effective configuration with sources.
+// `dex env` — print effective configuration with sources.
 //
-// The CLI accepts ~24 MCSEARCH_* env vars; remembering which are set,
+// The CLI accepts ~24 DEX_* env vars; remembering which are set,
 // which fell back to defaults, and which optional features are
 // currently disabled is a chore. This subcommand answers that.
 //
 // The table below is the single source of truth for env-var docs;
 // README.md and docs/tuning.md should reference it instead of
 // duplicating the list. If you add a knob anywhere in the codebase,
-// add the corresponding entry here so `mcsearch env` stays honest.
+// add the corresponding entry here so `dex env` stays honest.
 package main
 
 import (
@@ -18,7 +18,7 @@ import (
 	"os"
 )
 
-// envVar declares one MCSEARCH_* knob the CLI honours.
+// envVar declares one DEX_* knob the CLI honours.
 //
 //   - Default is the value the binary uses when the env var is unset.
 //     Empty string + Disable=true means the feature is OFF until set.
@@ -34,50 +34,50 @@ type envVar struct {
 
 var allEnvVars = []envVar{
 	// core — every install touches these.
-	{"MCSEARCH_EMBED_URL", "http://127.0.0.1:8082", "OpenAI-compatible /v1/embeddings base URL.", "core", false},
-	{"MCSEARCH_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B", "Model name forwarded as `model`.", "core", false},
-	{"MCSEARCH_INDEX_DIR", "~/.cache/mcsearch", "Where per-project index files live.", "core", false},
+	{"DEX_EMBED_URL", "http://127.0.0.1:8082", "OpenAI-compatible /v1/embeddings base URL.", "core", false},
+	{"DEX_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B", "Model name forwarded as `model`.", "core", false},
+	{"DEX_INDEX_DIR", "~/.cache/dex", "Where per-project index files live.", "core", false},
 
 	// chat — required for generate / view_summarize / ask_codebase.
-	{"MCSEARCH_CHAT_URL", "http://127.0.0.1:8081", "OpenAI-compatible /v1/chat/completions base URL.", "chat", false},
-	{"MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct", "Model for the chat leg.", "chat", false},
+	{"DEX_CHAT_URL", "http://127.0.0.1:8081", "OpenAI-compatible /v1/chat/completions base URL.", "chat", false},
+	{"DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct", "Model for the chat leg.", "chat", false},
 
 	// rerank — optional, off by default.
-	{"MCSEARCH_RERANK_URL", "", "Rerank server base URL.", "rerank", true},
-	{"MCSEARCH_RERANK_STYLE", "cohere", "Backend shape: cohere | chat.", "rerank", false},
-	{"MCSEARCH_RERANK_MODEL", "BAAI/bge-reranker-v2-m3", "Model for the rerank leg.", "rerank", false},
+	{"DEX_RERANK_URL", "", "Rerank server base URL.", "rerank", true},
+	{"DEX_RERANK_STYLE", "cohere", "Backend shape: cohere | chat.", "rerank", false},
+	{"DEX_RERANK_MODEL", "BAAI/bge-reranker-v2-m3", "Model for the rerank leg.", "rerank", false},
 
 	// compress — optional context-compression server.
-	{"MCSEARCH_COMPRESS_URL", "", "Context-compression /v1/chat/completions server.", "compress", true},
-	{"MCSEARCH_COMPRESS_MODEL", "<MCSEARCH_CHAT_MODEL>", "Model for the compress leg.", "compress", false},
+	{"DEX_COMPRESS_URL", "", "Context-compression /v1/chat/completions server.", "compress", true},
+	{"DEX_COMPRESS_MODEL", "<DEX_CHAT_MODEL>", "Model for the compress leg.", "compress", false},
 
 	// draft — optional speculative-draft server for generate_code.
-	{"MCSEARCH_DRAFT_URL", "", "Speculative-draft /v1/chat/completions server.", "draft", true},
-	{"MCSEARCH_DRAFT_MODEL", "<MCSEARCH_CHAT_MODEL>", "Model for the draft leg.", "draft", false},
+	{"DEX_DRAFT_URL", "", "Speculative-draft /v1/chat/completions server.", "draft", true},
+	{"DEX_DRAFT_MODEL", "<DEX_CHAT_MODEL>", "Model for the draft leg.", "draft", false},
 
 	// summary — optional override for the chat leg used during indexing
-	// (file / chunk / package / repo summaries). Defaults to MCSEARCH_CHAT_*.
-	{"MCSEARCH_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to MCSEARCH_CHAT_URL).", "summary", true},
-	{"MCSEARCH_SUMMARY_MODEL", "<MCSEARCH_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
+	// (file / chunk / package / repo summaries). Defaults to DEX_CHAT_*.
+	{"DEX_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to DEX_CHAT_URL).", "summary", true},
+	{"DEX_SUMMARY_MODEL", "<DEX_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
 
 	// tuning — hidden unless --all. Most installs leave these alone.
-	{"MCSEARCH_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
-	{"MCSEARCH_EMBED_CONCURRENCY", "4", "Parallel /v1/embeddings calls in flight (1 = sequential, the historical default).", "tuning", false},
-	{"MCSEARCH_EMBED_TIMEOUT", "60s", "HTTP timeout per embed call.", "tuning", false},
-	{"MCSEARCH_INDEX_CONCURRENCY", "0", "Parallel file readers/chunkers in Pass 1 of `index` (0 = GOMAXPROCS).", "tuning", false},
-	{"MCSEARCH_CHAT_TIMEOUT", "120s", "HTTP timeout per chat call.", "tuning", false},
-	{"MCSEARCH_COMPRESS_TIMEOUT", "30s", "HTTP timeout per compress call.", "tuning", false},
-	{"MCSEARCH_DRAFT_TIMEOUT", "120s", "HTTP timeout per draft call.", "tuning", false},
-	{"MCSEARCH_RERANK_TIMEOUT", "5s", "HTTP timeout per rerank call.", "tuning", false},
-	{"MCSEARCH_RERANK_POOL", "40", "Candidates fed to the reranker. Clamped to [1, 100].", "tuning", false},
-	{"MCSEARCH_RERANK_CONCURRENCY", "4", "Parallel rerank goroutines (chat style only).", "tuning", false},
-	{"MCSEARCH_SUMMARY_TIMEOUT", "120s", "HTTP timeout per index-time summary call.", "tuning", false},
-	{"MCSEARCH_SUMMARY_CONCURRENCY", "4", "Parallel chunk-summary chat calls per file during indexing.", "tuning", false},
-	{"MCSEARCH_CHUNK_SUMMARY_MIN_LINES", "30", "Minimum chunk size (lines) eligible for a per-chunk summary. Raise to cut summary volume.", "tuning", false},
-	{"MCSEARCH_DISABLE_RERANK", "", "Set 1 to short-circuit rerank even when URL is set.", "tuning", false},
-	{"MCSEARCH_DISABLE_BM25", "", "Set 1 to disable the BM25 leg.", "tuning", false},
-	{"MCSEARCH_MAX_HITS_PER_FILE", "", "Cap hits per file in search results (0 = no cap).", "tuning", false},
-	{"MCSEARCH_ALLOW_PATHS", "", "Colon-separated path prefixes accepted outside git work trees.", "tuning", false},
+	{"DEX_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
+	{"DEX_EMBED_CONCURRENCY", "4", "Parallel /v1/embeddings calls in flight (1 = sequential, the historical default).", "tuning", false},
+	{"DEX_EMBED_TIMEOUT", "60s", "HTTP timeout per embed call.", "tuning", false},
+	{"DEX_INDEX_CONCURRENCY", "0", "Parallel file readers/chunkers in Pass 1 of `index` (0 = GOMAXPROCS).", "tuning", false},
+	{"DEX_CHAT_TIMEOUT", "120s", "HTTP timeout per chat call.", "tuning", false},
+	{"DEX_COMPRESS_TIMEOUT", "30s", "HTTP timeout per compress call.", "tuning", false},
+	{"DEX_DRAFT_TIMEOUT", "120s", "HTTP timeout per draft call.", "tuning", false},
+	{"DEX_RERANK_TIMEOUT", "5s", "HTTP timeout per rerank call.", "tuning", false},
+	{"DEX_RERANK_POOL", "40", "Candidates fed to the reranker. Clamped to [1, 100].", "tuning", false},
+	{"DEX_RERANK_CONCURRENCY", "4", "Parallel rerank goroutines (chat style only).", "tuning", false},
+	{"DEX_SUMMARY_TIMEOUT", "120s", "HTTP timeout per index-time summary call.", "tuning", false},
+	{"DEX_SUMMARY_CONCURRENCY", "4", "Parallel chunk-summary chat calls per file during indexing.", "tuning", false},
+	{"DEX_CHUNK_SUMMARY_MIN_LINES", "30", "Minimum chunk size (lines) eligible for a per-chunk summary. Raise to cut summary volume.", "tuning", false},
+	{"DEX_DISABLE_RERANK", "", "Set 1 to short-circuit rerank even when URL is set.", "tuning", false},
+	{"DEX_DISABLE_BM25", "", "Set 1 to disable the BM25 leg.", "tuning", false},
+	{"DEX_MAX_HITS_PER_FILE", "", "Cap hits per file in search results (0 = no cap).", "tuning", false},
+	{"DEX_ALLOW_PATHS", "", "Colon-separated path prefixes accepted outside git work trees.", "tuning", false},
 }
 
 // effVar is one resolved row for output: name, current value, where
@@ -119,8 +119,8 @@ func resolveEnv(vars []envVar) []effVar {
 func cmdEnv(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("env", flag.ContinueOnError)
 	setHelp(fs,
-		"Print effective MCSEARCH_* configuration with sources (env|default|disabled|unset).",
-		"mcsearch env [--all] [--doc] [--format=text|json]")
+		"Print effective DEX_* configuration with sources (env|default|disabled|unset).",
+		"dex env [--all] [--doc] [--format=text|json]")
 	format := fs.String("format", "text", "output format: text | json")
 	showAll := fs.Bool("all", false, "include tuning knobs (default: core/chat/rerank/compress/draft only)")
 	doc := fs.Bool("doc", false, "include doc strings in text output")

@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/graph"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/graph"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/store"
 )
 
 // ─── resolveIntent ────────────────────────────────────────────────────────
@@ -267,16 +267,16 @@ func TestPickSuggestedReadsPageRankTiebreaker(t *testing.T) {
 
 func TestIsBuildOrConfigPath(t *testing.T) {
 	tests := map[string]bool{
-		"Taskfile.yml":    true,
-		"Taskfile.yaml":   true,
-		"Dockerfile":      true,
-		"Makefile":        true,
-		".github/ci.yml":  true,
-		"config.toml":     true,
-		"internal/x.go":   false,
-		"README.md":       false,
-		"go.mod":          false, // intentionally not demoted
-		"package.json":    false,
+		"Taskfile.yml":   true,
+		"Taskfile.yaml":  true,
+		"Dockerfile":     true,
+		"Makefile":       true,
+		".github/ci.yml": true,
+		"config.toml":    true,
+		"internal/x.go":  false,
+		"README.md":      false,
+		"go.mod":         false, // intentionally not demoted
+		"package.json":   false,
 	}
 	for p, want := range tests {
 		if got := isBuildOrConfigPath(p); got != want {
@@ -287,11 +287,11 @@ func TestIsBuildOrConfigPath(t *testing.T) {
 
 func TestIsDocPath(t *testing.T) {
 	tests := map[string]bool{
-		"README.md":              true,
-		"docs/spec.rst":          true,
-		"NOTES.txt":              true,
-		"docs/page.adoc":         true,
-		"site/post.mdx":          true,
+		"README.md":               true,
+		"docs/spec.rst":           true,
+		"NOTES.txt":               true,
+		"docs/page.adoc":          true,
+		"site/post.mdx":           true,
 		"internal/store/store.go": false,
 		"cmd/main.py":             false,
 	}
@@ -304,20 +304,20 @@ func TestIsDocPath(t *testing.T) {
 
 func TestIsTestPath(t *testing.T) {
 	tests := map[string]bool{
-		"internal/mcp/context_test.go":   true,
-		"pkg/foo/bar_test.go":            true,
-		"src/Foo.test.ts":                true,
-		"src/Foo.test.tsx":               true,
-		"src/foo.spec.js":                true,
-		"src/foo.spec.jsx":               true,
-		"tests/test_foo.py":              true,
-		"tests/foo_test.py":              true,
-		"spec/foo_spec.rb":               true,
-		"src/foo_test.rs":                true,
-		"internal/store/store.go":        false,
-		"README.md":                      false,
-		"cmd/main.py":                    false,
-		"src/foo.ts":                     false,
+		"internal/mcp/context_test.go": true,
+		"pkg/foo/bar_test.go":          true,
+		"src/Foo.test.ts":              true,
+		"src/Foo.test.tsx":             true,
+		"src/foo.spec.js":              true,
+		"src/foo.spec.jsx":             true,
+		"tests/test_foo.py":            true,
+		"tests/foo_test.py":            true,
+		"spec/foo_spec.rb":             true,
+		"src/foo_test.rs":              true,
+		"internal/store/store.go":      false,
+		"README.md":                    false,
+		"cmd/main.py":                  false,
+		"src/foo.ts":                   false,
 	}
 	for p, want := range tests {
 		if got := isTestPath(p); got != want {
@@ -1037,7 +1037,7 @@ func TestBuildAvoid(t *testing.T) {
 	}{
 		{"callers warns non-Go fallback", IntentCallers, sem, syms, true, "`calls` edges are Go-only"},
 		{"callers without graph still warns", IntentCallers, sem, syms, false, "`calls` edges are Go-only"},
-		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `mcsearch index"},
+		{"symbol_lookup without graph nudges to index", IntentSymbolLookup, sem, syms, false, "Run `dex index"},
 		{"symbol_lookup with graph: don't grep", IntentSymbolLookup, sem, syms, true, "Do not grep"},
 		{"behavior + both lanes", IntentBehaviorSearch, sem, syms, true, "Do not grep for the identifier"},
 		{"behavior + symbols only", IntentBehaviorSearch, nil, syms, true, "Do not grep for the identifier"},
@@ -1045,7 +1045,7 @@ func TestBuildAvoid(t *testing.T) {
 		{"behavior + nothing", IntentBehaviorSearch, nil, nil, true, ""},
 		// behavior_search without graph now also gets the index nag —
 		// graph enrichment runs on every intent.
-		{"behavior without graph nudges to index", IntentBehaviorSearch, sem, syms, false, "Run `mcsearch index"},
+		{"behavior without graph nudges to index", IntentBehaviorSearch, sem, syms, false, "Run `dex index"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1137,10 +1137,10 @@ func TestContextRouterSymbolLookup(t *testing.T) {
 	if !strings.Contains(out.NextAction, "Read") {
 		t.Errorf("next_action should be a Read directive: %q", out.NextAction)
 	}
-	// Without a graph indexed, avoid nudges toward `mcsearch index`.
+	// Without a graph indexed, avoid nudges toward `dex index`.
 	// With graph indexed it would say "Do not grep". Either is acceptable
 	// here; the symbol_lookup path is exercised either way.
-	if !strings.Contains(out.Avoid, "Do not grep") && !strings.Contains(out.Avoid, "mcsearch index") {
+	if !strings.Contains(out.Avoid, "Do not grep") && !strings.Contains(out.Avoid, "dex index") {
 		t.Errorf("avoid should mention either don't-grep or index nudge: %q", out.Avoid)
 	}
 }

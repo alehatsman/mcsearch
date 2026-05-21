@@ -7,7 +7,7 @@ and the embedding contract.
 
 ## Storage
 
-One SQLite per project at `$MCSEARCH_INDEX_DIR/<sha256(realpath(project_root))>/index.db`.
+One SQLite per project at `$DEX_INDEX_DIR/<sha256(realpath(project_root))>/index.db`.
 The driver is `mattn/go-sqlite3` built with the `sqlite_fts5` tag, and
 the [sqlite-vec](https://github.com/asg017/sqlite-vec) extension is
 linked in statically via `asg017/sqlite-vec-go-bindings/cgo` — no
@@ -31,7 +31,7 @@ lazily once `dim` is known (either from `meta.dim` at open or from the
 first `UpsertMany`) and kept in sync with `chunks.vec` via AFTER
 INSERT / UPDATE / DELETE triggers, the same pattern `chunks_fts` uses
 for FTS5. A virtual `chunks_fts` table mirrors `content` for FTS5/BM25.
-`graph_*` tables are written by the graph phase of `mcsearch index`
+`graph_*` tables are written by the graph phase of `dex index`
 (skipped only with `--graph=off`); chunk-side code never reads them.
 `last_seen_at` is Unix nanoseconds so two index runs in the same
 millisecond still prune correctly.
@@ -43,7 +43,7 @@ and skip the backfill.
 
 ## Incremental re-index
 
-`mcsearch index` is safe to re-run. Three fast-paths:
+`dex index` is safe to re-run. Three fast-paths:
 
 | Fast-path | Condition | Cost |
 |---|---|---|
@@ -55,7 +55,7 @@ The SHA fast-path also backfills the `name` column on unchanged chunks,
 so upgrading to a binary with identifier extraction (used by
 `search_symbol`) doesn't need a full `reindex` — the next ordinary `index`
 populates names for free. Changing the embedding model (different
-vector dim) does require `mcsearch reindex <path>`; mixed dims are
+vector dim) does require `dex reindex <path>`; mixed dims are
 rejected at upsert.
 
 ## Hybrid retrieval — semantic + BM25 + optional rerank
@@ -70,20 +70,20 @@ Fusion (Cormack et al., 2009):
   lists the chunk appeared in.
 
 Semantic alone catches paraphrase ("debounce filesystem events") but
-misses rare literal tokens (`MCSEARCH_DISABLE_BM25`,
+misses rare literal tokens (`DEX_DISABLE_BM25`,
 `compileDoubleStar`). BM25 alone is the inverse failure. RRF is
-scale-free — no per-corpus tuning. Set `MCSEARCH_DISABLE_BM25=1` (or
+scale-free — no per-corpus tuning. Set `DEX_DISABLE_BM25=1` (or
 pass an empty query text) to get pre-hybrid semantic ranking.
 
 Hits expose `score` (cosine, for human comparability), `bm25_score`
 (when surfaced via the lexical leg), and `rrf_score` (fused, used for
 ordering).
 
-**Cross-encoder rerank** is off by default. Set `MCSEARCH_RERANK_URL`
+**Cross-encoder rerank** is off by default. Set `DEX_RERANK_URL`
 to enable; design and migration notes live in
 [specs/spec-01-rerank.md](specs/spec-01-rerank.md). Per-call opt-out:
-`mcsearch search semantic --rerank=off`. Process-wide off:
-`MCSEARCH_DISABLE_RERANK=1`. Reranker outages never break search —
+`dex search semantic --rerank=off`. Process-wide off:
+`DEX_DISABLE_RERANK=1`. Reranker outages never break search —
 on unreachable, results fall back to the pre-rerank fused order silently.
 
 ## Vector index
@@ -101,7 +101,7 @@ format we already store on disk). sqlite-vec returns cosine distance
 ascending; the store flips it to similarity (`1 - distance`) so
 callers keep the "larger = better" convention shared with the BM25
 leg. The hybrid path issues this query at the fused pool size
-(`max(5·k, 30)`, capped by `MCSEARCH_RERANK_POOL` if a reranker is
+(`max(5·k, 30)`, capped by `DEX_RERANK_POOL` if a reranker is
 wired). BM25-only fused hits get their cosine score backfilled with
 one `vec_distance_cosine()` round-trip so `Hit.Score` stays populated
 for every result.
@@ -118,21 +118,21 @@ project size — per-query embed round-trip dominates.
 
 Indexes are keyed by `sha256(realpath(project_root))`, so
 `git worktree add ../proj-feature` looks like a brand-new project even
-though the trees are nearly identical. `mcsearch clone` seeds the new
+though the trees are nearly identical. `dex clone` seeds the new
 worktree's index from a sibling (a `cp` of one SQLite file, ~5 ms);
 chunks are keyed by `(relative path, content sha1)`, so anything
 unchanged between trees rides along for free.
 
 ```console
-$ mcsearch clone . /tmp/mcsearch-feature
-✓ cloned /home/aleh/projects/mcsearch → /tmp/mcsearch-feature
+$ dex clone . /tmp/dex-feature
+✓ cloned /home/aleh/projects/dex → /tmp/dex-feature
 
-$ mcsearch index -v /tmp/mcsearch-feature
+$ dex index -v /tmp/dex-feature
 INFO msg=indexed chunks_seen=467 files_fast_path=31 embedded=12 pruned=0
 ```
 
 The two indexes are independent after the clone. `--force` overwrites
-an existing destination; `mcsearch nuke <dst>` deletes it.
+an existing destination; `dex nuke <dst>` deletes it.
 
 ## Embedding contract
 
@@ -150,16 +150,16 @@ rejected at upsert time.
 
 ## Offline behavior
 
-Endpoint unreachable: `mcsearch search semantic` exits non-zero with an
+Endpoint unreachable: `dex search semantic` exits non-zero with an
 informative error. The MCP `search_semantic` tool returns
 `{ "status": "embedding-service-unreachable", ... }` so Claude can
 fall back to grep without crashing.
 
 ## Code generation
 
-`mcsearch generate <path> "<prompt>"` reuses the hybrid retrieval as
+`dex generate <path> "<prompt>"` reuses the hybrid retrieval as
 `query`, prepends the top-k chunks as a `CONTEXT` block, and sends the
-result to `MCSEARCH_CHAT_URL`. Flags: `-k`, `--no-rag`, `--system`,
+result to `DEX_CHAT_URL`. Flags: `-k`, `--no-rag`, `--system`,
 `--temperature`, `--max-tokens`, `--show-context`. Mid-size local
 chat models (≤32B) tend to generate from training data rather than
 strictly from `CONTEXT` — use `search_semantic` for ground-truth

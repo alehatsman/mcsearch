@@ -1,4 +1,4 @@
-// mcsearch — local semantic-search helper for Claude Code.
+// dex — local semantic-search helper for Claude Code.
 //
 // The query-side subcommands mirror the MCP tool surface 1:1
 // (subcommand-group form). The build/maintenance commands are CLI-only.
@@ -45,16 +45,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chat"
-	"github.com/alehatsman/mcsearch/internal/embed"
-	"github.com/alehatsman/mcsearch/internal/graph"
-	"github.com/alehatsman/mcsearch/internal/ignore"
-	"github.com/alehatsman/mcsearch/internal/index"
-	"github.com/alehatsman/mcsearch/internal/mcp"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/rerank"
-	"github.com/alehatsman/mcsearch/internal/store"
-	"github.com/alehatsman/mcsearch/internal/watch"
+	"github.com/alehatsman/dex/internal/chat"
+	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/graph"
+	"github.com/alehatsman/dex/internal/ignore"
+	"github.com/alehatsman/dex/internal/index"
+	"github.com/alehatsman/dex/internal/mcp"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/rerank"
+	"github.com/alehatsman/dex/internal/store"
+	"github.com/alehatsman/dex/internal/watch"
 )
 
 func main() {
@@ -126,69 +126,69 @@ func main() {
 
 func usage() {
 	fmt.Fprintln(os.Stderr, `usage (query — mirrors the MCP tool surface):
-  mcsearch ask <path> <q...>              one-shot router (MCP: ask). Picks intent,
+  dex ask <path> <q...>              one-shot router (MCP: ask). Picks intent,
                                           fuses semantic + symbol + graph; returns
                                           suggested_reads and a prose next_action.
                                           Flags: --intent, --k, --format=text|json
-  mcsearch search semantic <path> <q...>  hybrid top-k chunks (MCP: search_semantic)
+  dex search semantic <path> <q...>  hybrid top-k chunks (MCP: search_semantic)
                                           Flags: --k, --rerank=off, --explain,
                                           --format=text|json
-  mcsearch search symbol <path> <name>    exact identifier lookup (MCP: search_symbol)
+  dex search symbol <path> <name>    exact identifier lookup (MCP: search_symbol)
                                           Flags: --k, --format=text|json
-  mcsearch graph neighbors <path> <file> <line>
+  dex graph neighbors <path> <file> <line>
                                           vector neighbours of a chunk (MCP: graph_neighbors)
-  mcsearch graph deps <path> [flags]      package imports (MCP: graph_deps)
+  dex graph deps <path> [flags]      package imports (MCP: graph_deps)
                                           Flags: --file=<rel>, --package=<full path>
-  mcsearch graph callers <path> <name>    incoming calls edges (MCP: graph_callers)
+  dex graph callers <path> <name>    incoming calls edges (MCP: graph_callers)
                                           Flags: --package=<pkg>, --k
-  mcsearch graph callees <path> <name>    outgoing calls edges (MCP: graph_callees)
+  dex graph callees <path> <name>    outgoing calls edges (MCP: graph_callees)
                                           Flags: --package=<pkg>, --k
-  mcsearch graph export <path>            dump graph_nodes/graph_edges as JSONL
+  dex graph export <path>            dump graph_nodes/graph_edges as JSONL
                                           Flags: --output=<dir>
-  mcsearch view summarize <path> <file>   summarize a file slice via the chat model
+  dex view summarize <path> <file>   summarize a file slice via the chat model
                                           (MCP: view_summarize). Flags: --start, --end,
                                           --focus, --temperature, --max-tokens,
                                           --format=text|json
-  mcsearch index status [<path>]          endpoint health + project stats
+  dex index status [<path>]          endpoint health + project stats
                                           (MCP: index_status)
 
 build / maintenance:
-  mcsearch index <path>                   build or refresh the index. Runs chunk+embed
+  dex index <path>                   build or refresh the index. Runs chunk+embed
                                           AND the Go static graph. Flags: --graph=off
                                           skips graph, --graph=only refreshes just the
                                           graph layer. Other flags: --v, --force,
                                           --summarize[-defer], --format=text|json
-  mcsearch index summarize <path>         drain pending_summaries: generate summaries
-                                          queued by ` + "`mcsearch index --summarize-defer`" + `,
+  dex index summarize <path>         drain pending_summaries: generate summaries
+                                          queued by `+"`dex index --summarize-defer`"+`,
                                           embed them, upsert as summary chunks, then
                                           cascade to package + repo summaries
-  mcsearch generate <path> <prompt>       RAG: top-k chunks → chat endpoint
-  mcsearch env                            print effective env-var config with sources
+  dex generate <path> <prompt>       RAG: top-k chunks → chat endpoint
+  dex env                            print effective env-var config with sources
                                           Flags: --all, --doc, --format=text|json
-  mcsearch compact <path>                 concatenate indexable files under <path>
-                                          to stdout with ` + "`===== <relpath> =====`" + `
+  dex compact <path>                 concatenate indexable files under <path>
+                                          to stdout with `+"`===== <relpath> =====`"+`
                                           headers. Honors .gitignore/.mcsearch-ignore
                                           and skips binaries + secret-shaped files.
                                           Flags: --out FILE, --max-bytes N, --strip
-  mcsearch nuke   <path>                  delete the on-disk index for a project
-  mcsearch reindex <path>                 drop and re-embed from scratch
-  mcsearch reindex --all --yes            drop and re-embed every known project
+  dex nuke   <path>                  delete the on-disk index for a project
+  dex reindex <path>                 drop and re-embed from scratch
+  dex reindex --all --yes            drop and re-embed every known project
                                           (skips indexes from before this feature;
-                                          run ` + "`mcsearch index <path>`" + ` once to
+                                          run `+"`dex index <path>`"+` once to
                                           re-record them)
-  mcsearch watch  <path>                  keep the index fresh as files change
-  mcsearch clone  <src> <dst>             seed dst's index from src's (e.g. for a
+  dex watch  <path>                  keep the index fresh as files change
+  dex clone  <src> <dst>             seed dst's index from src's (e.g. for a
                                           new git worktree); follow with
-                                          ` + "`mcsearch index <dst>`" + ` to reconcile
-  mcsearch mcp                            run as an MCP server over stdio
-  mcsearch version                        print the build version
+                                          `+"`dex index <dst>`"+` to reconcile
+  dex mcp                            run as an MCP server over stdio
+  dex version                        print the build version
 
 env:
-  Run ` + "`mcsearch env`" + ` for the effective configuration. The 5 vars that
-  matter for 80% of setups: MCSEARCH_EMBED_URL, MCSEARCH_EMBED_MODEL,
-  MCSEARCH_INDEX_DIR, MCSEARCH_CHAT_URL, MCSEARCH_CHAT_MODEL.
+  Run `+"`dex env`"+` for the effective configuration. The 5 vars that
+  matter for 80% of setups: DEX_EMBED_URL, DEX_EMBED_MODEL,
+  DEX_INDEX_DIR, DEX_CHAT_URL, DEX_CHAT_MODEL.
   Tuning knobs (timeouts, batch sizes, optional rerank/compress/draft
-  endpoints) — see docs/tuning.md or run ` + "`mcsearch env --all --doc`" + `.`)
+  endpoints) — see docs/tuning.md or run `+"`dex env --all --doc`"+`.`)
 }
 
 // validIntent reports whether s is one of the strategies the context
@@ -214,7 +214,7 @@ type boolFlag interface {
 // flag.Parse sees them even when the user typed them after positional
 // args. Without this, Go's flag package silently stops parsing at the
 // first non-flag arg and quietly drops every flag that follows — a
-// real footgun for invocations like `mcsearch search semantic <path> "q" --k=3`.
+// real footgun for invocations like `dex search semantic <path> "q" --k=3`.
 //
 // Uses the FlagSet to detect which flags consume a separate-token value
 // (so `--rerank off` is treated as one flag/value pair, not flag plus
@@ -283,21 +283,21 @@ func envOr(key, def string) string {
 }
 
 func indexDir() (string, error) {
-	if v := os.Getenv("MCSEARCH_INDEX_DIR"); v != "" {
+	if v := os.Getenv("DEX_INDEX_DIR"); v != "" {
 		return v, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".cache", "mcsearch"), nil
+	return filepath.Join(home, ".cache", "dex"), nil
 }
 
 // storeOpts reads runtime tweaks from the environment so every code
 // path that opens a Store sees the same configuration.
 func storeOpts() store.Options {
 	opts := store.Options{
-		DisableBM25:    os.Getenv("MCSEARCH_DISABLE_BM25") == "1",
+		DisableBM25:    os.Getenv("DEX_DISABLE_BM25") == "1",
 		RerankPool:     rerankPool(),
 		MaxHitsPerFile: maxHitsPerFile(),
 	}
@@ -319,18 +319,18 @@ func parseDuration(envVar, raw string, def time.Duration) time.Duration {
 	return d
 }
 
-// maxHitsPerFile reads MCSEARCH_MAX_HITS_PER_FILE from the environment.
+// maxHitsPerFile reads DEX_MAX_HITS_PER_FILE from the environment.
 // Zero means no per-file cap (default). Positive values enforce result
 // diversity — useful when a single heavily-matched file would otherwise
 // dominate the top-k results.
 func maxHitsPerFile() int {
-	raw := os.Getenv("MCSEARCH_MAX_HITS_PER_FILE")
+	raw := os.Getenv("DEX_MAX_HITS_PER_FILE")
 	if raw == "" {
 		return 0
 	}
 	n, err := strconv.Atoi(raw)
 	if err != nil || n < 0 {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_MAX_HITS_PER_FILE=%q is not a non-negative integer; ignoring\n", raw)
+		fmt.Fprintf(os.Stderr, "warning: DEX_MAX_HITS_PER_FILE=%q is not a non-negative integer; ignoring\n", raw)
 		return 0
 	}
 	return n
@@ -348,53 +348,53 @@ func cliLogger() *slog.Logger {
 }
 
 func newEmbedClient() *embed.Client {
-	url := envOr("MCSEARCH_EMBED_URL", "http://127.0.0.1:8082")
-	model := envOr("MCSEARCH_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B")
-	rawBatch := envOr("MCSEARCH_EMBED_BATCH", "32")
+	url := envOr("DEX_EMBED_URL", "http://127.0.0.1:8082")
+	model := envOr("DEX_EMBED_MODEL", "Qwen/Qwen3-Embedding-4B")
+	rawBatch := envOr("DEX_EMBED_BATCH", "32")
 	batch, err := strconv.Atoi(rawBatch)
 	if err != nil || batch <= 0 {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_EMBED_BATCH=%q is not a positive integer; using 32\n", rawBatch)
+		fmt.Fprintf(os.Stderr, "warning: DEX_EMBED_BATCH=%q is not a positive integer; using 32\n", rawBatch)
 		batch = 32
 	}
-	conc := envInt("MCSEARCH_EMBED_CONCURRENCY", 4)
-	timeout := parseDuration("MCSEARCH_EMBED_TIMEOUT", envOr("MCSEARCH_EMBED_TIMEOUT", "60s"), 60*time.Second)
+	conc := envInt("DEX_EMBED_CONCURRENCY", 4)
+	timeout := parseDuration("DEX_EMBED_TIMEOUT", envOr("DEX_EMBED_TIMEOUT", "60s"), 60*time.Second)
 	return embed.NewWithConcurrency(url, model, batch, conc, timeout)
 }
 
 func newChatClient() *chat.Client {
-	url := envOr("MCSEARCH_CHAT_URL", "http://127.0.0.1:8081")
-	model := envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
-	timeout := parseDuration("MCSEARCH_CHAT_TIMEOUT", envOr("MCSEARCH_CHAT_TIMEOUT", "120s"), 120*time.Second)
+	url := envOr("DEX_CHAT_URL", "http://127.0.0.1:8081")
+	model := envOr("DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+	timeout := parseDuration("DEX_CHAT_TIMEOUT", envOr("DEX_CHAT_TIMEOUT", "120s"), 120*time.Second)
 	return chat.New(url, model, timeout)
 }
 
 // newRerankClient returns a rerank.HealthChecker (either the Cohere-compatible
 // *rerank.Client or the decoder-style *rerank.ChatReranker), or nil when
-// reranking is disabled. Rerank is OFF by default — empty MCSEARCH_RERANK_URL
-// or MCSEARCH_DISABLE_RERANK=1 yields nil; store.Search treats nil as
+// reranking is disabled. Rerank is OFF by default — empty DEX_RERANK_URL
+// or DEX_DISABLE_RERANK=1 yields nil; store.Search treats nil as
 // "skip the stage".
 //
-// MCSEARCH_RERANK_STYLE selects the backend:
+// DEX_RERANK_STYLE selects the backend:
 //
 //	"cohere" (default) — Cohere-compatible /rerank endpoint (TEI, Infinity,
 //	                     vLLM with a cross-encoder model like bge-reranker-v2-m3)
 //	"chat"             — chat-completions + logprobs (vLLM serving a decoder-style
 //	                     reranker like Qwen3-Reranker-4B)
 func newRerankClient() rerank.HealthChecker {
-	url := os.Getenv("MCSEARCH_RERANK_URL")
+	url := os.Getenv("DEX_RERANK_URL")
 	if url == "" {
 		return nil
 	}
-	if os.Getenv("MCSEARCH_DISABLE_RERANK") == "1" {
+	if os.Getenv("DEX_DISABLE_RERANK") == "1" {
 		return nil
 	}
-	model := envOr("MCSEARCH_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
-	timeout := parseDuration("MCSEARCH_RERANK_TIMEOUT", envOr("MCSEARCH_RERANK_TIMEOUT", "5s"), 5*time.Second)
-	if os.Getenv("MCSEARCH_RERANK_STYLE") == "chat" {
-		rawConc := envOr("MCSEARCH_RERANK_CONCURRENCY", "4")
+	model := envOr("DEX_RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+	timeout := parseDuration("DEX_RERANK_TIMEOUT", envOr("DEX_RERANK_TIMEOUT", "5s"), 5*time.Second)
+	if os.Getenv("DEX_RERANK_STYLE") == "chat" {
+		rawConc := envOr("DEX_RERANK_CONCURRENCY", "4")
 		concurrency, cerr := strconv.Atoi(rawConc)
 		if cerr != nil || concurrency <= 0 {
-			fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_CONCURRENCY=%q is not a positive integer; using 4\n", rawConc)
+			fmt.Fprintf(os.Stderr, "warning: DEX_RERANK_CONCURRENCY=%q is not a positive integer; using 4\n", rawConc)
 			concurrency = 4
 		}
 		return rerank.NewChat(url, model, concurrency, timeout)
@@ -416,13 +416,13 @@ func chatClientFromEnv(urlEnv, modelEnv, timeoutEnv, modelFallback string, defTi
 }
 
 func newCompressClient() *chat.Client {
-	return chatClientFromEnv("MCSEARCH_COMPRESS_URL", "MCSEARCH_COMPRESS_MODEL", "MCSEARCH_COMPRESS_TIMEOUT",
-		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 30*time.Second)
+	return chatClientFromEnv("DEX_COMPRESS_URL", "DEX_COMPRESS_MODEL", "DEX_COMPRESS_TIMEOUT",
+		envOr("DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 30*time.Second)
 }
 
 func newDraftClient() *chat.Client {
-	return chatClientFromEnv("MCSEARCH_DRAFT_URL", "MCSEARCH_DRAFT_MODEL", "MCSEARCH_DRAFT_TIMEOUT",
-		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
+	return chatClientFromEnv("DEX_DRAFT_URL", "DEX_DRAFT_MODEL", "DEX_DRAFT_TIMEOUT",
+		envOr("DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
 }
 
 // newSummaryClient builds the chat client used for index-time
@@ -430,13 +430,13 @@ func newDraftClient() *chat.Client {
 // summaries are short (≤ 400 tokens) and dominated by call count, so
 // users typically point this at a smaller, faster model than the main
 // chat leg used by generate / ask_codebase. Falls back to the main
-// chat client when MCSEARCH_SUMMARY_URL is unset.
+// chat client when DEX_SUMMARY_URL is unset.
 func newSummaryClient() *chat.Client {
-	if os.Getenv("MCSEARCH_SUMMARY_URL") == "" {
+	if os.Getenv("DEX_SUMMARY_URL") == "" {
 		return newChatClient()
 	}
-	return chatClientFromEnv("MCSEARCH_SUMMARY_URL", "MCSEARCH_SUMMARY_MODEL", "MCSEARCH_SUMMARY_TIMEOUT",
-		envOr("MCSEARCH_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
+	return chatClientFromEnv("DEX_SUMMARY_URL", "DEX_SUMMARY_MODEL", "DEX_SUMMARY_TIMEOUT",
+		envOr("DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
 }
 
 // envInt reads a positive integer env var with a default.
@@ -458,10 +458,10 @@ func envInt(name string, def int) int {
 // Default 40, clamped to [1, 100]. Larger = better recall but slower
 // cross-encoder call. Only consulted when a Reranker is wired.
 func rerankPool() int {
-	raw := envOr("MCSEARCH_RERANK_POOL", "40")
+	raw := envOr("DEX_RERANK_POOL", "40")
 	pool, err := strconv.Atoi(raw)
 	if err != nil || pool <= 0 {
-		fmt.Fprintf(os.Stderr, "warning: MCSEARCH_RERANK_POOL=%q is not a positive integer; using 40\n", raw)
+		fmt.Fprintf(os.Stderr, "warning: DEX_RERANK_POOL=%q is not a positive integer; using 40\n", raw)
 		pool = 40
 	}
 	if pool > 100 {
@@ -492,11 +492,11 @@ func cmdIndex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index", flag.ContinueOnError)
 	setHelp(fs,
 		"Build or refresh the per-project index (chunks + Go static graph).",
-		"mcsearch index [flags] <path>")
+		"dex index [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
-	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when MCSEARCH_SUMMARY_URL is set)")
-	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `mcsearch index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
+	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when DEX_SUMMARY_URL is set)")
+	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `dex index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -545,25 +545,25 @@ func cmdIndex(ctx context.Context, args []string) error {
 		opts := index.Options{
 			Verbose:     *verbose,
 			Logger:      cliLogger(),
-			Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0),
+			Concurrency: envInt("DEX_INDEX_CONCURRENCY", 0),
 		}
 		// Auto-enable summarize when a dedicated summary endpoint is
-		// configured. MCSEARCH_CHAT_URL is NOT a trigger — users often
+		// configured. DEX_CHAT_URL is NOT a trigger — users often
 		// set it for generate/ask_codebase without wanting per-chunk
 		// chat calls on every index. Set --summarize, --summarize-defer,
-		// or MCSEARCH_SUMMARY_URL explicitly to opt in.
+		// or DEX_SUMMARY_URL explicitly to opt in.
 		//
 		// --summarize-defer implies --summarize and routes job dispatch
 		// through pending_summaries instead of inline chat calls; the
 		// chat client is unused at index time but we still wire it so
-		// the future `mcsearch index summarize` drainer can reuse the same
+		// the future `dex index summarize` drainer can reuse the same
 		// Options shape.
-		if *summarize || *summarizeDefer || os.Getenv("MCSEARCH_SUMMARY_URL") != "" {
+		if *summarize || *summarizeDefer || os.Getenv("DEX_SUMMARY_URL") != "" {
 			opts.Summarize = true
 			opts.DeferSummaries = *summarizeDefer
 			opts.Chat = newSummaryClient()
-			opts.SummaryConcurrency = envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4)
-			opts.ChunkSummaryMinLines = envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0)
+			opts.SummaryConcurrency = envInt("DEX_SUMMARY_CONCURRENCY", 4)
+			opts.ChunkSummaryMinLines = envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0)
 		}
 		ix := index.New(p, st, newEmbedClient(), ig, opts)
 		if err := ix.Run(ctx); err != nil {
@@ -650,7 +650,7 @@ func reportIndexResult(project string, s store.Stats, g *graph.Stats) error {
 
 // ─── search ────────────────────────────────────────────────────────────────
 
-// cmdSearch dispatches `mcsearch search <semantic|symbol>`. Mirrors
+// cmdSearch dispatches `dex search <semantic|symbol>`. Mirrors
 // the MCP tool names `search_semantic` / `search_symbol`.
 func cmdSearch(ctx context.Context, args []string) error {
 	if len(args) < 1 {
@@ -664,8 +664,8 @@ func cmdSearch(ctx context.Context, args []string) error {
 		return cmdSearchSymbol(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stderr, `usage:
-  mcsearch search semantic <path> <query...>   hybrid top-k chunks (MCP: search_semantic)
-  mcsearch search symbol   <path> <name>       exact identifier lookup (MCP: search_symbol)`)
+  dex search semantic <path> <query...>   hybrid top-k chunks (MCP: search_semantic)
+  dex search symbol   <path> <name>       exact identifier lookup (MCP: search_symbol)`)
 		return nil
 	default:
 		return fmt.Errorf("unknown search subcommand: %s (have: semantic, symbol)", sub)
@@ -676,9 +676,9 @@ func cmdSearchSemantic(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("search semantic", flag.ContinueOnError)
 	setHelp(fs,
 		"Hybrid top-k chunks for a query (MCP: search_semantic).",
-		"mcsearch search semantic [flags] <path> <query...>")
+		"dex search semantic [flags] <path> <query...>")
 	k := fs.Int("k", 8, "number of results to return")
-	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when MCSEARCH_RERANK_URL is unset)")
+	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when DEX_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
 	explain := fs.Bool("explain", false, "show per-chunk score breakdown and stage timings")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -704,7 +704,7 @@ func cmdSearchSemantic(ctx context.Context, args []string) error {
 	}
 	if _, err := os.Stat(p.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no index for %s — run `mcsearch index %s` first", p.Root, p.Root)
+			return fmt.Errorf("no index for %s — run `dex index %s` first", p.Root, p.Root)
 		}
 		return err
 	}
@@ -785,7 +785,7 @@ func cmdSearchSymbol(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("search symbol", flag.ContinueOnError)
 	setHelp(fs,
 		"Exact identifier lookup (MCP: search_symbol).",
-		"mcsearch search symbol [flags] <path> <name>")
+		"dex search symbol [flags] <path> <name>")
 	k := fs.Int("k", 10, "max results to return")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -831,7 +831,7 @@ func cmdAsk(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	setHelp(fs,
 		"One-shot router — composes semantic + symbol + graph; emit suggested_reads + next_action. Use this BEFORE grep loops.",
-		"mcsearch ask [flags] <path> <question...>")
+		"dex ask [flags] <path> <question...>")
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -885,7 +885,7 @@ func cmdAsk(ctx context.Context, args []string) error {
 
 // ─── view ──────────────────────────────────────────────────────────────────
 
-// cmdView dispatches `mcsearch view <summarize>`. Mirrors the MCP
+// cmdView dispatches `dex view <summarize>`. Mirrors the MCP
 // `view_summarize` tool by parking it under a `view` group so future
 // view-style ops (e.g. `view chunk`) land next to it.
 func cmdView(ctx context.Context, args []string) error {
@@ -898,7 +898,7 @@ func cmdView(ctx context.Context, args []string) error {
 		return cmdViewSummarize(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stderr, `usage:
-  mcsearch view summarize <path> <file>   summarize a file slice (MCP: view_summarize)`)
+  dex view summarize <path> <file>   summarize a file slice (MCP: view_summarize)`)
 		return nil
 	default:
 		return fmt.Errorf("unknown view subcommand: %s (have: summarize)", sub)
@@ -909,7 +909,7 @@ func cmdViewSummarize(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("view summarize", flag.ContinueOnError)
 	setHelp(fs,
 		"Summarize a file slice via the chat model (MCP: view_summarize).",
-		"mcsearch view summarize [flags] <path> <file>")
+		"dex view summarize [flags] <path> <file>")
 	start := fs.Int("start", 0, "first line to summarize (1-indexed; 0 = beginning of file)")
 	end := fs.Int("end", 0, "last line to summarize (1-indexed, inclusive; 0 = end of file)")
 	focus := fs.String("focus", "", "optional steering — e.g. 'public API surface', 'side effects'")
@@ -978,7 +978,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	setHelp(fs,
 		"Generate code grounded in the project's index (RAG: top-k chunks → chat endpoint).",
-		"mcsearch generate [flags] <path> <prompt...>")
+		"dex generate [flags] <path> <prompt...>")
 	k := fs.Int("k", 8, "number of RAG chunks to retrieve as context")
 	noRAG := fs.Bool("no-rag", false, "skip retrieval; send prompt to the chat endpoint without project context")
 	system := fs.String("system", "", "override the default system prompt")
@@ -1011,7 +1011,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	if !*noRAG {
 		if _, err := os.Stat(p.DBPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("no index for %s — run `mcsearch index %s` first, or pass --no-rag to skip retrieval", p.Root, p.Root)
+				return fmt.Errorf("no index for %s — run `dex index %s` first, or pass --no-rag to skip retrieval", p.Root, p.Root)
 			}
 			return err
 		}
@@ -1077,7 +1077,7 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index status", flag.ContinueOnError)
 	setHelp(fs,
 		"Show endpoint health and project stats (chunks/files/graph). Optional path narrows to one project. (MCP: index_status)",
-		"mcsearch index status [<path>]")
+		"dex index status [<path>]")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1085,7 +1085,7 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	printEndpoints(checkCtx)
-	fmt.Printf("mcsearch %s\n", mcp.Version)
+	fmt.Printf("dex %s\n", mcp.Version)
 
 	base, err := indexDir()
 	if err != nil {
@@ -1100,7 +1100,7 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 		}
 		if _, err := os.Stat(p.DBPath); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
-				fmt.Printf("\n%s\n  not indexed — run: mcsearch index %s\n", p.Root, p.Root)
+				fmt.Printf("\n%s\n  not indexed — run: dex index %s\n", p.Root, p.Root)
 				return nil
 			}
 			return err
@@ -1121,9 +1121,9 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 			fmt.Printf("  %d graph nodes  %d graph edges\n", nodes, edges)
 		}
 		if stats.LastIndex.IsZero() {
-			fmt.Println("  last indexed: unknown (run mcsearch index to refresh)")
+			fmt.Println("  last indexed: unknown (run dex index to refresh)")
 		} else if time.Since(stats.LastIndex) > 24*time.Hour {
-			fmt.Printf("  last indexed: %s  ⚠ stale — run: mcsearch index %s\n",
+			fmt.Printf("  last indexed: %s  ⚠ stale — run: dex index %s\n",
 				relativeTime(stats.LastIndex), p.Root)
 		} else {
 			fmt.Printf("  last indexed: %s\n", relativeTime(stats.LastIndex))
@@ -1181,7 +1181,7 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 				return
 			}
 			if root == "" {
-				root = "? (run mcsearch index <path> to tag)"
+				root = "? (run dex index <path> to tag)"
 			}
 			results[idx] = row{
 				root:   root,
@@ -1257,15 +1257,15 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 // ─── index summarize ───────────────────────────────────────────────────────
 
 // cmdIndexSummarize drains the pending_summaries queue: generates
-// summaries that `mcsearch index --summarize-defer` enqueued, embeds
+// summaries that `dex index --summarize-defer` enqueued, embeds
 // them, and upserts them as summary chunks. After draining file_summary
 // and chunk_summary jobs, cascades to generate any missing
 // package_summary and repo_summary chunks.
 func cmdIndexSummarize(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("index summarize", flag.ContinueOnError)
 	setHelp(fs,
-		"Drain pending_summaries: generate summaries queued by `mcsearch index --summarize-defer`, then cascade to package + repo summaries.",
-		"mcsearch index summarize [flags] <path>")
+		"Drain pending_summaries: generate summaries queued by `dex index --summarize-defer`, then cascade to package + repo summaries.",
+		"dex index summarize [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -1302,8 +1302,8 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 		Verbose:              *verbose,
 		Logger:               cliLogger(),
 		Chat:                 newSummaryClient(),
-		SummaryConcurrency:   envInt("MCSEARCH_SUMMARY_CONCURRENCY", 4),
-		ChunkSummaryMinLines: envInt("MCSEARCH_CHUNK_SUMMARY_MIN_LINES", 0),
+		SummaryConcurrency:   envInt("DEX_SUMMARY_CONCURRENCY", 4),
+		ChunkSummaryMinLines: envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0),
 	})
 
 	startCount, _ := st.CountPendingSummaries(ctx)
@@ -1317,7 +1317,7 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 	fmt.Printf("  generated:    %d\n", generated)
 	fmt.Printf("  queue:        %d → %d\n", startCount, endCount)
 	if endCount > 0 {
-		fmt.Printf("  (remaining rows have attempt failures; check with `mcsearch index status`)\n")
+		fmt.Printf("  (remaining rows have attempt failures; check with `dex index status`)\n")
 	}
 	return nil
 }
@@ -1328,7 +1328,7 @@ func cmdNuke(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("nuke", flag.ContinueOnError)
 	setHelp(fs,
 		"Delete the on-disk index for a project (irreversible).",
-		"mcsearch nuke <path>")
+		"dex nuke <path>")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1364,8 +1364,8 @@ func cmdReindex(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("reindex", flag.ContinueOnError)
 	setHelp(fs,
 		"Drop and re-embed a project from scratch (or every known project with --all --yes).",
-		"mcsearch reindex [flags] <path>  |  mcsearch reindex --all --yes")
-	all := fs.Bool("all", false, "drop and re-index every known project under MCSEARCH_INDEX_DIR")
+		"dex reindex [flags] <path>  |  dex reindex --all --yes")
+	all := fs.Bool("all", false, "drop and re-index every known project under DEX_INDEX_DIR")
 	yes := fs.Bool("yes", false, "confirm the destructive sweep required by --all")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
@@ -1443,7 +1443,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 	if err != nil {
 		return err
 	}
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: verbose, Logger: cliLogger(), Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0)})
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: verbose, Logger: cliLogger(), Concurrency: envInt("DEX_INDEX_CONCURRENCY", 0)})
 	if err := ix.Run(ctx); err != nil {
 		return err
 	}
@@ -1469,7 +1469,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 // knownProjectRoots walks the index dir, opening each per-project index
 // and reading the recorded `project_root` meta. Entries written before
 // that meta existed are reported to stderr and skipped — the user can
-// `mcsearch nuke <path>` + `mcsearch index <path>` once to re-record it.
+// `dex nuke <path>` + `dex index <path>` once to re-record it.
 func knownProjectRoots(ctx context.Context, base string) ([]string, error) {
 	entries, err := os.ReadDir(base)
 	if err != nil {
@@ -1513,7 +1513,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	setHelp(fs,
 		"Keep the index fresh as files change (foreground; runs chunk + graph after each debounce).",
-		"mcsearch watch [flags] <path>")
+		"dex watch [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
@@ -1548,7 +1548,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 		return err
 	}
 	logger := cliLogger()
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger, Concurrency: envInt("MCSEARCH_INDEX_CONCURRENCY", 0)})
+	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger, Concurrency: envInt("DEX_INDEX_CONCURRENCY", 0)})
 	// Refresh the Go static graph after each chunk-index flush. The
 	// graph layer lives in the same SQLite file, so the chunk run has
 	// already released the writer when this fires.
@@ -1562,7 +1562,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 		Logger:     logger,
 		AfterIndex: afterIndex,
 	})
-	fmt.Fprintf(os.Stderr, "mcsearch watching %s (debounce=%s)\n", p.Root, *debounce)
+	fmt.Fprintf(os.Stderr, "dex watching %s (debounce=%s)\n", p.Root, *debounce)
 	return w.Run(ctx)
 }
 
@@ -1573,13 +1573,13 @@ func cmdWatch(ctx context.Context, args []string) error {
 // branch-per-folder workflows). Chunks are keyed by (relative path,
 // content sha1), so the copied index is correct for any file that exists
 // at the same path with the same content in dst; differing files get
-// reconciled on the next `mcsearch index <dst>` (incremental — only
+// reconciled on the next `dex index <dst>` (incremental — only
 // changed chunks are re-embedded).
 func cmdClone(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
 	setHelp(fs,
-		"Seed dst's index from src's (e.g. for a new git worktree). Follow with `mcsearch index <dst>` to reconcile.",
-		"mcsearch clone [flags] <src-path> <dst-path>")
+		"Seed dst's index from src's (e.g. for a new git worktree). Follow with `dex index <dst>` to reconcile.",
+		"dex clone [flags] <src-path> <dst-path>")
 	force := fs.Bool("force", false, "overwrite dst's index if it already exists")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
@@ -1605,13 +1605,13 @@ func cmdClone(ctx context.Context, args []string) error {
 	}
 	if _, err := os.Stat(src.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("src has no index at %s — run `mcsearch index %s` first", src.DBPath, src.Root)
+			return fmt.Errorf("src has no index at %s — run `dex index %s` first", src.DBPath, src.Root)
 		}
 		return err
 	}
 	if _, err := os.Stat(dst.DBPath); err == nil {
 		if !*force {
-			return fmt.Errorf("dst already has an index at %s — pass --force to overwrite or `mcsearch nuke %s` first", dst.DBPath, dst.Root)
+			return fmt.Errorf("dst already has an index at %s — pass --force to overwrite or `dex nuke %s` first", dst.DBPath, dst.Root)
 		}
 		if err := os.RemoveAll(dst.CacheDir); err != nil {
 			return fmt.Errorf("remove existing dst cache: %w", err)
@@ -1626,14 +1626,14 @@ func cmdClone(ctx context.Context, args []string) error {
 		return fmt.Errorf("copy index: %w", err)
 	}
 	// Re-tag project_root so `reindex --all` / status see this cache
-	// as belonging to dst, not src. A subsequent `mcsearch index <dst>`
+	// as belonging to dst, not src. A subsequent `dex index <dst>`
 	// would also do this, but tagging now keeps the cache discoverable
 	// even before the first reconcile.
 	if err := retagProjectRoot(ctx, dst.DBPath, dst.Root); err != nil {
 		return fmt.Errorf("retag project root: %w", err)
 	}
 	fmt.Printf("✓ cloned %s → %s\n", src.Root, dst.Root)
-	fmt.Printf("  next: `mcsearch index %s` will reconcile any files that differ between the two trees (incremental — only changed chunks are re-embedded).\n", dst.Root)
+	fmt.Printf("  next: `dex index %s` will reconcile any files that differ between the two trees (incremental — only changed chunks are re-embedded).\n", dst.Root)
 	return nil
 }
 
@@ -1675,8 +1675,8 @@ func copyFile(srcPath, dstPath string) error {
 func cmdMCP(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	setHelp(fs,
-		"Run mcsearch as an MCP server over stdio (canonical entrypoint for Claude Code).",
-		"mcsearch mcp")
+		"Run dex as an MCP server over stdio (canonical entrypoint for Claude Code).",
+		"dex mcp")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}

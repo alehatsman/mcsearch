@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/rerank"
+	"github.com/alehatsman/dex/internal/rerank"
 )
 
 func newStore(t *testing.T) (*Store, context.Context) {
@@ -228,7 +228,7 @@ func TestSearchLargeIndex(t *testing.T) {
 
 // TestCrossProcessVisibility simulates what happens when a long-lived
 // Store (e.g. the MCP server) is running and a separate process runs
-// `mcsearch index` and adds new chunks. With the slab cache gone the
+// `dex index` and adds new chunks. With the slab cache gone the
 // reader hits chunk_vecs directly each Search, so SQLite WAL alone has
 // to make the new rows visible — no client-side invalidation required.
 func TestCrossProcessVisibility(t *testing.T) {
@@ -236,7 +236,7 @@ func TestCrossProcessVisibility(t *testing.T) {
 	ctx := context.Background()
 	now := time.Now()
 
-	// Writer: represents the `mcsearch index` process.
+	// Writer: represents the `dex index` process.
 	writer, err := Open(ctx, dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +264,7 @@ func TestCrossProcessVisibility(t *testing.T) {
 	}
 
 	// Writer adds a new chunk and advances last_indexed_at — simulates a
-	// second `mcsearch index` run completing while the MCP server is live.
+	// second `dex index` run completing while the MCP server is live.
 	now2 := now.Add(time.Second)
 	if err := writer.UpsertMany(ctx, []PendingChunk{
 		{Path: "b.go", ContentSHA: "h2", Content: "func B(){}", Vec: []float32{0, 1, 0, 0}},

@@ -1,4 +1,4 @@
-module github.com/alehatsman/mcsearch
+module github.com/alehatsman/dex
 
 go 1.26
 

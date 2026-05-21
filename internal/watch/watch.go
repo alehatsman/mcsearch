@@ -6,7 +6,7 @@
 // `index.Indexer.Run` pass against the project. The indexer is already
 // content-hash incremental, so unchanged files don't re-embed — the only
 // per-save overhead is one filesystem walk, which is cheap for the
-// project sizes mcsearch is built for.
+// project sizes dex is built for.
 package watch
 
 import (
@@ -22,8 +22,8 @@ import (
 
 	"github.com/fsnotify/fsnotify"
 
-	"github.com/alehatsman/mcsearch/internal/ignore"
-	"github.com/alehatsman/mcsearch/internal/index"
+	"github.com/alehatsman/dex/internal/ignore"
+	"github.com/alehatsman/dex/internal/index"
 )
 
 type Options struct {
@@ -31,7 +31,7 @@ type Options struct {
 	Verbose  bool
 	Logger   *slog.Logger // destination for log output; nil = io.Discard
 	// AfterIndex, if non-nil, is invoked after each successful indexer
-	// flush. Used by `mcsearch watch` to refresh the Go static graph in
+	// flush. Used by `dex watch` to refresh the Go static graph in
 	// lockstep with the chunk index. Returning an error is logged but
 	// does not stop the watch loop — the chunk side is already committed
 	// and the next event can retry.

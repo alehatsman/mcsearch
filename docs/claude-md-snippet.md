@@ -44,17 +44,17 @@ and an `avoid` line you can follow verbatim.
 - `avoid` — what NOT to do. Honor it.
 
 **Fallback rules:**
-- `status: "no-index"` → run `mcsearch index <project>` once, or fall
+- `status: "no-index"` → run `dex index <project>` once, or fall
   back to Grep if you can't.
 - `status: "embedding-service-unreachable"` → embed is offline; fall
   back to Grep / Glob / ripgrep for this request.
 - `stale: true` → results may be ~1 day behind HEAD; flag this if the
   fix depends on very recent code.
-- `avoid` mentions "Run `mcsearch index`" → the project has no
+- `avoid` mentions "Run `dex index`" → the project has no
   structural graph yet (likely indexed by an older binary that didn't
   run the graph phase, or re-indexed with `--graph=off`); symbol/
   architecture intents work but won't surface sibling methods, package
-  imports, etc. Suggest re-running `mcsearch index <project>` once.
+  imports, etc. Suggest re-running `dex index <project>` once.
 - `avoid` mentions "`calls` edges are Go-only" → call-graph queries
   for non-Go languages fall back to a ripgrep `references` list;
   treat that list as best-effort and verify edge cases.
@@ -93,15 +93,15 @@ If your CLAUDE.md is already dense:
 
 ## CLI fallback
 
-The same router is available as `mcsearch ask <path> <question>` for
+The same router is available as `dex ask <path> <question>` for
 shell-based agents or when the MCP transport is unavailable:
 
 ```sh
-mcsearch ask . "where is filesystem event debouncing handled"
-mcsearch ask . "callers of (*Store).Search"
-mcsearch ask . "how does indexing pipeline work" --intent architecture
-mcsearch ask . "..." --format=json   # raw output for piping
-mcsearch ask . "..." --k 12          # widen per-lane hits
+dex ask . "where is filesystem event debouncing handled"
+dex ask . "callers of (*Store).Search"
+dex ask . "how does indexing pipeline work" --intent architecture
+dex ask . "..." --format=json   # raw output for piping
+dex ask . "..." --k 12          # widen per-lane hits
 ```
 
 Flags mirror the MCP input fields: `--intent`, `--k`, `--format`.

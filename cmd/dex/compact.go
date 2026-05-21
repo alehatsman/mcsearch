@@ -1,6 +1,6 @@
-// `mcsearch compact` — concatenate a folder's text files for LLM prompts.
+// `dex compact` — concatenate a folder's text files for LLM prompts.
 //
-// Walks <path>, applies the same filters mcsearch uses for indexing
+// Walks <path>, applies the same filters dex uses for indexing
 // (ignore.New + IndexableExt/IndexableBasename + LooksBinary +
 // LooksLikeSecret), and emits each surviving file with an `===== <relpath> =====`
 // header followed by its contents. Output goes to stdout, or to --out
@@ -19,14 +19,14 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/alehatsman/mcsearch/internal/ignore"
+	"github.com/alehatsman/dex/internal/ignore"
 )
 
 func cmdCompact(_ context.Context, args []string) (err error) {
 	flags := flag.NewFlagSet("compact", flag.ContinueOnError)
 	setHelp(flags,
 		"Concatenate indexable files under <path> with ===== headers — for pasting into LLM prompts. Honors .gitignore + secret/binary filters. (alias: bundle)",
-		"mcsearch compact [flags] <path>")
+		"dex compact [flags] <path>")
 	out := flags.String("out", "", "write to file instead of stdout")
 	maxBytes := flags.Int64("max-bytes", 1<<20, "skip individual files larger than N bytes")
 	strip := flags.Bool("strip", false, "drop line comments (// and #), blank lines, and trailing whitespace")
@@ -34,7 +34,7 @@ func cmdCompact(_ context.Context, args []string) (err error) {
 		return err
 	}
 	if flags.NArg() < 1 {
-		return fmt.Errorf("usage: mcsearch compact <path> [--out FILE] [--max-bytes N]")
+		return fmt.Errorf("usage: dex compact <path> [--out FILE] [--max-bytes N]")
 	}
 
 	root, err := filepath.Abs(flags.Arg(0))

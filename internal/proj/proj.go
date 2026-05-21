@@ -15,7 +15,7 @@ import (
 type Project struct {
 	Root     string // canonical absolute path
 	ID       string // sha256(Root) hex — primary key for the cache dir
-	CacheDir string // $MCSEARCH_INDEX_DIR/<ID>
+	CacheDir string // $DEX_INDEX_DIR/<ID>
 	DBPath   string // CacheDir/index.db
 }
 

@@ -1,4 +1,4 @@
-# mcsearch
+# dex
 
 Local semantic code-search and summarization MCP server for Claude (and
 a CLI). Tree-sitter chunks → self-hosted embeddings (+ optional
@@ -8,7 +8,7 @@ static graph from `go/packages` + `go/types`. Source never leaves your
 machine.
 
 ```console
-$ mcsearch search semantic ./ "where is filesystem event debouncing handled"
+$ dex search semantic ./ "where is filesystem event debouncing handled"
 ─── #1 markDirty  internal/watch/watch.go:60-71  (method_declaration)
 // markDirty resets the debounce timer; on expiry it runs an index pass.
 func (w *Watcher) markDirty() { … }
@@ -83,15 +83,15 @@ the `avoid` line tells Claude not to second-guess it with grep.
 ## Install
 
 ```bash
-git clone https://github.com/alehatsman/mcsearch.git && cd mcsearch
+git clone https://github.com/alehatsman/dex.git && cd dex
 make install        # ~/.local/bin, no sudo; atomic rename-swap so it's
-                    # safe to re-run while `mcsearch mcp`/`watch` is live
+                    # safe to re-run while `dex mcp`/`watch` is live
 ```
 
-Or via the [`mcsearch` dotfiles component](https://github.com/alehatsman/dotfiles/tree/main/components/mcsearch) —
+Or via the [`dex` dotfiles component](https://github.com/alehatsman/dotfiles/tree/main/components/dex) —
 which wires the embedding endpoint, SSH tunnel, and MCP registration.
 
-mcsearch needs CGO (tree-sitter grammars + the embedded sqlite-vec
+dex needs CGO (tree-sitter grammars + the embedded sqlite-vec
 extension) and the `sqlite_fts5` build tag (FTS5 powers the BM25 leg).
 The Makefile, Taskfile, and Dockerfile already pass both — use them. If
 you invoke `go build` / `go install` directly, add `-tags sqlite_fts5`
@@ -100,50 +100,50 @@ and ensure `CGO_ENABLED=1` plus a C toolchain are available.
 ## CLI
 
 The query-side commands mirror the MCP tool surface 1:1 (subcommand-group
-form): `mcsearch ask` ↔ `ask`, `mcsearch search semantic` ↔
-`search_semantic`, `mcsearch graph callers` ↔ `graph_callers`, etc. CLI
+form): `dex ask` ↔ `ask`, `dex search semantic` ↔
+`search_semantic`, `dex graph callers` ↔ `graph_callers`, etc. CLI
 and MCP feel like the same tool.
 
 ```bash
 # query (mirrors MCP tools)
-mcsearch ask <path> "..."                       # primary entry point (use BEFORE grep)
+dex ask <path> "..."                       # primary entry point (use BEFORE grep)
                                                 #   --intent --k --no-inline --format=text|json
-mcsearch search semantic <path> "..."           # hybrid top-k chunks
+dex search semantic <path> "..."           # hybrid top-k chunks
                                                 #   --k --rerank=off --explain --format=json
-mcsearch search symbol   <path> <name>          # exact identifier lookup
-mcsearch graph neighbors <path> <file> <line>   # vector neighbours of a chunk
-mcsearch graph deps      <path> [--file=<rel>|--package=<full>]
-mcsearch graph callers   <path> <name>          # incoming calls edges (Go-only)
-mcsearch graph callees   <path> <name>          # outgoing calls edges (Go-only)
-mcsearch graph export    <path>                 # dump nodes.jsonl + edges.jsonl
-mcsearch view summarize  <path> <file>          # one-shot file/range gist via chat
-mcsearch index status    [<path>]               # endpoint health + indexed projects
+dex search symbol   <path> <name>          # exact identifier lookup
+dex graph neighbors <path> <file> <line>   # vector neighbours of a chunk
+dex graph deps      <path> [--file=<rel>|--package=<full>]
+dex graph callers   <path> <name>          # incoming calls edges (Go-only)
+dex graph callees   <path> <name>          # outgoing calls edges (Go-only)
+dex graph export    <path>                 # dump nodes.jsonl + edges.jsonl
+dex view summarize  <path> <file>          # one-shot file/range gist via chat
+dex index status    [<path>]               # endpoint health + indexed projects
 
 # build / maintenance (CLI-only)
-mcsearch index <path>           # build or refresh (chunks + Go graph)
+dex index <path>           # build or refresh (chunks + Go graph)
                                 #   --graph=off  skip graph phase
                                 #   --graph=only refresh just the graph
-mcsearch index summarize <path> # drain pending_summaries queue
-mcsearch generate <path> "..."  # RAG: top-k chunks → chat endpoint
-mcsearch watch <path>           # fsnotify-driven auto-reindex
-mcsearch clone <src> <dst>      # seed a worktree's index from a sibling
-mcsearch reindex <path>         # drop and re-embed from scratch
-mcsearch nuke <path>            # delete the on-disk index
-mcsearch mcp                    # MCP server over stdio
+dex index summarize <path> # drain pending_summaries queue
+dex generate <path> "..."  # RAG: top-k chunks → chat endpoint
+dex watch <path>           # fsnotify-driven auto-reindex
+dex clone <src> <dst>      # seed a worktree's index from a sibling
+dex reindex <path>         # drop and re-embed from scratch
+dex nuke <path>            # delete the on-disk index
+dex mcp                    # MCP server over stdio
 ```
 
-`mcsearch env` prints effective config with sources. `mcsearch -h` for
+`dex env` prints effective config with sources. `dex -h` for
 the full list.
 
 ## Environment
 
 | Variable               | Default                          | Meaning                                                                          |
 | ---------------------- | -------------------------------- | -------------------------------------------------------------------------------- |
-| `MCSEARCH_EMBED_URL`   | `http://127.0.0.1:8082`          | OpenAI-shape `/v1/embeddings` base URL.                                          |
-| `MCSEARCH_EMBED_MODEL` | `Qwen/Qwen3-Embedding-4B`        | Embedding model name forwarded as `model`.                                       |
-| `MCSEARCH_INDEX_DIR`   | `~/.cache/mcsearch`              | Per-project index files.                                                         |
-| `MCSEARCH_CHAT_URL`    | `http://127.0.0.1:8081`          | `/v1/chat/completions` — `generate`, `view_summarize`, index-time summaries.     |
-| `MCSEARCH_CHAT_MODEL`  | `Qwen/Qwen2.5-Coder-7B-Instruct` | Chat model.                                                                      |
+| `DEX_EMBED_URL`   | `http://127.0.0.1:8082`          | OpenAI-shape `/v1/embeddings` base URL.                                          |
+| `DEX_EMBED_MODEL` | `Qwen/Qwen3-Embedding-4B`        | Embedding model name forwarded as `model`.                                       |
+| `DEX_INDEX_DIR`   | `~/.cache/dex`              | Per-project index files.                                                         |
+| `DEX_CHAT_URL`    | `http://127.0.0.1:8081`          | `/v1/chat/completions` — `generate`, `view_summarize`, index-time summaries.     |
+| `DEX_CHAT_MODEL`  | `Qwen/Qwen2.5-Coder-7B-Instruct` | Chat model.                                                                      |
 
 Tuning knobs (rerank, compress, draft, summary, batch sizes, timeouts,
 cache toggles) — see [docs/tuning.md](docs/tuning.md).
@@ -162,7 +162,7 @@ embedding contract, code-gen details: [docs/internals.md](docs/internals.md).
 
 ## Go static graph
 
-`mcsearch index` adds a Go-specific structural layer built on
+`dex index` adds a Go-specific structural layer built on
 `go/packages` + `go/types` (type-resolved, not regex). The extractor
 emits `package` / `file` / `function` / `method` / `type` / `field` /
 `import` nodes and `contains` / `imports` / `has_method` / `has_field`
@@ -173,7 +173,7 @@ edges land with the planned LSP integration.
 
 ## MCP tools
 
-When running as `mcsearch mcp`, the server registers:
+When running as `dex mcp`, the server registers:
 
 | Tool              | Always on? | What it does                                                                |
 | ----------------- | ---------- | --------------------------------------------------------------------------- |
@@ -195,10 +195,10 @@ pretending success.
 ## Docker
 
 ```bash
-docker build -t mcsearch .
-docker run --rm -v "$PWD":/work:ro -v mcsearch-cache:/cache \
-    -e MCSEARCH_EMBED_URL=http://host.docker.internal:8082 \
-    mcsearch index /work
+docker build -t dex .
+docker run --rm -v "$PWD":/work:ro -v dex-cache:/cache \
+    -e DEX_EMBED_URL=http://host.docker.internal:8082 \
+    dex index /work
 ```
 
 Tree-sitter needs CGO, so the build stage uses Alpine's musl toolchain

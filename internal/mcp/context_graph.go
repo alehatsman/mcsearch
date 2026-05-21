@@ -29,8 +29,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/alehatsman/mcsearch/internal/graph"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/graph"
+	"github.com/alehatsman/dex/internal/store"
 )
 
 // graphView holds an in-memory snapshot of graph_nodes/graph_edges

@@ -11,13 +11,13 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/alehatsman/mcsearch/internal/graph"
-	"github.com/alehatsman/mcsearch/internal/mcp"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/graph"
+	"github.com/alehatsman/dex/internal/mcp"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/store"
 )
 
-// cmdGraph dispatches `mcsearch graph <subcommand>`. The leaf
+// cmdGraph dispatches `dex graph <subcommand>`. The leaf
 // subcommands (neighbors / deps / callers / callees / export) mirror
 // the MCP `graph_*` tools 1:1 so CLI and MCP feel like the same tool.
 func cmdGraph(ctx context.Context, args []string) error {
@@ -27,7 +27,7 @@ func cmdGraph(ctx context.Context, args []string) error {
 	sub, rest := args[0], args[1:]
 	switch sub {
 	case "index":
-		return fmt.Errorf("`graph index` has been folded into `index` — use `mcsearch index --graph=only <path>` (or just `mcsearch index <path>`, which runs both phases)")
+		return fmt.Errorf("`graph index` has been folded into `index` — use `dex index --graph=only <path>` (or just `dex index <path>`, which runs both phases)")
 	case "neighbors":
 		return cmdGraphNeighbors(ctx, rest)
 	case "deps":
@@ -40,19 +40,19 @@ func cmdGraph(ctx context.Context, args []string) error {
 		return cmdGraphExport(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stderr, `usage:
-  mcsearch graph neighbors <path> <file> <line>   vector neighbours of a chunk (MCP: graph_neighbors)
-  mcsearch graph deps      <path> [flags]         imports edges (MCP: graph_deps)
+  dex graph neighbors <path> <file> <line>   vector neighbours of a chunk (MCP: graph_neighbors)
+  dex graph deps      <path> [flags]         imports edges (MCP: graph_deps)
                                                   --file=<rel>  --package=<full>
-  mcsearch graph callers   <path> <name>          incoming calls edges (MCP: graph_callers)
+  dex graph callers   <path> <name>          incoming calls edges (MCP: graph_callers)
                                                   --package=<pkg>  --k=<n>
-  mcsearch graph callees   <path> <name>          outgoing calls edges (MCP: graph_callees)
+  dex graph callees   <path> <name>          outgoing calls edges (MCP: graph_callees)
                                                   --package=<pkg>  --k=<n>
-  mcsearch graph export    <path> [--output=<dir>]
+  dex graph export    <path> [--output=<dir>]
                                                   dump nodes/edges as JSONL
 
 note:
-  'graph index' is gone — use 'mcsearch index --graph=only <path>'.
-  Plain 'mcsearch index <path>' runs both chunk and graph phases.`)
+  'graph index' is gone — use 'dex index --graph=only <path>'.
+  Plain 'dex index <path>' runs both chunk and graph phases.`)
 		return nil
 	default:
 		return fmt.Errorf("unknown graph subcommand: %s (have: neighbors, deps, callers, callees, export)", sub)
@@ -63,7 +63,7 @@ func cmdGraphNeighbors(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph neighbors", flag.ContinueOnError)
 	setHelp(fs,
 		"Find chunks semantically related to a given chunk (MCP: graph_neighbors).",
-		"mcsearch graph neighbors [flags] <path> <file> <line>")
+		"dex graph neighbors [flags] <path> <file> <line>")
 	k := fs.Int("k", 8, "number of related chunks to return (max 30)")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
@@ -108,7 +108,7 @@ func cmdGraphDeps(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph deps", flag.ContinueOnError)
 	setHelp(fs,
 		"Return `imports` edges for a file or package (MCP: graph_deps).",
-		"mcsearch graph deps [flags] <path>")
+		"dex graph deps [flags] <path>")
 	file := fs.String("file", "", "relative file path inside the project (resolved to its package)")
 	pkg := fs.String("package", "", "full package path (e.g. 'github.com/foo/bar/internal/baz'); takes precedence over --file")
 	format := fs.String("format", "text", "output format: text | json")
@@ -180,7 +180,7 @@ func runGraphCallEdges(ctx context.Context, args []string, callers bool) error {
 		helpOneLiner = "Incoming `calls` edges (MCP: graph_callers). Go-only today."
 	}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	setHelp(fs, helpOneLiner, "mcsearch "+name+" [flags] <path> <name>")
+	setHelp(fs, helpOneLiner, "dex "+name+" [flags] <path> <name>")
 	k := fs.Int("k", 12, "max hits to return (default 12, max 50)")
 	pkg := fs.String("package", "", "package path filter (when the same name is defined in multiple packages)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -337,8 +337,8 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph export", flag.ContinueOnError)
 	setHelp(fs,
 		"Dump graph_nodes/graph_edges as JSONL.",
-		"mcsearch graph export [--output=<dir>] <path>")
-	output := fs.String("output", "", "output directory (default: <project>/.mcsearch/graph)")
+		"dex graph export [--output=<dir>] <path>")
+	output := fs.String("output", "", "output directory (default: <project>/.dex/graph)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -357,7 +357,7 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 	}
 	if _, err := os.Stat(p.DBPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return fmt.Errorf("no index at %s — run `mcsearch index %s` first", p.DBPath, p.Root)
+			return fmt.Errorf("no index at %s — run `dex index %s` first", p.DBPath, p.Root)
 		}
 		return err
 	}
@@ -369,7 +369,7 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 
 	outDir := *output
 	if outDir == "" {
-		outDir = filepath.Join(p.Root, ".mcsearch", "graph")
+		outDir = filepath.Join(p.Root, ".dex", "graph")
 	}
 	if err := graph.ExportJSONL(ctx, graph.NewStoreAdapter(st), outDir); err != nil {
 		return err

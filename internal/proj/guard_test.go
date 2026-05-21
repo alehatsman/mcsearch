@@ -111,7 +111,7 @@ func TestCheckIndexableAllowlistTildeExpansion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { os.RemoveAll(parent) })
-	t.Setenv(EnvAllowPaths, "~/.cache/mcsearch-guard-test")
+	t.Setenv(EnvAllowPaths, "~/.cache/dex-guard-test")
 	if err := CheckIndexable(&Project{Root: parent}, false); err != nil {
 		t.Fatalf("tilde-prefixed allowlist entry should expand; got %v", err)
 	}

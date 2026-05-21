@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/rerank"
+	"github.com/alehatsman/dex/internal/rerank"
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
 	_ "github.com/mattn/go-sqlite3" // register sqlite3 driver
 )
@@ -85,8 +85,8 @@ func Open(ctx context.Context, path string) (*Store, error) {
 // OpenWith is like Open but lets the caller adjust runtime behaviour
 // (e.g. disable the BM25 leg of hybrid search).
 //
-// `_busy_timeout=5000` lets concurrent writers (e.g. `mcsearch index`
-// fired while `mcsearch watch` is also re-indexing) wait up to 5 s for
+// `_busy_timeout=5000` lets concurrent writers (e.g. `dex index`
+// fired while `dex watch` is also re-indexing) wait up to 5 s for
 // the writer lock instead of immediately returning SQLITE_BUSY. Without
 // it, racing index runs both crash with a leaked DDL error.
 func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
@@ -175,7 +175,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		   VALUES (new.id, new.content, new.path, new.kind);
 		 END`,
 		// graph_nodes / graph_edges hold the structural index produced by
-		// the graph phase of `mcsearch index`. The schema is intentionally string-keyed
+		// the graph phase of `dex index`. The schema is intentionally string-keyed
 		// (id TEXT) so node identities are stable across re-extraction and
 		// independent of SQLite's rowid. chunk_id links back to chunks.id
 		// for callers that want code text plus structural neighborhood;
@@ -215,9 +215,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_src       ON graph_edges(src_id, kind)`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_dst       ON graph_edges(dst_id, kind)`,
 		`CREATE INDEX IF NOT EXISTS idx_graph_edges_last_seen ON graph_edges(last_seen_at)`,
-		// pending_summaries holds work queued by `mcsearch index --summarize`
+		// pending_summaries holds work queued by `dex index --summarize`
 		// when running in deferred mode. Each row is one summarization job
-		// that the drainer (`mcsearch index summarize` or watch idle ticks) will
+		// that the drainer (`dex index summarize` or watch idle ticks) will
 		// pick up later. UNIQUE(path,kind,content_sha1) makes Enqueue
 		// idempotent — repeating an index run on the same source content
 		// doesn't multiply queue entries.
@@ -671,7 +671,7 @@ type Hit struct {
 
 	// RRFScore is the fused rank used for ordering when hybrid search
 	// is active: 1/(60+sem_rank) + 1/(60+bm25_rank). Zero when search
-	// ran semantic-only (empty query text or MCSEARCH_DISABLE_BM25=1).
+	// ran semantic-only (empty query text or DEX_DISABLE_BM25=1).
 	RRFScore float32
 
 	// RerankScore is the cross-encoder relevance score in [0, 1] for
@@ -696,7 +696,7 @@ type Hit struct {
 // with path:line coordinates so the model can cite real locations.
 func FormatHits(hits []Hit) string {
 	var b strings.Builder
-	b.WriteString("CONTEXT — relevant chunks from the project's mcsearch index:\n\n")
+	b.WriteString("CONTEXT — relevant chunks from the project's dex index:\n\n")
 	for i, h := range hits {
 		fmt.Fprintf(&b, "--- chunk %d: %s:%d-%d (%s, score=%.4f) ---\n",
 			i+1, h.Path, h.StartLine, h.EndLine, h.Kind, h.Score)

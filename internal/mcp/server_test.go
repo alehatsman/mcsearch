@@ -14,13 +14,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alehatsman/mcsearch/internal/chat"
-	"github.com/alehatsman/mcsearch/internal/embed"
-	"github.com/alehatsman/mcsearch/internal/ignore"
-	"github.com/alehatsman/mcsearch/internal/index"
-	"github.com/alehatsman/mcsearch/internal/proj"
-	"github.com/alehatsman/mcsearch/internal/rerank"
-	"github.com/alehatsman/mcsearch/internal/store"
+	"github.com/alehatsman/dex/internal/chat"
+	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/ignore"
+	"github.com/alehatsman/dex/internal/index"
+	"github.com/alehatsman/dex/internal/proj"
+	"github.com/alehatsman/dex/internal/rerank"
+	"github.com/alehatsman/dex/internal/store"
 )
 
 func fakeEmbed(t *testing.T, dim int) *httptest.Server {
