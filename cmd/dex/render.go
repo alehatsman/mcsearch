@@ -320,11 +320,19 @@ func printContextText(out mcp.ContextOutput) {
 		fmt.Println("Semantic hits:")
 		for i, h := range out.SemanticHits {
 			loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
-			fmt.Printf("  %d. %s  score=%.4f", i+1, loc, h.Score)
+			fmt.Printf("  %d. %s  (%s)  score=%.4f", i+1, loc, h.Kind, h.Score)
 			if h.Reason != "" {
 				fmt.Printf("  (%s)", h.Reason)
 			}
 			fmt.Println()
+			// Summary-kind hits carry synthesized prose in Content;
+			// the line range points at source that wouldn't match if
+			// re-read, so inline the body here.
+			if strings.HasSuffix(h.Kind, "_summary") && h.Content != "" {
+				for line := range strings.SplitSeq(strings.TrimRight(h.Content, "\n"), "\n") {
+					fmt.Printf("     │ %s\n", line)
+				}
+			}
 		}
 		fmt.Println()
 	}
