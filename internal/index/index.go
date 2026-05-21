@@ -116,6 +116,7 @@ type slowFile struct {
 
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
+	ix.Options.Logger.Info("index: starting", "root", ix.Proj.Root)
 	var (
 		toEmbed            []pending
 		seen               int
@@ -360,6 +361,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	if walkErr != nil {
 		return fmt.Errorf("walk: %w", walkErr)
 	}
+	ix.Options.Logger.Info("index: walk done",
+		"slow_files", len(slowFiles),
+		"mtime_fast_path", mtimeSkips.Load(),
+		"skipped", skipped.Load(),
+		"elapsed", time.Since(startTime).Round(time.Millisecond))
 
 	// Pass 2: one batch query for all slow-path files instead of N per-file
 	// queries. Also include unique package dirs so we can check package
@@ -629,9 +635,6 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	}
 
 	if len(toEmbed) > 0 {
-		if ix.Options.Verbose {
-			ix.Options.Logger.Info("embedding chunks", "count", len(toEmbed))
-		}
 		// Embed and upsert one batch at a time. If a later batch fails
 		// (timeout, embedding service crash), earlier batches survive
 		// in the store and the next index run skips them via
@@ -640,6 +643,12 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		if batchSize <= 0 {
 			batchSize = 32
 		}
+		totalBatches := (len(toEmbed) + batchSize - 1) / batchSize
+		ix.Options.Logger.Info("index: embedding",
+			"chunks", len(toEmbed),
+			"batches", totalBatches,
+			"batch_size", batchSize)
+		embedStart := time.Now()
 		for start := 0; start < len(toEmbed); start += batchSize {
 			end := start + batchSize
 			if end > len(toEmbed) {
@@ -650,6 +659,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			for i, p := range batch {
 				texts[i] = p.chunk.EmbedText()
 			}
+			batchStart := time.Now()
 			vecs, err := ix.Embed.Embed(ctx, texts)
 			if err != nil {
 				return fmt.Errorf("embed: %w", err)
@@ -670,7 +680,14 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
 				return err
 			}
+			ix.Options.Logger.Info("index: embed batch",
+				"batch", start/batchSize+1,
+				"of", totalBatches,
+				"chunks", len(batch),
+				"took", time.Since(batchStart).Round(time.Millisecond))
 		}
+		ix.Options.Logger.Info("index: embedding done",
+			"elapsed", time.Since(embedStart).Round(time.Millisecond))
 	}
 
 	// Pass 5: package summaries — one per directory, generated from the
@@ -688,6 +705,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// pending_summaries). The drainer regenerates package summaries
 	// after the file/chunk jobs drain.
 	if len(pkgFiles) > 0 && !ix.Options.DeferSummaries {
+		ix.Options.Logger.Info("index: package summaries", "dirs", len(pkgFiles))
 		type pkgJob struct {
 			dir       string
 			filePaths []string
@@ -798,6 +816,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// Like Pass 5, skipped in defer mode — depends on package_summary
 	// chunks that the drainer will produce.
 	if pkgFiles != nil && ctx.Err() == nil && !ix.Options.DeferSummaries {
+		ix.Options.Logger.Info("index: repo summary")
 		pkgSummaries, err := ix.Store.AllSummariesByKind(ctx, chunk.KindPackageSummary)
 		if err == nil && len(pkgSummaries) > 0 {
 			repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
@@ -834,22 +853,21 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if ix.Options.Verbose && pruned > 0 {
-		ix.Options.Logger.Info("pruned stale chunks (files removed since last index)", "count", pruned)
+	if pruned > 0 {
+		ix.Options.Logger.Info("index: pruned stale chunks", "count", pruned)
 	}
 	if err := ix.Store.SetLastIndexedAt(ctx, startTime); err != nil {
 		return err
 	}
-	if ix.Options.Verbose {
-		ix.Options.Logger.Info("indexed",
-			"chunks_seen", seen,
-			"files_fast_path", mtimeSkips.Load(),
-			"embedded", len(toEmbed),
-			"summaries_generated", summariesGenerated,
-			"summaries_queued", summariesQueued,
-			"pruned", pruned,
-			"skipped", skipped.Load())
-	}
+	ix.Options.Logger.Info("index: done",
+		"chunks_seen", seen,
+		"files_fast_path", mtimeSkips.Load(),
+		"embedded", len(toEmbed),
+		"summaries_generated", summariesGenerated,
+		"summaries_queued", summariesQueued,
+		"pruned", pruned,
+		"skipped", skipped.Load(),
+		"elapsed", time.Since(startTime).Round(time.Millisecond))
 	return nil
 }
 
@@ -885,13 +903,15 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Ch
 		"write 1–2 sentences describing what it does. " +
 		"Lead with the identifier name. " +
 		"State its purpose, key parameters, and return value or notable side effects. " +
-		"Use present tense. No prose padding, no restating the prompt, no code blocks."
+		"Use present tense. No prose padding, no restating the prompt, no code blocks. " +
+		"Only describe what is visible in the code. Do not infer features by name association " +
+		"(e.g. a library name does not imply its most famous use case)."
 	user := fmt.Sprintf("FILE: %s (lines %d–%d, kind: %s)\n\n```\n%s\n```",
 		rel, c.StartLine, c.EndLine, c.Kind, c.Content)
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 150})
+	}, chat.Options{MaxTokens: 150, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -906,12 +926,15 @@ func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSumm
 		"write 2-4 sentences describing what the package does. " +
 		"Name the package path. Describe its public role in the system. " +
 		"Mention key exported types and functions. Note dependencies or notable constraints. " +
-		"No prose padding, no apologies, no restating the prompt."
+		"No prose padding, no apologies, no restating the prompt. " +
+		"Only mention features explicitly present in the file summaries. Do not invent features " +
+		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
+		"syntax highlighting; embeddings do not imply RAG). If a feature is not stated, omit it."
 	user := fmt.Sprintf("PACKAGE: %s\n\nFILE SUMMARIES:\n%s", dir, strings.Join(fileSummaries, "\n\n---\n\n"))
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 300})
+	}, chat.Options{MaxTokens: 300, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -926,12 +949,15 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) 
 		"write 3-5 sentences describing what the repository does overall. " +
 		"Name the top-level packages and their roles. Describe the main data flow or pipeline. " +
 		"Note any architectural constraints or key invariants. " +
-		"No prose padding, no apologies, no restating the prompt."
+		"No prose padding, no apologies, no restating the prompt. " +
+		"Only mention features explicitly present in the package summaries. Do not invent features " +
+		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
+		"syntax highlighting). If a feature is not stated in the inputs, omit it."
 	user := fmt.Sprintf("PACKAGE SUMMARIES:\n%s", strings.Join(pkgSummaries, "\n\n---\n\n"))
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 400})
+	}, chat.Options{MaxTokens: 400, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -945,12 +971,15 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) 
 func summarizeFile(ctx context.Context, cc *chat.Client, rel string, data []byte) (string, error) {
 	const system = "You are a code summarizer. Summarize this single file in 2-4 sentences so a reader can decide whether to open it. " +
 		"Lead with what the file does. Name the exported types and functions verbatim. Note any non-obvious side effects or invariants. " +
-		"No prose padding, no apologies, no restating the prompt."
+		"No prose padding, no apologies, no restating the prompt. " +
+		"Only describe what is actually present in the file. Do not infer features by association " +
+		"(e.g. a library import does not mean its most famous use case is in play). If a feature " +
+		"is not in the code, omit it."
 	user := fmt.Sprintf("FILE: %s\n\n```\n%s\n```", rel, data)
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 300})
+	}, chat.Options{MaxTokens: 300, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}

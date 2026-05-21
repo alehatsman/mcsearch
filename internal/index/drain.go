@@ -43,9 +43,7 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("list pending: %w", err)
 	}
-	if ix.Options.Verbose {
-		ix.Options.Logger.Info("drain start", "pending", len(pending))
-	}
+	ix.Options.Logger.Info("drain: starting", "pending", len(pending))
 
 	conc := ix.Options.SummaryConcurrency
 	if conc < 1 {
@@ -119,6 +117,11 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 		if batchSize <= 0 {
 			batchSize = 32
 		}
+		totalBatches := (len(successful) + batchSize - 1) / batchSize
+		ix.Options.Logger.Info("drain: embedding summaries",
+			"chunks", len(successful),
+			"batches", totalBatches,
+			"batch_size", batchSize)
 		for start := 0; start < len(successful); start += batchSize {
 			end := start + batchSize
 			if end > len(successful) {
@@ -129,6 +132,7 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 			for i, r := range batch {
 				texts[i] = r.chunk.EmbedText()
 			}
+			batchStart := time.Now()
 			vecs, err := ix.Embed.Embed(ctx, texts)
 			if err != nil {
 				return generated, fmt.Errorf("embed: %w", err)
@@ -156,6 +160,11 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 				}
 			}
 			generated += len(batch)
+			ix.Options.Logger.Info("drain: embed batch",
+				"batch", start/batchSize+1,
+				"of", totalBatches,
+				"chunks", len(batch),
+				"took", time.Since(batchStart).Round(time.Millisecond))
 		}
 	}
 
@@ -166,22 +175,24 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 			return generated, fmt.Errorf("delete stale pending: %w", err)
 		}
 	}
-	if ix.Options.Verbose && len(stale) > 0 {
-		ix.Options.Logger.Info("drain dropped stale rows", "count", len(stale))
+	if len(stale) > 0 {
+		ix.Options.Logger.Info("drain: dropped stale rows", "count", len(stale))
 	}
 
 	// Cascade: now that file_summary / chunk_summary chunks exist, generate
 	// any missing package_summary / repo_summary. These aren't queued; the
 	// drainer recomputes them from the current chunk set.
+	ix.Options.Logger.Info("drain: cascading package + repo summaries")
 	cascadeGen, err := ix.cascadePackageAndRepo(ctx, startTime)
 	if err != nil {
 		return generated, err
 	}
 	generated += cascadeGen
 
-	if ix.Options.Verbose {
-		ix.Options.Logger.Info("drain done", "generated", generated, "stale_dropped", len(stale))
-	}
+	ix.Options.Logger.Info("drain: done",
+		"generated", generated,
+		"stale_dropped", len(stale),
+		"elapsed", time.Since(startTime).Round(time.Millisecond))
 	return generated, nil
 }
 

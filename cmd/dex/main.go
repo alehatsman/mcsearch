@@ -496,7 +496,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	summarize := fs.Bool("summarize", false, "generate per-file and per-chunk summaries via the chat endpoint (auto-enabled when DEX_SUMMARY_URL is set)")
-	summarizeDefer := fs.Bool("summarize-defer", false, "queue summaries into pending_summaries instead of generating them inline; `dex index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time.")
+	summarizeDefer := fs.Bool("summarize-defer", true, "queue summaries into pending_summaries instead of generating them inline; `dex index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time. Pass --summarize-defer=false to disable.")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
