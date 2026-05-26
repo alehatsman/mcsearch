@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -513,5 +514,185 @@ func TestFindSymbolNotFoundSurfaceCandidates(t *testing.T) {
 	// At least one real candidate should appear by name.
 	if !strings.Contains(out.Hint, "Indexer") && !strings.Contains(out.Hint, "IndexableExt") && !strings.Contains(out.Hint, "cmdIndex") {
 		t.Errorf("hint should name a real candidate; got %q", out.Hint)
+	}
+}
+
+// ─── auto-watcher (lazy per-project watcher spawn) ────────────────────────
+
+// countWatchers walks the (test-only) sync.Map of live watcher
+// entries. The map is keyed by Project.ID; the value is presence-only.
+func (s *Server) countWatchers() int {
+	n := 0
+	s.watchers.Range(func(_, _ any) bool {
+		n++
+		return true
+	})
+	return n
+}
+
+// TestEnsureWatcherNoopWithoutRunCtx verifies that a Server built for
+// a one-shot CLI invocation (no runCtx) never spawns a goroutine.
+// This is the safety net that keeps `dex ask` and similar from leaking
+// background watchers.
+func TestEnsureWatcherNoopWithoutRunCtx(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	t.Setenv("DEX_ALLOW_PATHS", filepath.Dir(projDir))
+	writeFile(t, filepath.Join(projDir, "a.go"), "package main\n")
+
+	s := &Server{
+		EmbedClient: embed.New(srv.URL, "fake", 16, 5*time.Second),
+		IndexDir:    cacheDir,
+		AutoWatch:   AutoWatchConfig{Enabled: true},
+	}
+	// runCtx intentionally unset.
+	p, _ := proj.Resolve(projDir, cacheDir)
+	s.ensureWatcher(p)
+	if got := s.countWatchers(); got != 0 {
+		t.Errorf("ensureWatcher must be a no-op without runCtx; got %d watchers", got)
+	}
+}
+
+// TestEnsureWatcherNoopWhenDisabled verifies that explicitly disabling
+// AutoWatch keeps the server idle even in stdio mode.
+func TestEnsureWatcherNoopWhenDisabled(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	t.Setenv("DEX_ALLOW_PATHS", filepath.Dir(projDir))
+	writeFile(t, filepath.Join(projDir, "a.go"), "package main\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{
+		EmbedClient: embed.New(srv.URL, "fake", 16, 5*time.Second),
+		IndexDir:    cacheDir,
+		AutoWatch:   AutoWatchConfig{Enabled: false}, // explicitly off
+	}
+	s.runCtx = ctx
+	p, _ := proj.Resolve(projDir, cacheDir)
+	s.ensureWatcher(p)
+	if got := s.countWatchers(); got != 0 {
+		t.Errorf("ensureWatcher must be a no-op when disabled; got %d watchers", got)
+	}
+}
+
+// TestEnsureWatcherSpawnsOncePerProject verifies the single-flight
+// behaviour: many concurrent or repeated ensureWatcher calls for the
+// same project result in exactly one Watcher goroutine. Cancelling
+// runCtx unblocks RunStdio's deferred Wait so a real server can shut
+// down cleanly.
+func TestEnsureWatcherSpawnsOncePerProject(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	t.Setenv("DEX_ALLOW_PATHS", filepath.Dir(projDir))
+	writeFile(t, filepath.Join(projDir, "a.go"), "package main\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{
+		EmbedClient: embed.New(srv.URL, "fake", 16, 5*time.Second),
+		IndexDir:    cacheDir,
+		AutoWatch: AutoWatchConfig{
+			Enabled:  true,
+			Debounce: 10 * time.Millisecond,
+		},
+	}
+	s.runCtx = ctx
+	p, _ := proj.Resolve(projDir, cacheDir)
+
+	// Hammer ensureWatcher concurrently — only one goroutine should
+	// actually start its Watcher.
+	var wg sync.WaitGroup
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.ensureWatcher(p)
+		}()
+	}
+	wg.Wait()
+
+	// Wait for the watcher to actually start its loop before checking
+	// the map — the goroutine inserts itself before Run() is reached.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.countWatchers() == 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s.countWatchers(); got != 1 {
+		t.Fatalf("expected exactly 1 watcher entry; got %d", got)
+	}
+
+	// Cancel runCtx; the watcher goroutine must exit and the WaitGroup
+	// must drain promptly.
+	cancel()
+	done := make(chan struct{})
+	go func() {
+		s.watcherWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher goroutine never exited after ctx cancel")
+	}
+	if got := s.countWatchers(); got != 0 {
+		t.Errorf("watcher should clean up its map entry on exit; got %d remaining", got)
+	}
+}
+
+// TestEnsureWatcherSpawnedByResolveProject verifies the wiring chain:
+// any tool that resolves a project triggers ensureWatcher. Uses the
+// SearchInput path which calls resolveProject early.
+func TestEnsureWatcherSpawnedByResolveProject(t *testing.T) {
+	srv := fakeEmbed(t, 16)
+	defer srv.Close()
+	cacheDir := t.TempDir()
+	projDir := t.TempDir()
+	t.Setenv("DEX_ALLOW_PATHS", filepath.Dir(projDir))
+	writeFile(t, filepath.Join(projDir, "x.go"), "package main\n")
+	indexProject(t, projDir, cacheDir, srv.URL)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := &Server{
+		EmbedClient: embed.New(srv.URL, "fake", 16, 5*time.Second),
+		IndexDir:    cacheDir,
+		AutoWatch: AutoWatchConfig{
+			Enabled:  true,
+			Debounce: 10 * time.Millisecond,
+		},
+	}
+	s.runCtx = ctx
+
+	// Drive a search; resolveProject inside the handler should spawn.
+	_, _, _ = s.search(ctx, nil, SearchInput{Query: "main", ProjectRoot: projDir})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if s.countWatchers() >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if got := s.countWatchers(); got < 1 {
+		t.Fatalf("expected resolveProject to spawn a watcher; got %d", got)
+	}
+
+	cancel()
+	done := make(chan struct{})
+	go func() { s.watcherWG.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("watcher never exited after ctx cancel")
 	}
 }

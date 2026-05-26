@@ -59,9 +59,11 @@ var allEnvVars = []envVar{
 	// (file / chunk / package / repo summaries). Defaults to DEX_CHAT_*.
 	{"DEX_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to DEX_CHAT_URL).", "summary", true},
 	{"DEX_SUMMARY_MODEL", "<DEX_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
-	{"DEX_AUTO_SUMMARIZE", "", "`dex watch` auto-drains pending summaries when idle. Default on if a chat/summary endpoint is set; set off|0 to disable.", "summary", true},
-	{"DEX_SUMMARIZE_IDLE", "5s", "Quiet window after a `dex watch` re-index before the background summary drainer fires.", "summary", false},
-	{"DEX_SUMMARIZE_BATCH", "10", "Rows per idle batch in `dex watch`. Smaller = faster yield back to fs events.", "summary", false},
+	{"DEX_AUTO_SUMMARIZE", "", "`dex watch` and the MCP auto-watcher auto-drain pending summaries when idle. Default on if a chat/summary endpoint is set; set off|0 to disable.", "summary", true},
+	{"DEX_SUMMARIZE_IDLE", "5s", "Quiet window after a re-index before the background summary drainer fires.", "summary", false},
+	{"DEX_SUMMARIZE_BATCH", "10", "Rows per idle batch. Smaller = faster yield back to fs events.", "summary", false},
+	{"DEX_MCP_AUTOWATCH", "1", "MCP server spawns a per-project watcher on first request to keep the index fresh and (when chat is configured) fill summaries in the background. Set off|0 to disable.", "summary", true},
+	{"DEX_WATCH_DEBOUNCE", "500ms", "Quiet window before the MCP auto-watcher re-indexes after a burst of fs events.", "summary", false},
 
 	// tuning — hidden unless --all. Most installs leave these alone.
 	{"DEX_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
@@ -157,7 +159,7 @@ func cmdEnv(_ context.Context, args []string) error {
 }
 
 func printEnvText(vars []effVar, withDoc bool) {
-	groupOrder := []string{"core", "chat", "rerank", "compress", "draft", "tuning"}
+	groupOrder := []string{"core", "chat", "rerank", "compress", "draft", "summary", "tuning"}
 	byGroup := map[string][]effVar{}
 	nameW, valW := 0, 0
 	for _, v := range vars {
