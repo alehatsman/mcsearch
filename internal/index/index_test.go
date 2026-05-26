@@ -708,6 +708,170 @@ func TestDrainDropsStaleFileSummary(t *testing.T) {
 	}
 }
 
+// TestDrainPendingSummariesBatchRespectsMax verifies the bounded
+// drainer used by the watcher's idle hook: each call processes at
+// most `max` queued rows, leaves the queue at the expected depth,
+// and does NOT cascade — package/repo summaries only appear once the
+// caller invokes CascadePackageRepoSummaries.
+func TestDrainPendingSummariesBatchRespectsMax(t *testing.T) {
+	var chatCalls int32
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&chatCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]any{"role": "assistant", "content": "Stub summary."}},
+			},
+		})
+	}))
+	defer chatSrv.Close()
+
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	// Four files, each with a long structural chunk — that gives the
+	// queue 8 rows (4 file_summary + 4 chunk_summary) so a max=3 batch
+	// leaves a meaningful remainder.
+	long := "package main\n\nfunc Long%d() {\n"
+	for i := range chunkSummaryMinLines {
+		long += fmt.Sprintf("\t// line %d\n", i+1)
+	}
+	long += "}\n"
+	for i := range 4 {
+		writeFile(t, filepath.Join(projDir, fmt.Sprintf("f%d.go", i)),
+			fmt.Sprintf(long, i))
+	}
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	ix := New(p, st, em, ig, Options{
+		Summarize:          true,
+		DeferSummaries:     true,
+		Chat:               cc,
+		SummaryConcurrency: 4,
+	})
+	if err := ix.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Fatalf("defer-mode index must not call chat; got %d", got)
+	}
+
+	start, _ := st.CountPendingSummaries(ctx)
+	if start < 4 {
+		t.Fatalf("expected ≥4 pending rows; got %d", start)
+	}
+
+	// First batch: max=3 → processes 3 rows, leaves the rest.
+	gen1, remaining1, err := ix.DrainPendingSummariesBatch(ctx, 3)
+	if err != nil {
+		t.Fatalf("Batch(3): %v", err)
+	}
+	if gen1 != 3 {
+		t.Errorf("Batch(3) generated: want 3, got %d", gen1)
+	}
+	if remaining1 != start-3 {
+		t.Errorf("Batch(3) remaining: want %d, got %d", start-3, remaining1)
+	}
+
+	// Cascade has NOT run yet — no package_summary / repo_summary chunks.
+	pkgs, _ := st.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+	if len(pkgs) != 0 {
+		t.Errorf("Batch must not cascade; saw %d package_summary chunks", len(pkgs))
+	}
+	repos, _ := st.AllSummariesByKind(ctx, chunk.KindRepoSummary)
+	if len(repos) != 0 {
+		t.Errorf("Batch must not cascade; saw %d repo_summary chunks", len(repos))
+	}
+
+	// Second batch: max=0 (no limit) → drains the rest.
+	gen2, remaining2, err := ix.DrainPendingSummariesBatch(ctx, 0)
+	if err != nil {
+		t.Fatalf("Batch(0): %v", err)
+	}
+	if gen2 != start-3 {
+		t.Errorf("Batch(0) generated: want %d, got %d", start-3, gen2)
+	}
+	if remaining2 != 0 {
+		t.Errorf("Batch(0) remaining: want 0, got %d", remaining2)
+	}
+
+	// Third batch on an empty queue: no-op.
+	atomic.StoreInt32(&chatCalls, 0)
+	gen3, remaining3, err := ix.DrainPendingSummariesBatch(ctx, 0)
+	if err != nil {
+		t.Fatalf("Batch(empty): %v", err)
+	}
+	if gen3 != 0 || remaining3 != 0 {
+		t.Errorf("empty batch: want 0/0, got %d/%d", gen3, remaining3)
+	}
+	if got := atomic.LoadInt32(&chatCalls); got != 0 {
+		t.Errorf("empty batch must not call chat; got %d", got)
+	}
+
+	// Now cascade — package and repo summaries should appear.
+	cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
+	if err != nil {
+		t.Fatalf("CascadePackageRepoSummaries: %v", err)
+	}
+	if cascadeGen == 0 {
+		t.Error("cascade should generate at least one summary")
+	}
+	pkgs, _ = st.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+	if len(pkgs) == 0 {
+		t.Error("cascade should have produced package_summary chunks")
+	}
+	repos, _ = st.AllSummariesByKind(ctx, chunk.KindRepoSummary)
+	if len(repos) == 0 {
+		t.Error("cascade should have produced a repo_summary chunk")
+	}
+}
+
+// TestCascadePackageRepoSummariesEmpty verifies cascade is a safe
+// no-op when no file_summary chunks exist (e.g. caller skipped the
+// batch drain entirely).
+func TestCascadePackageRepoSummariesEmpty(t *testing.T) {
+	embedSrv := fakeEmbedServer(t)
+	defer embedSrv.Close()
+	// Chat is wired but should never be called — cascade has no inputs.
+	chatSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("chat should not be called when there are no file summaries")
+		http.Error(w, "no", 500)
+	}))
+	defer chatSrv.Close()
+
+	projDir := t.TempDir()
+	cacheDir := t.TempDir()
+
+	ctx := context.Background()
+	p, _ := proj.Resolve(projDir, cacheDir)
+	_ = p.EnsureCacheDir()
+	st, _ := store.Open(ctx, p.DBPath)
+	defer st.Close()
+	ig, _ := ignore.New(p.Root)
+	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
+	cc := chat.New(chatSrv.URL, "fake", 10*time.Second)
+
+	ix := New(p, st, em, ig, Options{Chat: cc})
+	gen, err := ix.CascadePackageRepoSummaries(ctx)
+	if err != nil {
+		t.Fatalf("CascadePackageRepoSummaries: %v", err)
+	}
+	if gen != 0 {
+		t.Errorf("empty-state cascade: want 0 generated, got %d", gen)
+	}
+}
+
 // TestDeferSummariesEnqueuesWithoutChat verifies that DeferSummaries=true
 // makes the indexer queue summary jobs into pending_summaries instead of
 // running them through the chat client. The chat endpoint is stubbed
