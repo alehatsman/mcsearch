@@ -30,6 +30,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -129,29 +130,38 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, `usage (query — mirrors the MCP tool surface):
-  dex ask <path> <q...>              one-shot router (MCP: ask). Picks intent,
+	fmt.Fprintln(os.Stderr, `quickstart:
+  cd ~/code/myproject
+  dex index .                        build the per-project index (chunks + graph)
+  dex ask "where is the watcher?"    one-shot router; emits suggested reads
+  dex mcp                            run as MCP server (stdio) — point your agent at it
+  dex env --doc                      see effective config with inline docs
+
+  <path> defaults to cwd on every query/view/graph command.
+
+usage (query — mirrors the MCP tool surface):
+  dex ask [<path>] <q...>            one-shot router (MCP: ask). Picks intent,
                                           fuses semantic + symbol + graph; returns
                                           suggested_reads and a prose next_action.
                                           Flags: --intent, --k, --format=text|json
-  dex search semantic <path> <q...>  hybrid top-k chunks (MCP: search_semantic)
+  dex search semantic [<path>] <q...> hybrid top-k chunks (MCP: search_semantic)
                                           Flags: --k, --rerank=off, --explain,
                                           --format=text|json
-  dex search symbol <path> <name>    exact identifier lookup (MCP: search_symbol)
+  dex search symbol [<path>] <name>  exact identifier lookup (MCP: search_symbol)
                                           Flags: --k, --format=text|json
-  dex graph neighbors <path> <file> <line>
+  dex graph neighbors [<path>] <file> <line>
                                           vector neighbours of a chunk (MCP: graph_neighbors)
-  dex graph deps <path> [flags]      package imports (MCP: graph_deps)
+  dex graph deps [<path>] [flags]    package imports (MCP: graph_deps)
                                           Flags: --file=<rel>, --package=<full path>
-  dex graph callers <path> <name>    incoming calls edges (MCP: graph_callers)
+  dex graph callers [<path>] <name>  incoming calls edges (MCP: graph_callers)
                                           Flags: --package=<pkg>, --k
-  dex graph callees <path> <name>    outgoing calls edges (MCP: graph_callees)
+  dex graph callees [<path>] <name>  outgoing calls edges (MCP: graph_callees)
                                           Flags: --package=<pkg>, --k
-  dex graph export <path>            dump graph_nodes/graph_edges as JSONL
+  dex graph export [<path>]          dump graph_nodes/graph_edges as JSONL
                                           Flags: --output=<dir>
-  dex view summarize <path> <file>   summarize a file slice via the chat model
+  dex view summarize [<path>] <file> summarize a file slice via the chat model
                                           (MCP: view_summarize). Flags: --start, --end,
-                                          --focus, --temperature, --max-tokens,
+                                          --focus, --temperature, --max-tokens, --v,
                                           --format=text|json
   dex index status [<path>]          endpoint health + project stats
                                           (MCP: index_status)
@@ -175,6 +185,7 @@ build / maintenance:
                                           and skips binaries + secret-shaped files.
                                           Flags: --out FILE, --max-bytes N, --strip
   dex nuke   <path>                  delete the on-disk index for a project
+                                          (prompts on TTY; pass --yes for scripts)
   dex reindex <path>                 drop and re-embed from scratch
   dex reindex --all --yes            drop and re-embed every known project
                                           (skips indexes from before this feature;
@@ -199,6 +210,25 @@ env:
   DEX_INDEX_DIR, DEX_CHAT_URL, DEX_CHAT_MODEL.
   Tuning knobs (timeouts, batch sizes, optional rerank/compress/draft
   endpoints) — see docs/tuning.md or run `+"`dex env --all --doc`"+`.`)
+}
+
+// splitProjectArg peels an optional <path> off the front of a
+// command's positional args. If args[0] resolves as an existing
+// directory, use it; otherwise default to "." and pass every arg
+// through to the caller. Matches git/rg ergonomics — `dex ask "where
+// is X"` works from inside a project root without an explicit path.
+//
+// Trade-off: a typo'd path like `dex ask /tpyo "q"` will be treated
+// as part of the question rather than triggering a clean "path does
+// not exist" error. The cost of that ambiguity is small compared to
+// requiring a path on every invocation.
+func splitProjectArg(args []string) (path string, rest []string) {
+	if len(args) > 0 {
+		if st, err := os.Stat(args[0]); err == nil && st.IsDir() {
+			return args[0], args[1:]
+		}
+	}
+	return ".", args
 }
 
 // validIntent reports whether s is one of the strategies the context
@@ -780,7 +810,7 @@ func cmdSearchSemantic(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("search semantic", flag.ContinueOnError)
 	setHelp(fs,
 		"Hybrid top-k chunks for a query (MCP: search_semantic).",
-		"dex search semantic [flags] <path> <query...>")
+		"dex search semantic [flags] [<path>] <query...>")
 	k := fs.Int("k", 8, "number of results to return")
 	rerankFlag := fs.String("rerank", "", "set to 'off' to skip the rerank stage for this query (no effect when DEX_RERANK_URL is unset)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -788,12 +818,11 @@ func cmdSearchSemantic(ctx context.Context, args []string) error {
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) < 2 {
-		return fmt.Errorf("search semantic needs <path> <query...>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) == 0 {
+		return fmt.Errorf("search semantic needs a query (path defaults to cwd)")
 	}
-	path := rest[0]
-	q := strings.Join(rest[1:], " ")
+	q := strings.Join(rest, " ")
 	if strings.TrimSpace(q) == "" {
 		return fmt.Errorf("query is empty — pass a natural-language description or code fragment")
 	}
@@ -889,27 +918,30 @@ func cmdSearchSymbol(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("search symbol", flag.ContinueOnError)
 	setHelp(fs,
 		"Exact identifier lookup (MCP: search_symbol).",
-		"dex search symbol [flags] <path> <name>")
+		"dex search symbol [flags] [<path>] <name>")
 	k := fs.Int("k", 10, "max results to return")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("search symbol needs <path> <name>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 1 {
+		if len(rest) == 0 {
+			return fmt.Errorf("search symbol needs a name (path defaults to cwd) — e.g. `dex search symbol Watcher`")
+		}
+		return fmt.Errorf("search symbol takes one <name> (got %d extra args)", len(rest)-1)
 	}
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
 	s, _ := newServerFromEnv(base)
 	out, err := s.FindSymbol(ctx, mcp.FindSymbolInput{
-		Name:        rest[1],
+		Name:        rest[0],
 		ProjectRoot: p.Root,
 		K:           *k,
 	})
@@ -935,7 +967,7 @@ func cmdAsk(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	setHelp(fs,
 		"One-shot router — composes semantic + symbol + graph; emit suggested_reads + next_action. Use this BEFORE grep loops.",
-		"dex ask [flags] <path> <question...>")
+		"dex ask [flags] [<path>] <question...>")
 	intent := fs.String("intent", "", "force a strategy: auto|behavior_search|symbol_lookup|callers|callees|architecture|package_topology|editing_context")
 	k := fs.Int("k", 8, "max hits per lane (capped at 30)")
 	format := fs.String("format", "text", "output format: text | json")
@@ -946,12 +978,14 @@ func cmdAsk(ctx context.Context, args []string) error {
 	if !validIntent(*intent) {
 		return fmt.Errorf("invalid --intent=%q (want one of: auto, behavior_search, symbol_lookup, callers, callees, architecture, package_topology, editing_context)", *intent)
 	}
-	rest := fs.Args()
-	if len(rest) < 2 {
-		return fmt.Errorf("ask needs <path> <question...>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) == 0 {
+		return fmt.Errorf("ask needs a question (path defaults to cwd) — e.g. `dex ask \"where is the watcher?\"`")
 	}
-	path := rest[0]
-	question := strings.Join(rest[1:], " ")
+	question := strings.Join(rest, " ")
+	if strings.TrimSpace(question) == "" {
+		return fmt.Errorf("question is empty — pass a natural-language description")
+	}
 
 	base, err := indexDir()
 	if err != nil {
@@ -1013,31 +1047,35 @@ func cmdViewSummarize(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("view summarize", flag.ContinueOnError)
 	setHelp(fs,
 		"Summarize a file slice via the chat model (MCP: view_summarize).",
-		"dex view summarize [flags] <path> <file>")
+		"dex view summarize [flags] [<path>] <file>")
 	start := fs.Int("start", 0, "first line to summarize (1-indexed; 0 = beginning of file)")
 	end := fs.Int("end", 0, "last line to summarize (1-indexed, inclusive; 0 = end of file)")
 	focus := fs.String("focus", "", "optional steering — e.g. 'public API surface', 'side effects'")
 	temp := fs.Float64("temperature", 0, "sampling temperature (0 = server default)")
 	maxTok := fs.Int("max-tokens", 0, "max tokens to generate (0 = server default)")
 	format := fs.String("format", "text", "output format: text | json")
+	verbose := fs.Bool("v", false, "include model name and other debug headers in text output")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("view summarize needs <path> <file>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 1 {
+		if len(rest) == 0 {
+			return fmt.Errorf("view summarize needs a <file> (path defaults to cwd)")
+		}
+		return fmt.Errorf("view summarize takes one <file> (got %d extra args)", len(rest)-1)
 	}
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
 	s, _ := newServerFromEnv(base)
 	out, err := s.Summarize(ctx, mcp.SummarizeInput{
-		Path:        rest[1],
+		Path:        rest[0],
 		ProjectRoot: p.Root,
 		StartLine:   *start,
 		EndLine:     *end,
@@ -1065,7 +1103,7 @@ func cmdViewSummarize(ctx context.Context, args []string) error {
 		fmt.Print(", truncated")
 	}
 	fmt.Println(")")
-	if out.Model != "" {
+	if *verbose && out.Model != "" {
 		fmt.Printf("model: %s\n", out.Model)
 	}
 	fmt.Println()
@@ -1082,7 +1120,7 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("generate", flag.ContinueOnError)
 	setHelp(fs,
 		"Generate code grounded in the project's index (RAG: top-k chunks → chat endpoint).",
-		"dex generate [flags] <path> <prompt...>")
+		"dex generate [flags] [<path>] <prompt...>")
 	k := fs.Int("k", 8, "number of RAG chunks to retrieve as context")
 	noRAG := fs.Bool("no-rag", false, "skip retrieval; send prompt to the chat endpoint without project context")
 	system := fs.String("system", "", "override the default system prompt")
@@ -1092,12 +1130,11 @@ func cmdGenerate(ctx context.Context, args []string) error {
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) < 2 {
-		return fmt.Errorf("generate needs <path> <prompt...>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) == 0 {
+		return fmt.Errorf("generate needs a prompt (path defaults to cwd)")
 	}
-	path := rest[0]
-	prompt := strings.Join(rest[1:], " ")
+	prompt := strings.Join(rest, " ")
 	if strings.TrimSpace(prompt) == "" {
 		return fmt.Errorf("prompt is empty")
 	}
@@ -1452,8 +1489,9 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 func cmdNuke(_ context.Context, args []string) error {
 	fs := flag.NewFlagSet("nuke", flag.ContinueOnError)
 	setHelp(fs,
-		"Delete the on-disk index for a project (irreversible).",
-		"dex nuke <path>")
+		"Delete the on-disk index for a project (irreversible). Prompts on a TTY; non-interactive callers must pass --yes.",
+		"dex nuke [--yes] <path>")
+	yes := fs.Bool("yes", false, "skip the interactive prompt (required when stdin is not a terminal)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1476,11 +1514,34 @@ func cmdNuke(_ context.Context, args []string) error {
 		}
 		return err
 	}
+	if !*yes {
+		if !stdinIsTTY() {
+			return fmt.Errorf("refusing to nuke without --yes: stdin is not a terminal (would be silent in scripts)")
+		}
+		fmt.Fprintf(os.Stderr, "About to delete index for %s\n  cache: %s\nThis is irreversible. Continue? [y/N] ", p.Root, p.CacheDir)
+		reader := bufio.NewReader(os.Stdin)
+		line, _ := reader.ReadString('\n')
+		ans := strings.TrimSpace(strings.ToLower(line))
+		if ans != "y" && ans != "yes" {
+			fmt.Fprintln(os.Stderr, "aborted")
+			return nil
+		}
+	}
 	if err := os.RemoveAll(p.CacheDir); err != nil {
 		return err
 	}
 	fmt.Printf("✓ removed index for %s\n", p.Root)
 	return nil
+}
+
+// stdinIsTTY reports whether stdin is a character device (terminal).
+// Used to gate interactive prompts so scripted invocations don't hang.
+func stdinIsTTY() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
 }
 
 // ─── reindex ───────────────────────────────────────────────────────────────

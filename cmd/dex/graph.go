@@ -40,15 +40,16 @@ func cmdGraph(ctx context.Context, args []string) error {
 		return cmdGraphExport(ctx, rest)
 	case "-h", "--help", "help":
 		fmt.Fprintln(os.Stderr, `usage:
-  dex graph neighbors <path> <file> <line>   vector neighbours of a chunk (MCP: graph_neighbors)
-  dex graph deps      <path> [flags]         imports edges (MCP: graph_deps)
+  dex graph neighbors [<path>] <file> <line>  vector neighbours of a chunk (MCP: graph_neighbors)
+  dex graph deps      [<path>] [flags]        imports edges (MCP: graph_deps)
                                                   --file=<rel>  --package=<full>
-  dex graph callers   <path> <name>          incoming calls edges (MCP: graph_callers)
+  dex graph callers   [<path>] <name>         incoming calls edges (MCP: graph_callers)
                                                   --package=<pkg>  --k=<n>
-  dex graph callees   <path> <name>          outgoing calls edges (MCP: graph_callees)
+  dex graph callees   [<path>] <name>         outgoing calls edges (MCP: graph_callees)
                                                   --package=<pkg>  --k=<n>
-  dex graph export    <path> [--output=<dir>]
+  dex graph export    [<path>] [--output=<dir>]
                                                   dump nodes/edges as JSONL
+  (path defaults to cwd when omitted)
 
 note:
   'graph index' is gone — use 'dex index --graph=only <path>'.
@@ -63,17 +64,20 @@ func cmdGraphNeighbors(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph neighbors", flag.ContinueOnError)
 	setHelp(fs,
 		"Find chunks semantically related to a given chunk (MCP: graph_neighbors).",
-		"dex graph neighbors [flags] <path> <file> <line>")
+		"dex graph neighbors [flags] [<path>] <file> <line>")
 	k := fs.Int("k", 8, "number of related chunks to return (max 30)")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 3 {
-		return fmt.Errorf("graph neighbors needs <path> <file> <line>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 2 {
+		if len(rest) < 2 {
+			return fmt.Errorf("graph neighbors needs <file> <line> (path defaults to cwd)")
+		}
+		return fmt.Errorf("graph neighbors takes <file> <line> (got %d extra args)", len(rest)-2)
 	}
-	line, err := parsePositiveInt("line", rest[2])
+	line, err := parsePositiveInt("line", rest[1])
 	if err != nil {
 		return err
 	}
@@ -81,13 +85,13 @@ func cmdGraphNeighbors(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
 	s, _ := newServerFromEnv(base)
 	out, err := s.Related(ctx, mcp.RelatedInput{
-		Path:        rest[1],
+		Path:        rest[0],
 		StartLine:   line,
 		ProjectRoot: p.Root,
 		K:           *k,
@@ -108,16 +112,16 @@ func cmdGraphDeps(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph deps", flag.ContinueOnError)
 	setHelp(fs,
 		"Return `imports` edges for a file or package (MCP: graph_deps).",
-		"dex graph deps [flags] <path>")
+		"dex graph deps [flags] [<path>]")
 	file := fs.String("file", "", "relative file path inside the project (resolved to its package)")
 	pkg := fs.String("package", "", "full package path (e.g. 'github.com/foo/bar/internal/baz'); takes precedence over --file")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("graph deps needs <path>")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 0 {
+		return fmt.Errorf("graph deps takes no extra positional args (got %v)", rest)
 	}
 	if *file == "" && *pkg == "" {
 		return fmt.Errorf("graph deps needs --file=<rel> or --package=<full>")
@@ -126,7 +130,7 @@ func cmdGraphDeps(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
@@ -180,27 +184,30 @@ func runGraphCallEdges(ctx context.Context, args []string, callers bool) error {
 		helpOneLiner = "Incoming `calls` edges (MCP: graph_callers). Go-only today."
 	}
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
-	setHelp(fs, helpOneLiner, "dex "+name+" [flags] <path> <name>")
+	setHelp(fs, helpOneLiner, "dex "+name+" [flags] [<path>] <name>")
 	k := fs.Int("k", 12, "max hits to return (default 12, max 50)")
 	pkg := fs.String("package", "", "package path filter (when the same name is defined in multiple packages)")
 	format := fs.String("format", "text", "output format: text | json")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 2 {
-		return fmt.Errorf("%s needs <path> <name>", name)
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 1 {
+		if len(rest) == 0 {
+			return fmt.Errorf("%s needs a <name> (path defaults to cwd)", name)
+		}
+		return fmt.Errorf("%s takes one <name> (got %d extra args)", name, len(rest)-1)
 	}
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
 	in := mcp.CallEdgeInput{
-		Name:        rest[1],
+		Name:        rest[0],
 		Package:     *pkg,
 		ProjectRoot: p.Root,
 		K:           *k,
@@ -337,21 +344,21 @@ func cmdGraphExport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("graph export", flag.ContinueOnError)
 	setHelp(fs,
 		"Dump graph_nodes/graph_edges as JSONL.",
-		"dex graph export [--output=<dir>] <path>")
+		"dex graph export [--output=<dir>] [<path>]")
 	output := fs.String("output", "", "output directory (default: <project>/.dex/graph)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
-	rest := fs.Args()
-	if len(rest) != 1 {
-		return fmt.Errorf("graph export needs exactly one path argument")
+	path, rest := splitProjectArg(fs.Args())
+	if len(rest) != 0 {
+		return fmt.Errorf("graph export takes no extra positional args (got %v)", rest)
 	}
 
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
-	p, err := proj.Resolve(rest[0], base)
+	p, err := proj.Resolve(path, base)
 	if err != nil {
 		return err
 	}
