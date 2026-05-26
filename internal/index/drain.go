@@ -184,6 +184,9 @@ func (ix *Indexer) DrainPendingSummariesBatch(ctx context.Context, max int) (gen
 	}
 
 	remaining, _ = ix.Store.CountPendingSummaries(ctx)
+	if generated > 0 {
+		_ = ix.Store.SetLastSummarizedAt(ctx, time.Now())
+	}
 	ix.Options.Logger.Info("drain: batch done",
 		"generated", generated,
 		"stale_dropped", len(stale),
@@ -203,7 +206,11 @@ func (ix *Indexer) CascadePackageRepoSummaries(ctx context.Context) (int, error)
 	if ix.Options.Chat == nil {
 		return 0, fmt.Errorf("CascadePackageRepoSummaries: chat client not configured")
 	}
-	return ix.cascadePackageAndRepo(ctx, time.Now())
+	gen, err := ix.cascadePackageAndRepo(ctx, time.Now())
+	if err == nil && gen > 0 {
+		_ = ix.Store.SetLastSummarizedAt(ctx, time.Now())
+	}
+	return gen, err
 }
 
 // DrainPendingSummaries drains the entire queue then cascades. This is
