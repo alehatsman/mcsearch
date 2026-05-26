@@ -38,9 +38,10 @@ func init() {
 }
 
 const (
-	metaDim           = "dim"
-	metaLastIndexedAt = "last_indexed_at"
-	metaProjectRoot   = "project_root"
+	metaDim              = "dim"
+	metaLastIndexedAt    = "last_indexed_at"
+	metaProjectRoot      = "project_root"
+	metaLastSummarizedAt = "last_summarized_at"
 )
 
 // Options influence the runtime behaviour of an opened Store.
@@ -377,6 +378,14 @@ type Stats struct {
 	Files     int
 	Dim       int
 	LastIndex time.Time
+	// PendingSummaries is the current depth of the pending_summaries
+	// queue. Non-zero on a fresh `dex index --summarize-defer` run;
+	// drained by `dex index summarize` or by `dex watch`'s idle hook.
+	PendingSummaries int
+	// LastSummarized is the wall-clock time of the most recent
+	// successful summary generation (per-chunk, file, package, or
+	// repo). Zero when no summaries have ever been produced.
+	LastSummarized time.Time
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
@@ -394,6 +403,19 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 			st.LastIndex = time.Unix(0, ts)
 		}
 	}
+	// pending_summaries queue depth. Treat the table-missing case as 0
+	// so old indexes that pre-date the table don't break Stats.
+	row = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_summaries`)
+	_ = row.Scan(&st.PendingSummaries)
+
+	row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaLastSummarizedAt+`'`)
+	var sv string
+	if err := row.Scan(&sv); err == nil {
+		ts, _ := strconv.ParseInt(sv, 10, 64)
+		if ts > 0 {
+			st.LastSummarized = time.Unix(0, ts)
+		}
+	}
 	return st, nil
 }
 
@@ -402,6 +424,18 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 func (s *Store) SetLastIndexedAt(ctx context.Context, t time.Time) error {
 	_, err := s.db.ExecContext(ctx,
 		`INSERT INTO meta(key,value) VALUES('`+metaLastIndexedAt+`', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
+		strconv.FormatInt(t.UnixNano(), 10))
+	return err
+}
+
+// SetLastSummarizedAt records the wall-clock time of the most recent
+// successful summary generation. Bumped by the drainer whenever a
+// batch produces new summary chunks (chunk / file / package / repo).
+// Cache-hit batches that only TouchSeen existing summaries do not bump.
+func (s *Store) SetLastSummarizedAt(ctx context.Context, t time.Time) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta(key,value) VALUES('`+metaLastSummarizedAt+`', ?)
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
 		strconv.FormatInt(t.UnixNano(), 10))
 	return err

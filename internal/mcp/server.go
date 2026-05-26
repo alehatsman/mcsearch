@@ -545,12 +545,14 @@ func buildSummarizeSystem(focus string) string {
 type StatusInput struct{}
 
 type ProjectStatus struct {
-	ID          string `json:"id"`
-	Root        string `json:"root,omitempty"`
-	Chunks      int    `json:"chunks"`
-	Files       int    `json:"files"`
-	Dim         int    `json:"dim"`
-	LastIndexed string `json:"last_indexed,omitempty"`
+	ID               string `json:"id"`
+	Root             string `json:"root,omitempty"`
+	Chunks           int    `json:"chunks"`
+	Files            int    `json:"files"`
+	Dim              int    `json:"dim"`
+	LastIndexed      string `json:"last_indexed,omitempty"`
+	PendingSummaries int    `json:"pending_summaries,omitempty"`
+	LastSummarized   string `json:"last_summarized,omitempty"`
 }
 
 type StatusOutput struct {
@@ -671,14 +673,18 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 				root, _ := st.ProjectRoot(ctx)
 				st.Close()
 				ps := ProjectStatus{
-					ID:     id,
-					Root:   root,
-					Chunks: stats.Chunks,
-					Files:  stats.Files,
-					Dim:    stats.Dim,
+					ID:               id,
+					Root:             root,
+					Chunks:           stats.Chunks,
+					Files:            stats.Files,
+					Dim:              stats.Dim,
+					PendingSummaries: stats.PendingSummaries,
 				}
 				if !stats.LastIndex.IsZero() {
 					ps.LastIndexed = stats.LastIndex.Format(time.RFC3339)
+				}
+				if !stats.LastSummarized.IsZero() {
+					ps.LastSummarized = stats.LastSummarized.Format(time.RFC3339)
 				}
 				results[idx] = result{ps: ps, ok: true}
 			}(i, e.Name(), dbPath)

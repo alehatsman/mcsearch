@@ -626,6 +626,13 @@ func TestDrainPendingSummariesEndToEnd(t *testing.T) {
 		t.Errorf("expected one repo_summary chunk after cascade")
 	}
 
+	// A successful drain should bump last_summarized_at so
+	// `dex index status` can report it.
+	statsAfterDrain, _ := st.Stats(ctx)
+	if statsAfterDrain.LastSummarized.IsZero() {
+		t.Error("expected Stats.LastSummarized to be populated after a successful drain")
+	}
+
 	// Phase: drain again. Queue is empty, so no new chat calls
 	// (the cascade also no-ops since all package/repo summaries are
 	// already present with matching SHAs).

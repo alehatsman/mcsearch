@@ -184,3 +184,43 @@ func TestCountPendingSummariesEmpty(t *testing.T) {
 		t.Errorf("fresh DB should have 0 pending; got %d", n)
 	}
 }
+
+// TestStatsExposesPendingAndLastSummarized verifies the new Stats
+// fields surface what `dex index status` and the MCP status tool need
+// to report background-summary progress to the user.
+func TestStatsExposesPendingAndLastSummarized(t *testing.T) {
+	st, ctx := newStore(t)
+
+	// Fresh DB: both fields zero.
+	stats, err := st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PendingSummaries != 0 {
+		t.Errorf("fresh DB: PendingSummaries = %d, want 0", stats.PendingSummaries)
+	}
+	if !stats.LastSummarized.IsZero() {
+		t.Errorf("fresh DB: LastSummarized = %v, want zero", stats.LastSummarized)
+	}
+
+	// Enqueue rows and bump the timestamp; Stats should report both.
+	now := time.Now().Truncate(time.Microsecond) // SQLite stores ns, but ns→s round-trip preserves to μs in tests
+	enqueueFileSummary(t, ctx, st, "a.go", "sha1", now)
+	enqueueFileSummary(t, ctx, st, "b.go", "sha2", now)
+	enqueueFileSummary(t, ctx, st, "c.go", "sha3", now)
+
+	if err := st.SetLastSummarizedAt(ctx, now); err != nil {
+		t.Fatalf("SetLastSummarizedAt: %v", err)
+	}
+
+	stats, err = st.Stats(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.PendingSummaries != 3 {
+		t.Errorf("PendingSummaries = %d, want 3", stats.PendingSummaries)
+	}
+	if !stats.LastSummarized.Equal(now) {
+		t.Errorf("LastSummarized = %v, want %v", stats.LastSummarized, now)
+	}
+}

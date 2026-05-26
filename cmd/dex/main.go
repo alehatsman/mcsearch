@@ -1128,6 +1128,17 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 		} else {
 			fmt.Printf("  last indexed: %s\n", relativeTime(stats.LastIndex))
 		}
+		if stats.PendingSummaries > 0 {
+			fmt.Printf("  pending summaries: %d", stats.PendingSummaries)
+			if os.Getenv("DEX_SUMMARY_URL") != "" || os.Getenv("DEX_CHAT_URL") != "" {
+				fmt.Printf(" — `dex watch` will drain in the background, or run: dex index summarize %s\n", p.Root)
+			} else {
+				fmt.Printf(" (set DEX_SUMMARY_URL or DEX_CHAT_URL to enable summary draining)\n")
+			}
+		}
+		if !stats.LastSummarized.IsZero() {
+			fmt.Printf("  last summarized: %s\n", relativeTime(stats.LastSummarized))
+		}
 		return nil
 	}
 
