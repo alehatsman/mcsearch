@@ -1,6 +1,10 @@
 # How LLM_GUIDE.txt is generated
 
-Two-phase model. The LLM work happens at **index time**, not guide time.
+Two-phase model. The LLM work happens at **index time**, not guide
+time. Each module section in the output is a hybrid: an LLM-generated
+prose paragraph for narrative flavor, followed by mechanical
+ground-truth data pulled from the static call graph (no LLM,
+hallucination-proof).
 
 ## Phase 1: index produces summary chunks
 
@@ -22,7 +26,8 @@ model, gets back a package-level overview.
 
 Pass 6 (`summarizeRepo`, `internal/index/index.go:947`) feeds all
 `package_summary` rows into the chat model, gets back the repo
-overview.
+overview. Capped at 1200 tokens with `FinishReason=length` treated as
+an error so a truncated overview never replaces a good one.
 
 The chat client is OpenAI-compatible (`internal/chat/client.go`) —
 Ollama, vLLM, anything that speaks `/v1/chat/completions`. Default for
@@ -37,23 +42,61 @@ Re-indexing with no changes → cache hits → no LLM calls.
 `dex guide .` does **zero LLM calls**. The flow lives in
 `internal/guide/render.go`:
 
-1. `SELECT path, content, last_seen_at FROM chunks WHERE kind='repo_summary'`
-2. `SELECT path, content, last_seen_at FROM chunks WHERE kind='package_summary' ORDER BY path`
-3. Read `.dex/llm_guide.manifest.json` — get `last_summary_seen_at`.
-4. Dirty check: any summary chunk's `last_seen_at` greater than the
-   manifest's recorded value?
-5. If clean → exit. If dirty → format markdown, write `LLM_GUIDE.txt`,
+1. Load `repo_summary` + `package_summary` chunks via
+   `SummariesByKindWithMeta` (path, content, last_seen_at).
+2. Read `.dex/llm_guide.manifest.json` — get `last_summary_seen_at`.
+3. Dirty check: any summary chunk's `last_seen_at` greater than the
+   manifest's recorded value, OR the guide file is missing, OR `--full`
+   was passed.
+4. If clean → exit. If dirty → format markdown, write `LLM_GUIDE.txt`,
    update manifest.
 
-Markdown is mechanical concatenation in `buildMarkdown`
-(`internal/guide/render.go:90`):
+## Output shape
+
+Each module section combines LLM prose with graph-grounded data:
 
 ```
-# Project Guide
-## Overview          ← repo_summary.content
-## Module: <path>    ← package_summary[i].content
+## Module: <path>
+
+<package_summary content from LLM>          ← narrative
+
+**Exported API** (N)                        ← from graph_nodes
+- `func` Name — file:line
+- `method` Type.Name — file:line
 ...
+
+**Key entry points** (top 5 by PageRank)    ← from graph_nodes.pagerank
+- `Name` — file:line — in-degree N
+...
+
+**Depends on**                              ← from graph_nodes (kind=import)
+- project: internal/foo, internal/bar
+- external: context, fmt, github.com/...
+
+**Used by**                                 ← reverse import edges
+- cmd/dex, internal/mcp
 ```
+
+### Section sources
+
+| Section | Source | Filter |
+|---|---|---|
+| Exported API | `graph_nodes` kind ∈ {function, method, struct, interface, type} | name starts with capital |
+| Key entry points | `graph_nodes` kind ∈ {function, method}, ORDER BY pagerank DESC | exported preferred; falls back to internal hot spots (with a visible heading change) when no exported nodes have centrality |
+| Depends on | `graph_nodes` kind=import, scoped to the directory's Go package paths | split into project (matches go.mod module prefix) vs external (stdlib + third-party) |
+| Used by | inverse of Depends on — packages whose import nodes name this module's package paths | strips module prefix to display directories |
+
+### Quirks
+
+- `file_path` is empty on `kind='import'` rows (imports are a
+  package-level fact, not per-file). Queries resolve via `package_path`
+  for these rows; only declaration nodes (`function`, `method`, etc.)
+  carry `file_path`.
+- Non-Go directories (`testdata/`, `scripts/`, `docs/`) get only the
+  LLM prose section — graph queries return empty and each subsection
+  is omitted gracefully.
+- The renderer reads `go.mod` once per render to discover the module
+  prefix used to split project vs. external imports.
 
 ## Why the split
 
@@ -67,6 +110,9 @@ Splitting "produce summaries" from "format guide" gives:
 - **Reusable summaries.** The same `package_summary` chunks already
   power `view summarize`, `ask`'s suggested-reads, and MCP context
   routing — the guide is a new consumer, not a new producer.
+- **Hallucination resistance.** LLM prose carries the narrative; graph
+  data carries the facts. If they disagree, the facts are the source
+  of truth and a reader can see both.
 
 ## Pre-commit chain
 
@@ -78,3 +124,17 @@ dex guide .                # format → LLM_GUIDE.txt + manifest
 First half does the (potentially) slow work; second half is always
 near-instant. See `scripts/pre-commit-guide.sh` for an installable
 hook.
+
+## Configuration
+
+`.dex/guide.toml` (optional):
+
+```toml
+[guide]
+output = "LLM_GUIDE.txt"
+```
+
+Missing file → defaults. There is no `[ollama]` block — the renderer
+makes no LLM calls. Summarization itself is configured via
+`DEX_SUMMARY_URL` / `DEX_SUMMARY_MODEL` environment variables, the
+same as the rest of the index pipeline.

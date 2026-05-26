@@ -11,6 +11,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -31,7 +32,7 @@ func DefaultConfig() Config {
 // pull in a TOML dependency for one file with three keys.
 func LoadConfig(root string) (Config, error) {
 	cfg := DefaultConfig()
-	path := root + "/.dex/guide.toml"
+	path := filepath.Join(root, ".dex", "guide.toml")
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
