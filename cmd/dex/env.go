@@ -59,6 +59,10 @@ var allEnvVars = []envVar{
 	// (file / chunk / package / repo summaries). Defaults to DEX_CHAT_*.
 	{"DEX_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to DEX_CHAT_URL).", "summary", true},
 	{"DEX_SUMMARY_MODEL", "<DEX_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
+	{"DEX_CHUNK_SUMMARY_MODEL", "<DEX_SUMMARY_MODEL>", "Per-tier override: model for per-chunk summaries (volume tier — hundreds of calls). Smaller = faster.", "summary", true},
+	{"DEX_FILE_SUMMARY_MODEL", "<DEX_SUMMARY_MODEL>", "Per-tier override: model for per-file summaries (medium volume).", "summary", true},
+	{"DEX_PACKAGE_SUMMARY_MODEL", "<DEX_SUMMARY_MODEL>", "Per-tier override: model for per-directory summaries (low volume — quality compounds into LLM_GUIDE).", "summary", true},
+	{"DEX_REPO_SUMMARY_MODEL", "<DEX_SUMMARY_MODEL>", "Per-tier override: model for the single repo-overview summary (one call total — use the strongest model you can fit).", "summary", true},
 	{"DEX_AUTO_SUMMARIZE", "", "`dex watch` and the MCP auto-watcher auto-drain pending summaries when idle. Default on if a chat/summary endpoint is set; set off|0 to disable.", "summary", true},
 	{"DEX_SUMMARIZE_IDLE", "5s", "Quiet window after a re-index before the background summary drainer fires.", "summary", false},
 	{"DEX_SUMMARIZE_BATCH", "10", "Rows per idle batch. Smaller = faster yield back to fs events.", "summary", false},

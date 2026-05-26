@@ -479,6 +479,20 @@ func newSummaryClient() *chat.Client {
 		envOr("DEX_CHAT_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct"), 120*time.Second)
 }
 
+// summaryModelsFromEnv reads the per-tier model overrides. Empty
+// string at any tier means "use the chat client's default model"
+// (i.e. DEX_SUMMARY_MODEL). Lets the operator route the dozen
+// package summaries and the one repo summary through a heavier
+// model than the hundreds of chunk summaries.
+func summaryModelsFromEnv() index.SummaryModels {
+	return index.SummaryModels{
+		Chunk:   os.Getenv("DEX_CHUNK_SUMMARY_MODEL"),
+		File:    os.Getenv("DEX_FILE_SUMMARY_MODEL"),
+		Package: os.Getenv("DEX_PACKAGE_SUMMARY_MODEL"),
+		Repo:    os.Getenv("DEX_REPO_SUMMARY_MODEL"),
+	}
+}
+
 // envInt reads a positive integer env var with a default.
 // Non-positive or unparsable values fall back to def with a warning.
 func envInt(name string, def int) int {
@@ -695,6 +709,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 			opts.Summarize = true
 			opts.DeferSummaries = *summarizeDefer
 			opts.Chat = newSummaryClient()
+			opts.SummaryModels = summaryModelsFromEnv()
 			opts.SummaryConcurrency = envInt("DEX_SUMMARY_CONCURRENCY", 4)
 			opts.ChunkSummaryMinLines = envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0)
 		}
@@ -1464,6 +1479,7 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 		Verbose:              *verbose,
 		Logger:               cliLogger(),
 		Chat:                 newSummaryClient(),
+		SummaryModels:        summaryModelsFromEnv(),
 		SummaryConcurrency:   envInt("DEX_SUMMARY_CONCURRENCY", 4),
 		ChunkSummaryMinLines: envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0),
 	})
@@ -1803,6 +1819,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 		ixOpts.Summarize = true
 		ixOpts.DeferSummaries = true
 		ixOpts.Chat = newSummaryClient()
+		ixOpts.SummaryModels = summaryModelsFromEnv()
 		ixOpts.SummaryConcurrency = envInt("DEX_SUMMARY_CONCURRENCY", 4)
 		ixOpts.ChunkSummaryMinLines = envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0)
 	}
@@ -1979,6 +1996,7 @@ func newServerFromEnv(base string) (*mcp.Server, rerank.HealthChecker) {
 		EmbedClient:    newEmbedClient(),
 		ChatClient:     newChatClient(),
 		SummaryClient:  newSummaryClient(), // dedicated client for the auto-watcher's background drainer
+		SummaryModels:  summaryModelsFromEnv(),
 		RerankClient:   rerankClient,
 		CompressClient: newCompressClient(),
 		DraftClient:    newDraftClient(),

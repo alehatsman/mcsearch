@@ -315,7 +315,7 @@ func (ix *Indexer) processFileSummary(ctx context.Context, p store.PendingSummar
 	if currentSHA != p.ContentSHA {
 		return nil, true, nil // file changed; drop pending
 	}
-	summary, err := summarizeFile(ctx, ix.Options.Chat, p.Path, slice)
+	summary, err := summarizeFile(ctx, ix.Options.Chat, ix.Options.SummaryModels.File, p.Path, slice)
 	if err != nil {
 		return nil, false, err
 	}
@@ -366,7 +366,7 @@ func (ix *Indexer) processChunkSummary(ctx context.Context, p store.PendingSumma
 		EndLine:   p.EndLine,
 		Content:   content,
 	}
-	summary, err := summarizeChunk(ctx, ix.Options.Chat, p.Path, sourceChunk)
+	summary, err := summarizeChunk(ctx, ix.Options.Chat, ix.Options.SummaryModels.Chunk, p.Path, sourceChunk)
 	if err != nil {
 		return nil, false, err
 	}
@@ -473,7 +473,7 @@ func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Tim
 				if err != nil || len(fileSummaries) == 0 {
 					return nil
 				}
-				summary, err := summarizePackage(egctx, ix.Options.Chat, j.dir, fileSummaries)
+				summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
 				if err != nil {
 					ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
 					return nil
@@ -544,7 +544,7 @@ func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Tim
 		}
 		return generated, nil
 	}
-	summary, err := summarizeRepo(ctx, ix.Options.Chat, pkgSummaries)
+	summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries)
 	if err != nil {
 		ix.Options.Logger.Warn("repo summarize failed", "err", err)
 		return generated, nil
