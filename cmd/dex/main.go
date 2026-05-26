@@ -1624,10 +1624,102 @@ func knownProjectRoots(ctx context.Context, base string) ([]string, error) {
 
 // ─── watch ─────────────────────────────────────────────────────────────────
 
+// autoSummarizeEnabled reports whether the watcher should drain
+// pending summaries in the background. Defaults on when a chat or
+// summary endpoint is configured; DEX_AUTO_SUMMARIZE=off|0 disables.
+// DEX_POWER_SAVE=1|on overrides to off (laptop-battery mode).
+func autoSummarizeEnabled() bool {
+	if envBool("DEX_POWER_SAVE", false) {
+		return false
+	}
+	if v := os.Getenv("DEX_AUTO_SUMMARIZE"); v != "" {
+		return envBool("DEX_AUTO_SUMMARIZE", true)
+	}
+	// Default: on iff we have somewhere to send chat calls.
+	return os.Getenv("DEX_SUMMARY_URL") != "" || os.Getenv("DEX_CHAT_URL") != ""
+}
+
+// envBool parses an env var as a boolean. Truthy: 1, on, true, yes
+// (case-insensitive). Falsy: 0, off, false, no. Anything else (or
+// unset) returns def.
+func envBool(name string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "on", "true", "yes":
+		return true
+	case "0", "off", "false", "no":
+		return false
+	default:
+		return def
+	}
+}
+
+// envDuration reads a duration env var. Falls back to def with a
+// warning on a parse error; honours def when unset.
+func envDuration(name string, def time.Duration) time.Duration {
+	raw := os.Getenv(name)
+	if raw == "" {
+		return def
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s=%q is not a duration; using %s\n", name, raw, def)
+		return def
+	}
+	return d
+}
+
+// newIdleSummaryDrainer returns a watch.Options.OnIdle callback that
+// drains pending_summaries in bounded batches and cascades package +
+// repo summaries once the queue is empty. Yields immediately when
+// the caller's ctx is cancelled (the watcher cancels on the next fs
+// event).
+//
+// Stop conditions:
+//   - queue empty → cascade then return done=true
+//   - batch made no progress (all rows failed) → return done=true so
+//     we don't busy-loop against a misconfigured chat endpoint; the
+//     next flush re-arms.
+//   - chat client not configured → return done=true; nothing to do.
+//   - underlying batch returns an error → return (true, err); the
+//     watcher logs and stops the cycle.
+func newIdleSummaryDrainer(ix *index.Indexer, logger *slog.Logger, batchSize int, verbose bool) func(context.Context) (bool, error) {
+	if ix.Options.Chat == nil {
+		return nil
+	}
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+	return func(ctx context.Context) (bool, error) {
+		before, _ := ix.Store.CountPendingSummaries(ctx)
+		gen, after, err := ix.DrainPendingSummariesBatch(ctx, batchSize)
+		if err != nil {
+			return true, err
+		}
+		if after == 0 {
+			cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
+			if err != nil {
+				return true, err
+			}
+			if verbose && (gen > 0 || cascadeGen > 0) {
+				logger.Info("watch idle: drain complete", "summaries", gen, "cascade", cascadeGen)
+			}
+			return true, nil
+		}
+		if after >= before {
+			logger.Warn("watch idle: no progress, stopping cycle", "remaining", after)
+			return true, nil
+		}
+		if verbose {
+			logger.Info("watch idle: batch drained", "generated", gen, "remaining", after)
+		}
+		return false, nil
+	}
+}
+
 func cmdWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	setHelp(fs,
-		"Keep the index fresh as files change (foreground; runs chunk + graph after each debounce).",
+		"Keep the index fresh as files change (foreground; runs chunk + graph after each debounce). When DEX_SUMMARY_URL (or DEX_CHAT_URL) is configured, drains pending summaries in the background between saves.",
 		"dex watch [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
@@ -1663,7 +1755,26 @@ func cmdWatch(ctx context.Context, args []string) error {
 		return err
 	}
 	logger := cliLogger()
-	ix := index.New(p, st, newEmbedClient(), ig, index.Options{Verbose: *verbose, Logger: logger, Concurrency: envInt("DEX_INDEX_CONCURRENCY", 0)})
+
+	autoSum := autoSummarizeEnabled()
+	ixOpts := index.Options{
+		Verbose:     *verbose,
+		Logger:      logger,
+		Concurrency: envInt("DEX_INDEX_CONCURRENCY", 0),
+	}
+	if autoSum {
+		// Mirror cmdIndex: queue summaries during each flush so the
+		// idle drainer has something to consume. Defer is mandatory
+		// here — running chat calls inline would extend the flush
+		// past the next save's debounce.
+		ixOpts.Summarize = true
+		ixOpts.DeferSummaries = true
+		ixOpts.Chat = newSummaryClient()
+		ixOpts.SummaryConcurrency = envInt("DEX_SUMMARY_CONCURRENCY", 4)
+		ixOpts.ChunkSummaryMinLines = envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0)
+	}
+	ix := index.New(p, st, newEmbedClient(), ig, ixOpts)
+
 	// Refresh the Go static graph after each chunk-index flush. The
 	// graph layer lives in the same SQLite file, so the chunk run has
 	// already released the writer when this fires.
@@ -1671,13 +1782,23 @@ func cmdWatch(ctx context.Context, args []string) error {
 		_, err := runGraphPhase(c, p, st, *verbose)
 		return err
 	}
-	w := watch.New(ix, ig, p.Root, watch.Options{
+	wOpts := watch.Options{
 		Debounce:   *debounce,
 		Verbose:    *verbose,
 		Logger:     logger,
 		AfterIndex: afterIndex,
-	})
-	fmt.Fprintf(os.Stderr, "dex watching %s (debounce=%s)\n", p.Root, *debounce)
+	}
+	if autoSum {
+		wOpts.OnIdle = newIdleSummaryDrainer(ix, logger, envInt("DEX_SUMMARIZE_BATCH", 10), *verbose)
+		wOpts.OnIdleAfter = envDuration("DEX_SUMMARIZE_IDLE", 5*time.Second)
+	}
+	w := watch.New(ix, ig, p.Root, wOpts)
+	if autoSum {
+		fmt.Fprintf(os.Stderr, "dex watching %s (debounce=%s, auto-summarize idle=%s batch=%d)\n",
+			p.Root, *debounce, wOpts.OnIdleAfter, envInt("DEX_SUMMARIZE_BATCH", 10))
+	} else {
+		fmt.Fprintf(os.Stderr, "dex watching %s (debounce=%s)\n", p.Root, *debounce)
+	}
 	return w.Run(ctx)
 }
 

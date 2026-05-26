@@ -59,6 +59,9 @@ var allEnvVars = []envVar{
 	// (file / chunk / package / repo summaries). Defaults to DEX_CHAT_*.
 	{"DEX_SUMMARY_URL", "", "Chat server for index-time summaries (falls back to DEX_CHAT_URL).", "summary", true},
 	{"DEX_SUMMARY_MODEL", "<DEX_CHAT_MODEL>", "Model for index-time summaries. Smaller is fine — outputs are 1–4 sentences.", "summary", false},
+	{"DEX_AUTO_SUMMARIZE", "", "`dex watch` auto-drains pending summaries when idle. Default on if a chat/summary endpoint is set; set off|0 to disable.", "summary", true},
+	{"DEX_SUMMARIZE_IDLE", "5s", "Quiet window after a `dex watch` re-index before the background summary drainer fires.", "summary", false},
+	{"DEX_SUMMARIZE_BATCH", "10", "Rows per idle batch in `dex watch`. Smaller = faster yield back to fs events.", "summary", false},
 
 	// tuning — hidden unless --all. Most installs leave these alone.
 	{"DEX_EMBED_BATCH", "32", "Max chunks per /v1/embeddings call.", "tuning", false},
@@ -76,6 +79,7 @@ var allEnvVars = []envVar{
 	{"DEX_CHUNK_SUMMARY_MIN_LINES", "30", "Minimum chunk size (lines) eligible for a per-chunk summary. Raise to cut summary volume.", "tuning", false},
 	{"DEX_DISABLE_RERANK", "", "Set 1 to short-circuit rerank even when URL is set.", "tuning", false},
 	{"DEX_DISABLE_BM25", "", "Set 1 to disable the BM25 leg.", "tuning", false},
+	{"DEX_POWER_SAVE", "", "Set 1|on to disable `dex watch` background summary draining (e.g. on battery).", "tuning", false},
 	{"DEX_MAX_HITS_PER_FILE", "", "Cap hits per file in search results (0 = no cap).", "tuning", false},
 	{"DEX_ALLOW_PATHS", "", "Colon-separated path prefixes accepted outside git work trees.", "tuning", false},
 }
