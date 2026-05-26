@@ -6,8 +6,6 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
-	"log/slog"
 	"math"
 	"net/http"
 	"net/http/httptest"
@@ -276,10 +274,9 @@ func TestIdleSummaryDrainerEndToEnd(t *testing.T) {
 		t.Fatalf("expected queue non-empty after defer index")
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	drainer := newIdleSummaryDrainer(ix, logger, 1 /* batch */, false)
+	drainer := ix.IdleSummaryDrainer(1 /* batch */)
 	if drainer == nil {
-		t.Fatal("newIdleSummaryDrainer returned nil despite chat being configured")
+		t.Fatal("IdleSummaryDrainer returned nil despite chat being configured")
 	}
 
 	// Drive the drainer like the watcher would, batch by batch.
@@ -321,8 +318,7 @@ func TestIdleSummaryDrainerNilWithoutChat(t *testing.T) {
 	em := embed.New(embedSrv.URL, "fake", 8, 5*time.Second)
 
 	ix := index.New(p, st, em, ig, index.Options{}) // no Chat
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	if d := newIdleSummaryDrainer(ix, logger, 10, false); d != nil {
+	if d := ix.IdleSummaryDrainer(10); d != nil {
 		t.Error("expected nil drainer when chat is not configured")
 	}
 }
@@ -363,8 +359,7 @@ func TestIdleSummaryDrainerStopsOnNoProgress(t *testing.T) {
 		t.Fatal("expected pending rows")
 	}
 
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	drainer := newIdleSummaryDrainer(ix, logger, 10, false)
+	drainer := ix.IdleSummaryDrainer(10)
 	done, err := drainer(ctx)
 	if err != nil {
 		t.Fatalf("drainer: %v", err)

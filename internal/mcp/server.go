@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,21 +17,71 @@ import (
 	"github.com/alehatsman/dex/internal/chat"
 	"github.com/alehatsman/dex/internal/chunk"
 	"github.com/alehatsman/dex/internal/embed"
+	"github.com/alehatsman/dex/internal/ignore"
+	"github.com/alehatsman/dex/internal/index"
 	"github.com/alehatsman/dex/internal/proj"
 	"github.com/alehatsman/dex/internal/rerank"
 	"github.com/alehatsman/dex/internal/store"
+	"github.com/alehatsman/dex/internal/watch"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// AutoWatchConfig configures the MCP server's lazy per-project watcher.
+// Zero value (Enabled=false) disables auto-watching entirely; tools
+// behave exactly as before.
+type AutoWatchConfig struct {
+	// Enabled toggles the per-project watcher. When true, the first
+	// MCP request that resolves a project also spawns a `watch.Watcher`
+	// goroutine that lives for the server's lifetime — keeping the
+	// chunk index fresh as files change and (when Summarize is set)
+	// filling pending summaries in the background.
+	Enabled bool
+	// Debounce is the quiet window between fs events before re-indexing
+	// (default 500ms).
+	Debounce time.Duration
+	// Summarize, when true and the parent Server's ChatClient is
+	// configured, enables per-flush summary queueing + the idle drainer.
+	// When false the watcher only keeps the chunk index fresh.
+	Summarize bool
+	// OnIdleAfter is the quiet window after a flush before the summary
+	// drainer fires (default 5s). Ignored when Summarize is false.
+	OnIdleAfter time.Duration
+	// BatchSize bounds rows per idle drain (default 10).
+	BatchSize int
+	// IndexConcurrency caps Pass 1 worker count (default 0 = GOMAXPROCS).
+	IndexConcurrency int
+	// SummaryConcurrency caps in-flight chat calls during the drain.
+	SummaryConcurrency int
+	// ChunkSummaryMinLines forwards to index.Options.ChunkSummaryMinLines.
+	ChunkSummaryMinLines int
+	// Logger receives spawn/teardown messages; nil = io.Discard.
+	Logger *slog.Logger
+}
 
 // Server holds everything the MCP handlers need.
 type Server struct {
 	EmbedClient    *embed.Client
 	ChatClient     *chat.Client         // optional — when nil, view_summarize is not registered
+	SummaryClient  *chat.Client         // optional — used by the auto-watcher's background drainer; falls back to ChatClient if nil
 	RerankClient   rerank.HealthChecker // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
 	CompressClient *chat.Client         // optional — health reported by status
 	DraftClient    *chat.Client         // optional — health reported by status
 	IndexDir       string               // base dir holding per-project index folders
 	StoreOpts      store.Options        // applied to every Store opened by the server
+	AutoWatch      AutoWatchConfig      // lazy per-project watcher; zero value disables
+
+	// runCtx is set at the start of RunStdio and is used as the parent
+	// context for spawned watcher goroutines. nil for non-stdio usage
+	// (CLI helpers that build a Server for a single call) — ensureWatcher
+	// checks this and bails so one-shot CLI tools never leak goroutines.
+	runCtx context.Context
+	// watchers tracks per-project watcher spawns so each project gets
+	// exactly one watcher across the server's lifetime. Keyed by
+	// proj.Project.ID; value is *struct{} (presence-only).
+	watchers sync.Map
+	// watcherWG lets RunStdio wait for all watcher goroutines to drain
+	// before returning.
+	watcherWG sync.WaitGroup
 }
 
 // Search, FindSymbol, Related, Summarize are thin exported wrappers
@@ -109,6 +161,10 @@ type SearchOutput struct {
 // resolveProject canonicalizes projectRoot (falling back to cwd) and
 // resolves it to a Project. On failure it returns a non-empty hint that
 // callers can surface as a Status:"error" response.
+//
+// Side effect: on successful resolution under stdio mode, ensures a
+// per-project watcher goroutine is running (no-op if AutoWatch is
+// disabled or one is already spawned).
 func (s *Server) resolveProject(projectRoot string) (*proj.Project, string) {
 	root := projectRoot
 	if root == "" {
@@ -122,7 +178,93 @@ func (s *Server) resolveProject(projectRoot string) (*proj.Project, string) {
 	if err != nil {
 		return nil, fmt.Sprintf("resolve project: %v", err)
 	}
+	s.ensureWatcher(p)
 	return p, ""
+}
+
+// ensureWatcher lazily spawns a Watcher goroutine for this project,
+// at most once per server lifetime. No-op unless RunStdio set runCtx
+// (i.e. only the stdio MCP path opts in) AND AutoWatch.Enabled is
+// true. Concurrency-safe; the goroutine self-cleans when runCtx ends.
+func (s *Server) ensureWatcher(p *proj.Project) {
+	if s == nil || s.runCtx == nil || s.runCtx.Err() != nil {
+		return
+	}
+	if !s.AutoWatch.Enabled {
+		return
+	}
+	if _, loaded := s.watchers.LoadOrStore(p.ID, struct{}{}); loaded {
+		return
+	}
+	s.watcherWG.Add(1)
+	go s.runWatcher(p)
+}
+
+// runWatcher owns the lifecycle of a single project's Watcher inside
+// the MCP server. Closes its store + ignores when the goroutine
+// returns so RunStdio's defer s.watcherWG.Wait() drains cleanly.
+func (s *Server) runWatcher(p *proj.Project) {
+	defer s.watcherWG.Done()
+	// On exit, free the slot — if the server is shutting down nothing
+	// reads it again; if a future request hits the same project after
+	// a watcher errored out, we can respawn.
+	defer s.watchers.Delete(p.ID)
+
+	logger := s.AutoWatch.Logger
+	if logger == nil {
+		logger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	}
+
+	if err := proj.CheckIndexable(p, false); err != nil {
+		logger.Info("mcp watch: skipping (not indexable)", "root", p.Root, "err", err)
+		return
+	}
+	if err := p.EnsureCacheDir(); err != nil {
+		logger.Warn("mcp watch: cache dir failed", "root", p.Root, "err", err)
+		return
+	}
+	st, err := store.OpenWith(s.runCtx, p.DBPath, s.StoreOpts)
+	if err != nil {
+		logger.Warn("mcp watch: store open failed", "root", p.Root, "err", err)
+		return
+	}
+	defer st.Close()
+	ig, err := ignore.New(p.Root)
+	if err != nil {
+		logger.Warn("mcp watch: ignore init failed", "root", p.Root, "err", err)
+		return
+	}
+
+	summaryChat := s.SummaryClient
+	if summaryChat == nil {
+		summaryChat = s.ChatClient
+	}
+	ixOpts := index.Options{
+		Logger:      logger,
+		Concurrency: s.AutoWatch.IndexConcurrency,
+	}
+	if s.AutoWatch.Summarize && summaryChat != nil {
+		ixOpts.Summarize = true
+		ixOpts.DeferSummaries = true
+		ixOpts.Chat = summaryChat
+		ixOpts.SummaryConcurrency = s.AutoWatch.SummaryConcurrency
+		ixOpts.ChunkSummaryMinLines = s.AutoWatch.ChunkSummaryMinLines
+	}
+	ix := index.New(p, st, s.EmbedClient, ig, ixOpts)
+
+	wOpts := watch.Options{
+		Debounce: s.AutoWatch.Debounce,
+		Logger:   logger,
+	}
+	if ixOpts.Summarize {
+		wOpts.OnIdle = ix.IdleSummaryDrainer(s.AutoWatch.BatchSize)
+		wOpts.OnIdleAfter = s.AutoWatch.OnIdleAfter
+	}
+	w := watch.New(ix, ig, p.Root, wOpts)
+	logger.Info("mcp watch: starting", "root", p.Root, "summarize", ixOpts.Summarize)
+	if err := w.Run(s.runCtx); err != nil && !errors.Is(err, context.Canceled) {
+		logger.Warn("mcp watch: exited with error", "root", p.Root, "err", err)
+	}
 }
 
 func (s *Server) search(ctx context.Context, _ *sdk.CallToolRequest, in SearchInput) (*sdk.CallToolResult, SearchOutput, error) {
@@ -699,8 +841,15 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 	return nil, out, nil
 }
 
-// RunStdio starts the MCP server bound to stdin/stdout.
+// RunStdio starts the MCP server bound to stdin/stdout. Sets runCtx
+// so per-project Watcher goroutines spawned during the session share
+// this ctx and exit cleanly when it ends. Blocks until ctx is
+// cancelled or the transport closes, then waits for any spawned
+// watchers to drain.
 func (s *Server) RunStdio(ctx context.Context) error {
+	s.runCtx = ctx
+	defer s.watcherWG.Wait()
+
 	srv := sdk.NewServer(&sdk.Implementation{
 		Name:    "dex",
 		Version: Version,

@@ -1564,54 +1564,6 @@ func envDuration(name string, def time.Duration) time.Duration {
 	return d
 }
 
-// newIdleSummaryDrainer returns a watch.Options.OnIdle callback that
-// drains pending_summaries in bounded batches and cascades package +
-// repo summaries once the queue is empty. Yields immediately when
-// the caller's ctx is cancelled (the watcher cancels on the next fs
-// event).
-//
-// Stop conditions:
-//   - queue empty → cascade then return done=true
-//   - batch made no progress (all rows failed) → return done=true so
-//     we don't busy-loop against a misconfigured chat endpoint; the
-//     next flush re-arms.
-//   - chat client not configured → return done=true; nothing to do.
-//   - underlying batch returns an error → return (true, err); the
-//     watcher logs and stops the cycle.
-func newIdleSummaryDrainer(ix *index.Indexer, logger *slog.Logger, batchSize int, verbose bool) func(context.Context) (bool, error) {
-	if ix.Options.Chat == nil {
-		return nil
-	}
-	if batchSize <= 0 {
-		batchSize = 10
-	}
-	return func(ctx context.Context) (bool, error) {
-		before, _ := ix.Store.CountPendingSummaries(ctx)
-		gen, after, err := ix.DrainPendingSummariesBatch(ctx, batchSize)
-		if err != nil {
-			return true, err
-		}
-		if after == 0 {
-			cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
-			if err != nil {
-				return true, err
-			}
-			if verbose && (gen > 0 || cascadeGen > 0) {
-				logger.Info("watch idle: drain complete", "summaries", gen, "cascade", cascadeGen)
-			}
-			return true, nil
-		}
-		if after >= before {
-			logger.Warn("watch idle: no progress, stopping cycle", "remaining", after)
-			return true, nil
-		}
-		if verbose {
-			logger.Info("watch idle: batch drained", "generated", gen, "remaining", after)
-		}
-		return false, nil
-	}
-}
-
 func cmdWatch(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("watch", flag.ContinueOnError)
 	setHelp(fs,
@@ -1685,7 +1637,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 		AfterIndex: afterIndex,
 	}
 	if autoSum {
-		wOpts.OnIdle = newIdleSummaryDrainer(ix, logger, envInt("DEX_SUMMARIZE_BATCH", 10), *verbose)
+		wOpts.OnIdle = ix.IdleSummaryDrainer(envInt("DEX_SUMMARIZE_BATCH", 10))
 		wOpts.OnIdleAfter = envDuration("DEX_SUMMARIZE_IDLE", 5*time.Second)
 	}
 	w := watch.New(ix, ig, p.Root, wOpts)
@@ -1841,11 +1793,35 @@ func newServerFromEnv(base string) (*mcp.Server, rerank.HealthChecker) {
 	srv := &mcp.Server{
 		EmbedClient:    newEmbedClient(),
 		ChatClient:     newChatClient(),
+		SummaryClient:  newSummaryClient(), // dedicated client for the auto-watcher's background drainer
 		RerankClient:   rerankClient,
 		CompressClient: newCompressClient(),
 		DraftClient:    newDraftClient(),
 		IndexDir:       base,
 		StoreOpts:      opts,
+		AutoWatch:      autoWatchConfigFromEnv(),
 	}
 	return srv, rerankClient
+}
+
+// autoWatchConfigFromEnv reads DEX_MCP_AUTOWATCH and the existing
+// auto-summarize knobs to build a config for the MCP server's lazy
+// per-project watchers. Default: enabled, with summaries on when a
+// chat/summary endpoint is configured (and DEX_POWER_SAVE is unset).
+func autoWatchConfigFromEnv() mcp.AutoWatchConfig {
+	enabled := envBool("DEX_MCP_AUTOWATCH", true)
+	if !enabled {
+		return mcp.AutoWatchConfig{} // zero value disables
+	}
+	return mcp.AutoWatchConfig{
+		Enabled:              true,
+		Debounce:             envDuration("DEX_WATCH_DEBOUNCE", 500*time.Millisecond),
+		Summarize:            autoSummarizeEnabled(),
+		OnIdleAfter:          envDuration("DEX_SUMMARIZE_IDLE", 5*time.Second),
+		BatchSize:            envInt("DEX_SUMMARIZE_BATCH", 10),
+		IndexConcurrency:     envInt("DEX_INDEX_CONCURRENCY", 0),
+		SummaryConcurrency:   envInt("DEX_SUMMARY_CONCURRENCY", 4),
+		ChunkSummaryMinLines: envInt("DEX_CHUNK_SUMMARY_MIN_LINES", 0),
+		Logger:               cliLogger(),
+	}
 }

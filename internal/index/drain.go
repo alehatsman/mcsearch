@@ -213,6 +213,56 @@ func (ix *Indexer) CascadePackageRepoSummaries(ctx context.Context) (int, error)
 	return gen, err
 }
 
+// IdleSummaryDrainer returns a callback suitable for
+// watch.Options.OnIdle: it drains pending_summaries in batches of
+// batchSize and cascades package + repo summaries once the queue is
+// empty. Returns nil when the Indexer has no chat client configured
+// (caller must fall through with OnIdle=nil).
+//
+// Stop conditions encoded in the callback:
+//   - queue empty → cascade then signal done=true.
+//   - batch made no progress (chat endpoint dead → all rows fail) →
+//     done=true so we don't busy-loop; the next flush re-arms.
+//   - underlying batch errors → (true, err); the watcher logs and
+//     stops the cycle.
+//
+// Shared by `dex watch` and the MCP auto-watcher.
+func (ix *Indexer) IdleSummaryDrainer(batchSize int) func(context.Context) (bool, error) {
+	if ix.Options.Chat == nil {
+		return nil
+	}
+	if batchSize <= 0 {
+		batchSize = 10
+	}
+	logger := ix.Options.Logger
+	verbose := ix.Options.Verbose
+	return func(ctx context.Context) (bool, error) {
+		before, _ := ix.Store.CountPendingSummaries(ctx)
+		gen, after, err := ix.DrainPendingSummariesBatch(ctx, batchSize)
+		if err != nil {
+			return true, err
+		}
+		if after == 0 {
+			cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
+			if err != nil {
+				return true, err
+			}
+			if verbose && (gen > 0 || cascadeGen > 0) {
+				logger.Info("idle drain: complete", "summaries", gen, "cascade", cascadeGen)
+			}
+			return true, nil
+		}
+		if after >= before {
+			logger.Warn("idle drain: no progress, stopping cycle", "remaining", after)
+			return true, nil
+		}
+		if verbose {
+			logger.Info("idle drain: batch", "generated", gen, "remaining", after)
+		}
+		return false, nil
+	}
+}
+
 // DrainPendingSummaries drains the entire queue then cascades. This is
 // the all-in-one entry point used by `dex index summarize`; callers
 // that need to yield between rows (a watcher's idle hook, for
