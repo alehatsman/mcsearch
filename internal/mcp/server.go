@@ -63,6 +63,7 @@ type Server struct {
 	EmbedClient    *embed.Client
 	ChatClient     *chat.Client         // optional — when nil, view_summarize is not registered
 	SummaryClient  *chat.Client         // optional — used by the auto-watcher's background drainer; falls back to ChatClient if nil
+	SummaryModels  index.SummaryModels  // optional — per-tier model overrides forwarded to the auto-watcher's indexer
 	RerankClient   rerank.HealthChecker // optional — only consulted by `status` for health reporting; the actual rerank wiring goes through StoreOpts.Reranker
 	CompressClient *chat.Client         // optional — health reported by status
 	DraftClient    *chat.Client         // optional — health reported by status
@@ -247,6 +248,7 @@ func (s *Server) runWatcher(p *proj.Project) {
 		ixOpts.Summarize = true
 		ixOpts.DeferSummaries = true
 		ixOpts.Chat = summaryChat
+		ixOpts.SummaryModels = s.SummaryModels
 		ixOpts.SummaryConcurrency = s.AutoWatch.SummaryConcurrency
 		ixOpts.ChunkSummaryMinLines = s.AutoWatch.ChunkSummaryMinLines
 	}

@@ -32,6 +32,17 @@ import (
 // hardware; whole-repo overviews belong in ask_codebase, not here.
 const summarizeCap = 64 * 1024
 
+// SummaryModels names the chat model used at each summary tier.
+// Empty string means "use the Chat client's default model" (i.e.
+// DEX_SUMMARY_MODEL). Tiers ordered by call volume — Chunk fires
+// hundreds of times per index, Repo fires once.
+type SummaryModels struct {
+	Chunk   string // per-code-chunk; volume tier
+	File    string // per-file rollup
+	Package string // per-directory rollup
+	Repo    string // one per project
+}
+
 // chunkSummaryMinLines: skip per-chunk summaries for tiny chunks (< this
 // many lines) — they're too short to need prose distillation and the
 // full source text is better context than a summary.
@@ -50,6 +61,15 @@ type Options struct {
 	// chat round-trip per file.
 	Summarize bool
 	Chat      *chat.Client
+	// SummaryModels overrides the model name passed to the chat
+	// endpoint for each summary tier. Empty fields fall back to the
+	// Chat client's default model (i.e. DEX_SUMMARY_MODEL). Lets the
+	// operator route per-tier work to differently-sized models on a
+	// shared endpoint (e.g. Ollama) — small fast model for the
+	// hundreds of chunk summaries, larger model for the dozen
+	// package summaries and the one repo summary that compounds into
+	// LLM_GUIDE.txt.
+	SummaryModels SummaryModels
 	// SummaryConcurrency caps in-flight chat calls for per-chunk
 	// summaries within a single file. <=1 = sequential (preserves
 	// existing behaviour). Set higher to overlap inference with HTTP
@@ -564,7 +584,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			for i := range fileSummaryJobs {
 				j := fileSummaryJobs[i]
 				eg.Go(func() error {
-					summary, err := summarizeFile(egctx, ix.Options.Chat, j.rel, j.slice)
+					summary, err := summarizeFile(egctx, ix.Options.Chat, ix.Options.SummaryModels.File, j.rel, j.slice)
 					if err != nil {
 						ix.Options.Logger.Warn("summarize failed", "path", j.rel, "err", err)
 						return nil
@@ -592,7 +612,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			for i := range chunkSummaryJobs {
 				j := chunkSummaryJobs[i]
 				eg.Go(func() error {
-					summary, err := summarizeChunk(egctx, ix.Options.Chat, j.rel, j.c)
+					summary, err := summarizeChunk(egctx, ix.Options.Chat, ix.Options.SummaryModels.Chunk, j.rel, j.c)
 					if err != nil {
 						ix.Options.Logger.Warn("chunk summarize failed", "path", j.rel, "start", j.c.StartLine, "err", err)
 						return nil
@@ -750,7 +770,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					if err != nil || len(fileSummaries) == 0 {
 						return nil
 					}
-					summary, err := summarizePackage(egctx, ix.Options.Chat, j.dir, fileSummaries)
+					summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
 					if err != nil {
 						ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
 						return nil
@@ -825,7 +845,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					return err
 				}
 			} else {
-				summary, err := summarizeRepo(ctx, ix.Options.Chat, pkgSummaries)
+				summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries)
 				if err != nil {
 					ix.Options.Logger.Warn("repo summarize failed", "err", err)
 				} else if strings.TrimSpace(summary) != "" {
@@ -898,7 +918,7 @@ func isStructural(kind string) bool {
 // summarizeChunk asks the chat endpoint for a 1–2 sentence description of
 // a single function, method, or class. Returns the summary text or an error.
 // Caller logs and skips on error so one bad chunk doesn't break a whole run.
-func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Chunk) (string, error) {
+func summarizeChunk(ctx context.Context, cc *chat.Client, model, rel string, c chunk.Chunk) (string, error) {
 	const system = "You are a code summarizer. Given a single function, method, or class, " +
 		"write 1–2 sentences describing what it does. " +
 		"Lead with the identifier name. " +
@@ -911,7 +931,7 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Ch
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 150, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 150, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -921,7 +941,7 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, rel string, c chunk.Ch
 // summarizePackage asks the chat endpoint for a package-level overview built
 // from the prose summaries of its constituent files. Returns the summary text
 // or an error if the chat call fails. Caller logs and skips on error.
-func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSummaries []string) (string, error) {
+func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, fileSummaries []string) (string, error) {
 	const system = "You are a code summarizer. Given prose summaries of all files in a code package or directory, " +
 		"write 2-4 sentences describing what the package does. " +
 		"Name the package path. Describe its public role in the system. " +
@@ -934,7 +954,7 @@ func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSumm
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 300, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 300, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -949,7 +969,7 @@ func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSumm
 // truncated the overview mid-word (e.g. qwen2.5-coder:7b producing a
 // per-package list that didn't fit). The prompt also forbids bullet
 // lists explicitly so the model picks prose, which tends to be denser.
-func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) (string, error) {
+func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string) (string, error) {
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
 		"write a 3-5 sentence prose paragraph describing what the repository does overall. " +
 		"PROSE ONLY — do not use bullet points, do not list packages one per line. " +
@@ -963,7 +983,7 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) 
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 1200, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 1200, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
@@ -977,7 +997,7 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) 
 // summary of one file. Returns the summary text or an error if the
 // chat call fails. Caller decides whether the failure is fatal — the
 // indexer logs and skips so one bad file doesn't break a whole run.
-func summarizeFile(ctx context.Context, cc *chat.Client, rel string, data []byte) (string, error) {
+func summarizeFile(ctx context.Context, cc *chat.Client, model, rel string, data []byte) (string, error) {
 	const system = "You are a code summarizer. Summarize this single file in 2-4 sentences so a reader can decide whether to open it. " +
 		"Lead with what the file does. Name the exported types and functions verbatim. Note any non-obvious side effects or invariants. " +
 		"No prose padding, no apologies, no restating the prompt. " +
@@ -988,7 +1008,7 @@ func summarizeFile(ctx context.Context, cc *chat.Client, rel string, data []byte
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 300, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 300, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
