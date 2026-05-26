@@ -17,33 +17,38 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// DrainPendingSummaries is Layer 3 phase 3: the drainer.
+// DrainPendingSummariesBatch processes up to `max` rows from
+// pending_summaries (file_summary + chunk_summary kinds). Pass 0 for
+// "no limit" — drain everything currently queued.
 //
-// Reads every row from pending_summaries, reconstructs each job's input
-// (read the file for file_summary, look up the source chunk for
-// chunk_summary), verifies the SHA still matches what was queued
-// (otherwise the source content changed since enqueue → silently drop
-// the row), runs the chat call, embeds + upserts the resulting summary
-// chunk, and deletes the pending row. Then walks the project's
-// file_summary chunks to generate any missing package_summary chunks
-// (these aren't queued — they cascade on file_summary content which
-// only exists once the queue drains) and finally the repo_summary.
+// Returns (generated, remaining, err):
+//   - generated: summaries upserted this call (excludes stale-drops
+//     and cache hits).
+//   - remaining: queue depth observed AFTER this batch. Caller can
+//     loop while remaining > 0 to bound per-call latency.
 //
-// Returns (newlyGenerated, error). The count excludes cache hits
-// (matching summary chunk already present) and stale-drops. Chat
-// failures bump attempts on the pending row but don't abort the
-// overall drain.
-func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
+// Does NOT cascade. Callers that want package_summary / repo_summary
+// refreshed must invoke CascadePackageRepoSummaries separately —
+// typically once the queue reaches remaining == 0.
+//
+// Cancellation is cooperative: per-row chat calls honour ctx, and
+// rows already upserted + deleted from the queue stay committed even
+// if ctx ends mid-batch. This makes the batch a safe unit of work for
+// a watcher's idle hook to schedule and preempt.
+func (ix *Indexer) DrainPendingSummariesBatch(ctx context.Context, max int) (generated, remaining int, err error) {
 	if ix.Options.Chat == nil {
-		return 0, fmt.Errorf("DrainPendingSummaries: chat client not configured")
+		return 0, 0, fmt.Errorf("DrainPendingSummariesBatch: chat client not configured")
 	}
 	startTime := time.Now()
 
-	pending, err := ix.Store.ListPendingSummaries(ctx, 0)
+	pending, err := ix.Store.ListPendingSummaries(ctx, max)
 	if err != nil {
-		return 0, fmt.Errorf("list pending: %w", err)
+		return 0, 0, fmt.Errorf("list pending: %w", err)
 	}
-	ix.Options.Logger.Info("drain: starting", "pending", len(pending))
+	if len(pending) == 0 {
+		return 0, 0, nil
+	}
+	ix.Options.Logger.Info("drain: batch starting", "pending", len(pending), "max", max)
 
 	conc := ix.Options.SummaryConcurrency
 	if conc < 1 {
@@ -100,7 +105,7 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 		})
 	}
 	if err := eg.Wait(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 
 	// Compact successful results, then embed + upsert in batches.
@@ -111,7 +116,6 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 		}
 	}
 
-	generated := 0
 	if len(successful) > 0 {
 		batchSize := ix.Embed.Batch
 		if batchSize <= 0 {
@@ -133,9 +137,9 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 				texts[i] = r.chunk.EmbedText()
 			}
 			batchStart := time.Now()
-			vecs, err := ix.Embed.Embed(ctx, texts)
-			if err != nil {
-				return generated, fmt.Errorf("embed: %w", err)
+			vecs, embErr := ix.Embed.Embed(ctx, texts)
+			if embErr != nil {
+				return generated, 0, fmt.Errorf("embed: %w", embErr)
 			}
 			rows := make([]store.PendingChunk, len(batch))
 			for i, r := range batch {
@@ -150,13 +154,13 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 					Vec:        vecs[i],
 				}
 			}
-			if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
-				return generated, fmt.Errorf("upsert: %w", err)
+			if upErr := ix.Store.UpsertMany(ctx, rows, startTime); upErr != nil {
+				return generated, 0, fmt.Errorf("upsert: %w", upErr)
 			}
 			// Only delete pending rows after the upsert succeeds.
 			for _, r := range batch {
-				if err := ix.Store.DeletePendingSummary(ctx, r.pendingID); err != nil {
-					return generated, fmt.Errorf("delete pending: %w", err)
+				if delErr := ix.Store.DeletePendingSummary(ctx, r.pendingID); delErr != nil {
+					return generated, 0, fmt.Errorf("delete pending: %w", delErr)
 				}
 			}
 			generated += len(batch)
@@ -172,28 +176,66 @@ func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
 	// index --summarize-defer run will re-enqueue with the new SHA.
 	for _, id := range stale {
 		if err := ix.Store.DeletePendingSummary(ctx, id); err != nil {
-			return generated, fmt.Errorf("delete stale pending: %w", err)
+			return generated, 0, fmt.Errorf("delete stale pending: %w", err)
 		}
 	}
 	if len(stale) > 0 {
 		ix.Options.Logger.Info("drain: dropped stale rows", "count", len(stale))
 	}
 
-	// Cascade: now that file_summary / chunk_summary chunks exist, generate
-	// any missing package_summary / repo_summary. These aren't queued; the
-	// drainer recomputes them from the current chunk set.
-	ix.Options.Logger.Info("drain: cascading package + repo summaries")
-	cascadeGen, err := ix.cascadePackageAndRepo(ctx, startTime)
-	if err != nil {
-		return generated, err
-	}
-	generated += cascadeGen
-
-	ix.Options.Logger.Info("drain: done",
+	remaining, _ = ix.Store.CountPendingSummaries(ctx)
+	ix.Options.Logger.Info("drain: batch done",
 		"generated", generated,
 		"stale_dropped", len(stale),
+		"remaining", remaining,
 		"elapsed", time.Since(startTime).Round(time.Millisecond))
-	return generated, nil
+	return generated, remaining, nil
+}
+
+// CascadePackageRepoSummaries regenerates any missing package_summary
+// and repo_summary chunks from the current file_summary state of the
+// chunks table. No-op when no file_summary chunks exist yet.
+//
+// Exposed so external callers (e.g. the watcher's idle hook) can run
+// the cascade independently of the per-batch drainer — typically once
+// DrainPendingSummariesBatch reports remaining == 0.
+func (ix *Indexer) CascadePackageRepoSummaries(ctx context.Context) (int, error) {
+	if ix.Options.Chat == nil {
+		return 0, fmt.Errorf("CascadePackageRepoSummaries: chat client not configured")
+	}
+	return ix.cascadePackageAndRepo(ctx, time.Now())
+}
+
+// DrainPendingSummaries drains the entire queue then cascades. This is
+// the all-in-one entry point used by `dex index summarize`; callers
+// that need to yield between rows (a watcher's idle hook, for
+// example) should compose DrainPendingSummariesBatch with
+// CascadePackageRepoSummaries instead.
+func (ix *Indexer) DrainPendingSummaries(ctx context.Context) (int, error) {
+	if ix.Options.Chat == nil {
+		return 0, fmt.Errorf("DrainPendingSummaries: chat client not configured")
+	}
+	total := 0
+	for {
+		gen, remaining, err := ix.DrainPendingSummariesBatch(ctx, 0)
+		if err != nil {
+			return total, err
+		}
+		total += gen
+		if remaining == 0 {
+			break
+		}
+		// max=0 drains everything in one call, so the loop normally exits
+		// on the first iteration. Kept as a safety net in case future
+		// row-filtering (e.g. attempts-based backoff) causes the same
+		// batch to leave rows behind.
+	}
+	ix.Options.Logger.Info("drain: cascading package + repo summaries")
+	cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
+	if err != nil {
+		return total, err
+	}
+	return total + cascadeGen, nil
 }
 
 // processFileSummary handles one pending file_summary row. Returns
