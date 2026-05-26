@@ -322,3 +322,147 @@ func scanChunkLocations(rows *sql.Rows, out map[string][]ChunkLocation) error {
 	}
 	return rows.Err()
 }
+
+// GraphSymbol carries the columns the guide renderer needs to list
+// exported declarations and top-centrality entry points. QualifiedName
+// is preferred over Name for display because methods carry their
+// receiver type there (e.g. "Store.Search" vs bare "Search").
+type GraphSymbol struct {
+	Name          string
+	QualifiedName string
+	Kind          string // function|method|struct|interface|type
+	FilePath      string
+	StartLine     int
+	EndLine       int
+	PageRank      float64
+	InDegree      int
+}
+
+// dirLikePattern returns the SQL LIKE pattern that matches files
+// directly under relDir (one level deep, no nested subdirs). For
+// relDir="internal/store" the pattern is "internal/store/%" and the
+// caller adds an additional `NOT LIKE 'internal/store/%/%'` clause.
+func dirLikePattern(relDir string) string { return relDir + "/%" }
+func nestedExclude(relDir string) string  { return relDir + "/%/%" }
+
+// ExportedSymbolsByDir returns Go-exported declarations whose source
+// file lives directly under relDir (not nested subdirectories).
+// Filters to declarable kinds (function, method, struct, interface,
+// type) and to capitalized names. Ordered by name. Used by the guide
+// renderer to ground "Exported API" sections in real symbols instead
+// of LLM-invented ones.
+func (s *Store) ExportedSymbolsByDir(ctx context.Context, relDir string) ([]GraphSymbol, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, qualified_name, kind, file_path, start_line, end_line, pagerank, in_degree
+		FROM graph_nodes
+		WHERE file_path LIKE ?
+		  AND file_path NOT LIKE ?
+		  AND kind IN ('function','method','struct','interface','type')
+		  AND substr(name,1,1) BETWEEN 'A' AND 'Z'
+		ORDER BY name`,
+		dirLikePattern(relDir), nestedExclude(relDir))
+	if err != nil {
+		return nil, err
+	}
+	return scanSymbols(rows)
+}
+
+// TopCentralByDir returns the top-k functions and methods under relDir
+// sorted by PageRank then by in_degree. Used by the renderer to surface
+// the "key entry points" of a module — the ground-truth answer to
+// "what should I read first?".
+func (s *Store) TopCentralByDir(ctx context.Context, relDir string, k int) ([]GraphSymbol, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT name, qualified_name, kind, file_path, start_line, end_line, pagerank, in_degree
+		FROM graph_nodes
+		WHERE file_path LIKE ?
+		  AND file_path NOT LIKE ?
+		  AND kind IN ('function','method')
+		ORDER BY pagerank DESC, in_degree DESC, name ASC
+		LIMIT ?`,
+		dirLikePattern(relDir), nestedExclude(relDir), k)
+	if err != nil {
+		return nil, err
+	}
+	return scanSymbols(rows)
+}
+
+func scanSymbols(rows *sql.Rows) ([]GraphSymbol, error) {
+	defer func() { _ = rows.Close() }()
+	var out []GraphSymbol
+	for rows.Next() {
+		var g GraphSymbol
+		if err := rows.Scan(&g.Name, &g.QualifiedName, &g.Kind, &g.FilePath, &g.StartLine, &g.EndLine, &g.PageRank, &g.InDegree); err != nil {
+			return nil, err
+		}
+		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// ImportsForDir returns the unique import targets of the Go packages
+// whose source files live under relDir. import nodes carry their
+// owning package in `package_path` (their `file_path` is empty —
+// imports are a package-level fact, not per-file), so we resolve via
+// the package set rather than filtering imports by file_path.
+func (s *Store) ImportsForDir(ctx context.Context, relDir string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		WITH our_pkgs AS (
+		  SELECT DISTINCT package_path FROM graph_nodes
+		  WHERE file_path LIKE ?
+		    AND file_path NOT LIKE ?
+		    AND package_path != ''
+		)
+		SELECT DISTINCT name FROM graph_nodes
+		WHERE kind = 'import'
+		  AND package_path IN (SELECT package_path FROM our_pkgs)
+		ORDER BY name`,
+		dirLikePattern(relDir), nestedExclude(relDir))
+	if err != nil {
+		return nil, err
+	}
+	return scanStringColumn(rows)
+}
+
+// UsedByPackages returns the Go package paths that import a package
+// whose source files live under relDir. import nodes carry their
+// importer in the package_path column (file_path is empty for them,
+// since imports are a package-level fact), so the renderer-side
+// caller strips the module prefix to display directories.
+//
+// Result excludes our_pkgs themselves so a package isn't shown as
+// using itself.
+func (s *Store) UsedByPackages(ctx context.Context, relDir string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		WITH our_pkgs AS (
+		  SELECT DISTINCT package_path FROM graph_nodes
+		  WHERE file_path LIKE ?
+		    AND file_path NOT LIKE ?
+		    AND package_path != ''
+		)
+		SELECT DISTINCT package_path FROM graph_nodes
+		WHERE kind = 'import'
+		  AND name IN (SELECT package_path FROM our_pkgs)
+		  AND package_path NOT IN (SELECT package_path FROM our_pkgs)
+		  AND package_path != ''
+		ORDER BY package_path`,
+		dirLikePattern(relDir), nestedExclude(relDir))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	return scanStringColumn(rows)
+}
+
+func scanStringColumn(rows *sql.Rows) ([]string, error) {
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var v string
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
