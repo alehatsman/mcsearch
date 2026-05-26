@@ -36,6 +36,20 @@ type Options struct {
 	// does not stop the watch loop — the chunk side is already committed
 	// and the next event can retry.
 	AfterIndex func(context.Context) error
+	// OnIdle, if non-nil, fires OnIdleAfter has elapsed since the most
+	// recent successful flush left the dirty flag false. Used to drive
+	// background summary draining: the hook gets a context that the
+	// watcher cancels as soon as the next fs event arrives, so a long
+	// drain yields immediately when the user starts editing again.
+	//
+	// Return done=true to stop the idle cycle until the next flush;
+	// done=false re-arms for another OnIdleAfter window (the hook
+	// signals "more work waiting"). Errors are logged and treated as
+	// done=true.
+	OnIdle func(ctx context.Context) (done bool, err error)
+	// OnIdleAfter is the quiet window before OnIdle fires; default 5s.
+	// Ignored when OnIdle is nil.
+	OnIdleAfter time.Duration
 }
 
 type Watcher struct {
@@ -44,10 +58,12 @@ type Watcher struct {
 	root    string
 	opts    Options
 
-	mu      sync.Mutex
-	dirty   bool // events have arrived since the last successful flush
-	running bool // a flush goroutine is currently running
-	timer   *time.Timer
+	mu         sync.Mutex
+	dirty      bool // events have arrived since the last successful flush
+	running    bool // a flush goroutine is currently running
+	timer      *time.Timer
+	idleTimer  *time.Timer        // armed after a clean flush; nil otherwise
+	idleCancel context.CancelFunc // cancels the in-flight OnIdle, if any
 }
 
 func New(idx *index.Indexer, ig *ignore.Matcher, root string, opt Options) *Watcher {
@@ -130,10 +146,20 @@ func (w *Watcher) handle(ctx context.Context, fw *fsnotify.Watcher, ev fsnotify.
 }
 
 // markDirty resets the debounce timer; on expiry it runs an index pass.
+// Also preempts any pending or in-flight idle hook — fresh events mean
+// the indexer is about to run again, so background work should yield.
 func (w *Watcher) markDirty(ctx context.Context) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.dirty = true
+	if w.idleTimer != nil {
+		w.idleTimer.Stop()
+		w.idleTimer = nil
+	}
+	if w.idleCancel != nil {
+		w.idleCancel()
+		w.idleCancel = nil
+	}
 	if w.timer != nil {
 		w.timer.Stop()
 	}
@@ -181,11 +207,64 @@ func (w *Watcher) flush(ctx context.Context) {
 		w.mu.Lock()
 		if !w.dirty || ctx.Err() != nil {
 			w.running = false
+			// Successful drain → arm idle work; on ctx-cancel skip it.
+			if ctx.Err() == nil {
+				w.armIdleLocked(ctx)
+			}
 			w.mu.Unlock()
 			return
 		}
 		w.dirty = false
 		w.mu.Unlock()
+	}
+}
+
+// armIdleLocked schedules an OnIdle tick OnIdleAfter from now. Caller
+// must hold w.mu. No-op when OnIdle is unconfigured or ctx is dead.
+func (w *Watcher) armIdleLocked(ctx context.Context) {
+	if w.opts.OnIdle == nil || ctx.Err() != nil {
+		return
+	}
+	after := w.opts.OnIdleAfter
+	if after <= 0 {
+		after = 5 * time.Second
+	}
+	if w.idleTimer != nil {
+		w.idleTimer.Stop()
+	}
+	w.idleTimer = time.AfterFunc(after, func() { w.runIdle(ctx) })
+}
+
+// runIdle invokes the OnIdle callback with a cancellable child of
+// ctx. If the next fs event arrives during the callback, markDirty
+// cancels that child so a long drain yields immediately. done=false
+// re-arms the idle timer for another window; done=true (or an error)
+// stops the cycle until the next flush.
+func (w *Watcher) runIdle(ctx context.Context) {
+	w.mu.Lock()
+	w.idleTimer = nil
+	if w.dirty || w.running || ctx.Err() != nil || w.opts.OnIdle == nil {
+		w.mu.Unlock()
+		return
+	}
+	ic, cancel := context.WithCancel(ctx)
+	w.idleCancel = cancel
+	w.mu.Unlock()
+
+	done, err := w.opts.OnIdle(ic)
+	cancel()
+	if err != nil && !errors.Is(err, context.Canceled) {
+		w.opts.Logger.Warn("idle hook failed", "err", err)
+	}
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.idleCancel = nil
+	if w.dirty || ctx.Err() != nil {
+		return
+	}
+	if !done && err == nil {
+		w.armIdleLocked(ctx)
 	}
 }
 
