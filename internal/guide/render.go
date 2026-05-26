@@ -138,9 +138,20 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	if err != nil {
 		return fmt.Errorf("exported symbols for %s: %w", dir, err)
 	}
-	central, err := st.TopCentralByDir(ctx, dir, topCentralLimit)
+	central, err := st.TopCentralByDir(ctx, dir, topCentralLimit, true)
 	if err != nil {
 		return fmt.Errorf("top central for %s: %w", dir, err)
+	}
+	// Fallback: tiny packages with no exported high-centrality nodes
+	// fall back to internal hot spots. Tagged visibly so an LLM reader
+	// doesn't mistake them for the public surface.
+	centralIsInternal := false
+	if len(central) == 0 {
+		central, err = st.TopCentralByDir(ctx, dir, topCentralLimit, false)
+		if err != nil {
+			return fmt.Errorf("top central (internal) for %s: %w", dir, err)
+		}
+		centralIsInternal = true
 	}
 	imports, err := st.ImportsForDir(ctx, dir)
 	if err != nil {
@@ -162,7 +173,11 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 
 	if len(central) > 0 {
-		fmt.Fprintf(b, "**Key entry points** (top %d by PageRank)\n\n", len(central))
+		heading := "Key entry points"
+		if centralIsInternal {
+			heading = "Key internal hot spots"
+		}
+		fmt.Fprintf(b, "**%s** (top %d by PageRank)\n\n", heading, len(central))
 		for _, s := range central {
 			fmt.Fprintf(b, "- `%s` — %s:%d — in-degree %d\n",
 				displayName(s), s.FilePath, s.StartLine, s.InDegree)

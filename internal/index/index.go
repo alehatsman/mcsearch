@@ -944,10 +944,16 @@ func summarizePackage(ctx context.Context, cc *chat.Client, dir string, fileSumm
 // summarizeRepo asks the chat endpoint for a top-level overview of the
 // whole repository, built from the per-package summaries. Stored once per
 // project and re-generated only when any package summary changes.
+//
+// Output cap was raised from 400→1200 tokens after smaller-model runs
+// truncated the overview mid-word (e.g. qwen2.5-coder:7b producing a
+// per-package list that didn't fit). The prompt also forbids bullet
+// lists explicitly so the model picks prose, which tends to be denser.
 func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) (string, error) {
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
-		"write 3-5 sentences describing what the repository does overall. " +
-		"Name the top-level packages and their roles. Describe the main data flow or pipeline. " +
+		"write a 3-5 sentence prose paragraph describing what the repository does overall. " +
+		"PROSE ONLY — do not use bullet points, do not list packages one per line. " +
+		"Name the top-level packages inline and describe their roles. Describe the main data flow or pipeline. " +
 		"Note any architectural constraints or key invariants. " +
 		"No prose padding, no apologies, no restating the prompt. " +
 		"Only mention features explicitly present in the package summaries. Do not invent features " +
@@ -957,9 +963,12 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, pkgSummaries []string) 
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{MaxTokens: 400, Temperature: 0.1})
+	}, chat.Options{MaxTokens: 1200, Temperature: 0.1})
 	if err != nil {
 		return "", err
+	}
+	if resp.FinishReason == "length" {
+		return "", fmt.Errorf("repo summary truncated at %d tokens (finish_reason=length); raise MaxTokens", 1200)
 	}
 	return strings.TrimSpace(resp.Content), nil
 }

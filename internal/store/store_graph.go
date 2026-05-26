@@ -368,16 +368,21 @@ func (s *Store) ExportedSymbolsByDir(ctx context.Context, relDir string) ([]Grap
 }
 
 // TopCentralByDir returns the top-k functions and methods under relDir
-// sorted by PageRank then by in_degree. Used by the renderer to surface
-// the "key entry points" of a module — the ground-truth answer to
-// "what should I read first?".
-func (s *Store) TopCentralByDir(ctx context.Context, relDir string, k int) ([]GraphSymbol, error) {
+// sorted by PageRank then by in_degree. When exportedOnly is true the
+// query restricts to capitalized names — useful for the renderer's
+// "Key entry points" section where a reader expects the package's
+// public surface, not its internal hot spots.
+func (s *Store) TopCentralByDir(ctx context.Context, relDir string, k int, exportedOnly bool) ([]GraphSymbol, error) {
+	visibility := ""
+	if exportedOnly {
+		visibility = " AND substr(name,1,1) BETWEEN 'A' AND 'Z'"
+	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT name, qualified_name, kind, file_path, start_line, end_line, pagerank, in_degree
 		FROM graph_nodes
 		WHERE file_path LIKE ?
 		  AND file_path NOT LIKE ?
-		  AND kind IN ('function','method')
+		  AND kind IN ('function','method')`+visibility+`
 		ORDER BY pagerank DESC, in_degree DESC, name ASC
 		LIMIT ?`,
 		dirLikePattern(relDir), nestedExclude(relDir), k)
