@@ -84,8 +84,8 @@ the `avoid` line tells Claude not to second-guess it with grep.
 
 ```bash
 git clone https://github.com/alehatsman/dex.git && cd dex
-task install       # ~/.local/bin, no sudo; atomic rename-swap so it's
-                   # safe to re-run while `dex mcp`/`watch` is live
+mooncake task install   # ~/.local/bin, no sudo; atomic rename-swap so it's
+                        # safe to re-run while `dex mcp`/`watch` is live
 ```
 
 Or via the [`dex` dotfiles component](https://github.com/alehatsman/dotfiles/tree/main/components/dex) —
@@ -93,7 +93,7 @@ which wires the embedding endpoint, SSH tunnel, and MCP registration.
 
 dex needs CGO (tree-sitter grammars + the embedded sqlite-vec
 extension) and the `sqlite_fts5` build tag (FTS5 powers the BM25 leg).
-The Taskfile and Dockerfile already pass both — use them. If
+The `tasks.yml` and Dockerfile already pass both — use them. If
 you invoke `go build` / `go install` directly, add `-tags sqlite_fts5`
 and ensure `CGO_ENABLED=1` plus a C toolchain are available.
 

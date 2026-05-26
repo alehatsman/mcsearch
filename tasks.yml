@@ -1,0 +1,215 @@
+version: '1'
+
+# Mooncake task runner for dex — the canonical entry point for developer
+# workflows in this repo. Run with: `mooncake task <name>`.
+# Bare `mooncake task` lists every task with its description.
+#
+# Templates use Pongo2 syntax ({{ VAR }}). Non-trivial shell logic lives
+# in scripts/ so this file stays scannable.
+#
+# Quick reference:
+#   mooncake task install-tools  # install every static-analysis tool the project needs
+#   mooncake task ci             # full pre-push gate: build + test + lint + vuln + arch + budget + dupl
+#   mooncake task ci-fast        # fast pre-commit gate: vet + fmt (staged) + ai-lint (staged)
+#   mooncake task ai-lint        # AI-smell sweep on staged Go files
+#   mooncake task build / test / lint / scan
+
+vars:
+  PKG: ./...
+  BIN: dex
+  # mattn/go-sqlite3 ships FTS5 only with this tag enabled; the project's
+  # chunks_fts virtual table and hybrid BM25 leg require it.
+  GO_TAGS: sqlite_fts5
+
+tasks:
+
+  # ── Tool installation. Idempotent: re-running picks up newer versions. ──
+  install-tools:
+    desc: Install every static-analysis tool the project depends on
+    steps:
+      - log: { msg: "→ Installing golangci-lint..." }
+      - shell: { cmd: "go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest" }
+      - log: { msg: "→ Installing govulncheck..." }
+      - shell: { cmd: "go install golang.org/x/vuln/cmd/govulncheck@latest" }
+      - log: { msg: "→ Installing gocyclo..." }
+      - shell: { cmd: "go install github.com/fzipp/gocyclo/cmd/gocyclo@latest" }
+      - log: { msg: "→ Installing goda..." }
+      - shell: { cmd: "go install github.com/loov/goda@latest" }
+      - log: { msg: "→ Installing dupl..." }
+      - shell: { cmd: "go install github.com/mibk/dupl@latest" }
+      - log: { msg: "✓ Tools installed. Verify with 'mooncake task check-tools'." }
+
+  check-tools:
+    desc: Report which static-analysis tools are installed
+    steps:
+      - shell:
+          cmd: |
+            missing=0
+            for tool in golangci-lint govulncheck gocyclo goda dupl; do
+              if command -v "$tool" >/dev/null 2>&1 || [ -x "$(go env GOPATH)/bin/$tool" ]; then
+                printf "  ✓ %s\n" "$tool"
+              else
+                printf "  ✗ %s — MISSING\n" "$tool"
+                missing=$((missing + 1))
+              fi
+            done
+            if [ "$missing" -gt 0 ]; then
+              echo ""
+              echo "$missing tool(s) missing. Run: mooncake task install-tools"
+              exit 1
+            fi
+
+  # ── Build / install / clean ─────────────────────────────────────────────
+  build:
+    desc: Build the dex binary
+    steps:
+      - shell: { cmd: "go mod download" }
+      - shell: { cmd: "go build -trimpath -tags '{{ GO_TAGS }}' -ldflags \"-s -w\" -o {{ BIN }} ./cmd/dex" }
+
+  install:
+    desc: Build, install dex to ~/.local/bin, and restart any running instances
+    steps:
+      - shell: { cmd: "go mod download" }
+      - shell: { cmd: "go build -trimpath -tags '{{ GO_TAGS }}' -ldflags \"-s -w\" -o {{ BIN }} ./cmd/dex" }
+      - shell:
+          cmd: |
+            INSTALL_PATH="${INSTALL_PATH:-$HOME/.local/bin}"
+            mkdir -p "$INSTALL_PATH"
+            cp {{ BIN }} "$INSTALL_PATH/{{ BIN }}.new"
+            mv -f "$INSTALL_PATH/{{ BIN }}.new" "$INSTALL_PATH/{{ BIN }}"
+            echo "✓ Installed $INSTALL_PATH/{{ BIN }}"
+            count=$(pgrep -x dex | wc -l | tr -d ' ')
+            if [ "$count" -gt 0 ]; then
+              pkill -x dex || true
+              echo "✓ Restarted $count dex process(es) — MCP clients will reconnect automatically"
+            fi
+
+  clean:
+    desc: Remove the built binary
+    steps:
+      - shell: { cmd: "rm -f {{ BIN }}" }
+      - log: { msg: "✓ Cleaned" }
+
+  # ── Test / format / vet ─────────────────────────────────────────────────
+  test:
+    desc: Run go test ./...
+    steps:
+      - shell: { cmd: "go test -tags '{{ GO_TAGS }}' {{ PKG }}" }
+
+  test-race:
+    desc: Run go test -race ./...
+    steps:
+      - shell: { cmd: "go test -race -tags '{{ GO_TAGS }}' {{ PKG }}" }
+
+  fmt:
+    desc: Format all Go files with gofmt
+    steps:
+      - shell: { cmd: "gofmt -w ." }
+
+  vet:
+    desc: Run go vet ./...
+    steps:
+      - shell: { cmd: "go vet {{ PKG }}" }
+
+  # ── Lint + security + vulnerability scans ───────────────────────────────
+  lint:
+    desc: golangci-lint (includes gosec, staticcheck, cyclop, revive, …)
+    steps:
+      - shell: { cmd: "golangci-lint run {{ PKG }}" }
+
+  vuln:
+    desc: govulncheck — scan for known vulnerabilities in dependencies
+    steps:
+      - shell: { cmd: "govulncheck {{ PKG }}" }
+
+  scan:
+    desc: Security + vulnerability scan (lint + vuln)
+    steps:
+      - shell: { cmd: "golangci-lint run {{ PKG }}" }
+      - shell: { cmd: "govulncheck {{ PKG }}" }
+
+  # ── Architecture / analysis reports ─────────────────────────────────────
+  arch-snapshot:
+    desc: Regenerate docs-working/ARCH_SNAPSHOT.md (gitignored; local read-only)
+    steps:
+      - shell: { cmd: "bash ./scripts/arch-snapshot.sh" }
+
+  budget-status:
+    desc: Show current state of code-quality soft caps (gocyclo + god files)
+    steps:
+      - shell: { cmd: "bash ./scripts/budget-status.sh" }
+
+  dupl:
+    desc: Code-duplication report (production only)
+    steps:
+      - shell: { cmd: "bash ./scripts/dupl-report.sh" }
+
+  # ── Setup ───────────────────────────────────────────────────────────────
+  setup-hooks:
+    desc: Install pre-commit and pre-push git hooks (mooncake task ci-fast / mooncake task ci)
+    steps:
+      - shell: { cmd: "bash ./scripts/setup-hooks.sh" }
+
+  # ── AI-smell sweep ──────────────────────────────────────────────────────
+  ai-lint:
+    desc: AI-smell sweep on staged Go files (stub panics, agent TODOs, prompt artifacts)
+    steps:
+      - shell: { cmd: "bash ./scripts/ai-lint.sh" }
+
+  ai-lint-all:
+    desc: AI-smell sweep on every tracked Go file
+    steps:
+      - shell: { cmd: "bash ./scripts/ai-lint.sh --all" }
+
+  # ── Fast gate — pre-commit. Cheap checks only (<5s on warm cache). ─────
+  ci-fast:
+    desc: "Pre-commit gate: vet + gofmt (staged) + ai-lint (staged)"
+    steps:
+      - log: { msg: "[1/3] go vet" }
+      - shell: { cmd: "go vet {{ PKG }}" }
+      - log: { msg: "[2/3] gofmt (staged Go files)" }
+      - shell:
+          cmd: |
+            staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.go' || true)
+            if [ -z "$staged" ]; then echo "  (no staged Go files)"; exit 0; fi
+            bad=$(echo "$staged" | xargs gofmt -l 2>/dev/null || true)
+            if [ -n "$bad" ]; then
+              echo "  ✗ gofmt would change:" >&2
+              echo "$bad" | sed 's/^/    /' >&2
+              echo "  fix with: gofmt -w <files>" >&2
+              exit 1
+            fi
+            echo "  ✓ all staged files formatted"
+      - log: { msg: "[3/3] ai-lint (staged Go files)" }
+      - shell: { cmd: "bash ./scripts/ai-lint.sh" }
+      - log: { msg: "✓ Fast checks green — full 'mooncake task ci' gate runs on push." }
+
+  # ── Full CI gate — pre-push. First failure stops the pipeline. ─────────
+  ci:
+    desc: "Pre-push gate: build + test + lint + vuln + arch + budget + dupl"
+    steps:
+      - log: { msg: "[1/7] build" }
+      - shell: { cmd: "go build -trimpath -tags '{{ GO_TAGS }}' -ldflags \"-s -w\" -o {{ BIN }} ./cmd/dex" }
+      - log: { msg: "[2/7] test" }
+      - shell: { cmd: "go test -tags '{{ GO_TAGS }}' {{ PKG }}" }
+      - log: { msg: "[3/7] golangci-lint" }
+      - shell: { cmd: "golangci-lint run {{ PKG }}" }
+      - log: { msg: "[4/7] govulncheck" }
+      - shell: { cmd: "govulncheck {{ PKG }}" }
+      - log: { msg: "[5/7] arch-snapshot" }
+      - shell:
+          cmd: |
+            bash ./scripts/arch-snapshot.sh >/dev/null
+            f=docs-working/ARCH_SNAPSHOT.md
+            if [ ! -f "$f" ]; then echo "  (snapshot file missing — skipping summary)"; exit 0; fi
+            echo "  Top packages by LOC:"
+            awk '/^\| `/{print "    " $0}' "$f" | head -5
+            god=$(awk '/^## God files/,/^## [^G]/' "$f" | grep -cE '^[[:space:]]*[0-9]+ ' || true)
+            echo "  God files (>500 LOC, non-test): $god"
+            echo "  Top cyclomatic hotspots:"
+            awk '/^## Cyclomatic hotspots/,/^## [^C]/' "$f" | grep -E '^[[:space:]]*[0-9]+ ' | head -3 | sed 's/^/    /'
+      - log: { msg: "[6/7] soft-cap budget" }
+      - shell: { cmd: "bash ./scripts/budget-status.sh | sed 's/^/  /'" }
+      - log: { msg: "[7/7] dupl (production-code duplication report)" }
+      - shell: { cmd: "bash ./scripts/dupl-report.sh --ci" }
+      - log: { msg: "✓ All checks green — safe to push." }

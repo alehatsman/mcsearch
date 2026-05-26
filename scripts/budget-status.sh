@@ -37,7 +37,7 @@ if command -v gocyclo >/dev/null 2>&1 || [ -x "$(go env GOPATH)/bin/gocyclo" ]; 
     printf '   %s✓ all functions under %d%s\n' "$green" "$CAP_GOCYCLO" "$reset"
   fi
 else
-  echo "   gocyclo not installed — run 'task install-tools'"
+  echo "   gocyclo not installed — run 'mooncake task install-tools'"
 fi
 echo
 

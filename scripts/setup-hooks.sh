@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Setup git hooks for dex development.
 #
-#   pre-commit → task ci:fast
+#   pre-commit → mooncake task ci-fast
 #     Fast gate (<5s on warm cache): go vet, gofmt on staged files,
 #     ai-lint on staged files. Catches cheap mistakes before they land.
 #
-#   pre-push → task ci
+#   pre-push → mooncake task ci
 #     Full gate: build + test + lint + vuln + arch-snapshot + budget + dupl.
 #
 # Bypass: `git commit --no-verify` or `git push --no-verify`.
@@ -31,19 +31,14 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-TASK_BIN=""
-if command -v task >/dev/null 2>&1; then
-  TASK_BIN="task"
-elif [ -x "$(go env GOPATH 2>/dev/null)/bin/task" ]; then
-  TASK_BIN="$(go env GOPATH)/bin/task"
-else
-  echo "pre-commit: 'task' (go-task) is required but not installed." >&2
-  echo "            Install: go install github.com/go-task/task/v3/cmd/task@latest" >&2
+if ! command -v mooncake >/dev/null 2>&1; then
+  echo "pre-commit: 'mooncake' is required but not installed." >&2
+  echo "            See: https://github.com/alehatsman/mooncake" >&2
   exit 1
 fi
 
-echo "pre-commit: running 'task ci:fast' (vet + gofmt + ai-lint)..."
-if ! "$TASK_BIN" ci:fast; then
+echo "pre-commit: running 'mooncake task ci-fast' (vet + gofmt + ai-lint)..."
+if ! mooncake task ci-fast; then
   echo "" >&2
   echo "pre-commit: ✗ fast gate failed. Fix the issue above and re-commit," >&2
   echo "            or 'git commit --no-verify' to bypass (not recommended)." >&2
@@ -51,7 +46,7 @@ if ! "$TASK_BIN" ci:fast; then
 fi
 HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-commit"
-echo "  ✓ pre-commit → task ci:fast"
+echo "  ✓ pre-commit → mooncake task ci-fast"
 
 # ----- pre-push --------------------------------------------------------------
 cat > "$HOOKS_DIR/pre-push" << 'HOOK_EOF'
@@ -62,19 +57,14 @@ set -e
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
-TASK_BIN=""
-if command -v task >/dev/null 2>&1; then
-  TASK_BIN="task"
-elif [ -x "$(go env GOPATH 2>/dev/null)/bin/task" ]; then
-  TASK_BIN="$(go env GOPATH)/bin/task"
-else
-  echo "pre-push: 'task' (go-task) is required but not installed." >&2
-  echo "          Install: go install github.com/go-task/task/v3/cmd/task@latest" >&2
+if ! command -v mooncake >/dev/null 2>&1; then
+  echo "pre-push: 'mooncake' is required but not installed." >&2
+  echo "          See: https://github.com/alehatsman/mooncake" >&2
   exit 1
 fi
 
-echo "pre-push: running 'task ci' (build + test + lint + vuln + arch + budget + dupl)..."
-if ! "$TASK_BIN" ci; then
+echo "pre-push: running 'mooncake task ci' (build + test + lint + vuln + arch + budget + dupl)..."
+if ! mooncake task ci; then
   echo "" >&2
   echo "pre-push: ✗ full gate failed. Fix the issue above and re-push," >&2
   echo "          or 'git push --no-verify' to bypass (not recommended)." >&2
@@ -82,19 +72,20 @@ if ! "$TASK_BIN" ci; then
 fi
 HOOK_EOF
 chmod +x "$HOOKS_DIR/pre-push"
-echo "  ✓ pre-push → task ci"
+echo "  ✓ pre-push → mooncake task ci"
 
 cat <<EOM
 
 Installed:
-  pre-commit  → 'task ci:fast' (~seconds). Catches stub panics, agent
+  pre-commit  → 'mooncake task ci-fast' (~seconds). Catches stub panics, agent
                 TODOs, and unformatted code before they land in a commit.
-  pre-push    → 'task ci'      (~1 min). Full build + test + lint + vuln
+  pre-push    → 'mooncake task ci'      (~1 min). Full build + test + lint + vuln
                 + arch-snapshot + dupl before commits leave the machine.
 
 Bypass either with --no-verify when you really need it.
 
-If 'task' isn't on PATH yet:
-  go install github.com/go-task/task/v3/cmd/task@latest
-  task install-tools
+If 'mooncake' isn't on PATH yet, install it from:
+  https://github.com/alehatsman/mooncake
+Then:
+  mooncake task install-tools
 EOM

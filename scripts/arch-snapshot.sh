@@ -134,7 +134,7 @@ EOF
 
 ## Cyclomatic hotspots
 
-_gocyclo not installed — run `task install-tools`._
+_gocyclo not installed — run `mooncake task install-tools`._
 EOF
   fi
 
@@ -159,7 +159,7 @@ EOF
 
 ## goda summary
 
-_goda not installed — run `task install-tools`._
+_goda not installed — run `mooncake task install-tools`._
 EOF
   fi
 } > "$OUT"
