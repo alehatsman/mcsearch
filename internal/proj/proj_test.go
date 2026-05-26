@@ -15,11 +15,14 @@ func TestResolveBasics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Root == "" || p.ID == "" || p.CacheDir == "" || p.DBPath == "" {
+	if p.Root == "" || p.ID == "" || p.CacheDir == "" || p.DBPath == "" || p.LockPath == "" {
 		t.Errorf("Project missing fields: %+v", p)
 	}
 	if filepath.Dir(p.DBPath) != p.CacheDir {
 		t.Errorf("DBPath %q not under CacheDir %q", p.DBPath, p.CacheDir)
+	}
+	if filepath.Dir(p.LockPath) != p.CacheDir {
+		t.Errorf("LockPath %q not under CacheDir %q", p.LockPath, p.CacheDir)
 	}
 	if len(p.ID) != 64 {
 		t.Errorf("ID should be sha256 hex (64 chars); got %d", len(p.ID))

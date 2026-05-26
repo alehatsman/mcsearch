@@ -50,6 +50,7 @@ import (
 	"github.com/alehatsman/dex/internal/graph"
 	"github.com/alehatsman/dex/internal/ignore"
 	"github.com/alehatsman/dex/internal/index"
+	"github.com/alehatsman/dex/internal/lock"
 	"github.com/alehatsman/dex/internal/mcp"
 	"github.com/alehatsman/dex/internal/proj"
 	"github.com/alehatsman/dex/internal/rerank"
@@ -472,6 +473,89 @@ func rerankPool() int {
 
 // ─── index ─────────────────────────────────────────────────────────────────
 
+// acquireProjectLock takes the per-project indexer lock. cmdName labels
+// the holder ("index"/"summarize"/"reindex"/"watch") and phase reports
+// the current pipeline stage. wait blocks until the lock is free;
+// breakLock discards an existing lockfile (only safe when the prior
+// holder is gone — a live flock cannot be stolen).
+//
+// On contention without --wait or --break-lock, prints a friendly
+// "another dex is busy here" line and returns (nil, nil) so the caller
+// can exit 0. On any other failure, returns the error.
+func acquireProjectLock(ctx context.Context, p *proj.Project, cmdName, phase string, wait, breakLock bool) (*lock.Lock, error) {
+	host, _ := os.Hostname()
+	h := lock.Holder{
+		PID:     os.Getpid(),
+		Host:    host,
+		Command: cmdName,
+		Phase:   phase,
+		Started: time.Now(),
+	}
+	if breakLock {
+		return lock.Steal(p.LockPath, h)
+	}
+	if wait {
+		return lock.AcquireWait(ctx, p.LockPath, h)
+	}
+	l, err := lock.Acquire(p.LockPath, h)
+	if err == nil {
+		return l, nil
+	}
+	if !errors.Is(err, lock.ErrLocked) {
+		return nil, err
+	}
+	holder, _ := lock.ReadHolder(p.LockPath)
+	fmt.Fprintf(os.Stderr, "another dex indexer is running on %s%s\n", p.Root, describeHolder(holder))
+	fmt.Fprintln(os.Stderr, "  pass --wait to block, or --break-lock if the holder is gone")
+	return nil, nil
+}
+
+// describeHolder formats a parenthetical for the contention message.
+// Returns "" when no holder info is available.
+func describeHolder(h *lock.Holder) string {
+	if h == nil {
+		return ""
+	}
+	var parts []string
+	if h.PID != 0 {
+		parts = append(parts, fmt.Sprintf("pid %d", h.PID))
+	}
+	if h.Command != "" {
+		parts = append(parts, fmt.Sprintf("cmd=%s", h.Command))
+	}
+	if h.Phase != "" {
+		parts = append(parts, fmt.Sprintf("phase=%s", h.Phase))
+	}
+	if !h.Started.IsZero() {
+		parts = append(parts, fmt.Sprintf("for %s", time.Since(h.Started).Round(time.Second)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (" + strings.Join(parts, ", ") + ")"
+}
+
+// clearCacheKeepLock removes everything inside p.CacheDir except the
+// lock file. Used by `reindex` so the indexer lock can be acquired
+// before the destructive sweep without removing the lockfile under
+// our own feet.
+func clearCacheKeepLock(p *proj.Project) error {
+	entries, err := os.ReadDir(p.CacheDir)
+	if err != nil {
+		return err
+	}
+	lockBase := filepath.Base(p.LockPath)
+	for _, e := range entries {
+		if e.Name() == lockBase {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(p.CacheDir, e.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // cmdIndexDispatch peels off `status` / `summarize` subcommands before
 // falling through to `cmdIndex` (which expects a single path arg).
 // Mirrors the MCP tool layout: `index_status` and `index summarize`
@@ -499,6 +583,8 @@ func cmdIndex(ctx context.Context, args []string) error {
 	summarizeDefer := fs.Bool("summarize-defer", true, "queue summaries into pending_summaries instead of generating them inline; `dex index summarize` (or watch idle) drains the queue later. Implies --summarize. Chat endpoint not required at index time. Pass --summarize-defer=false to disable.")
 	graphMode := fs.String("graph", "on", "graph phase: on|off|only ('on' runs both phases, 'off' skips graph, 'only' skips chunk/embed and just refreshes the graph)")
 	format := fs.String("format", "text", "output format: text|json")
+	waitLock := fs.Bool("wait", false, "if another dex indexer is running on this project, wait for it to finish instead of skipping")
+	breakLock := fs.Bool("break-lock", false, "discard an existing project lockfile (use only when the prior holder is gone)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -530,6 +616,14 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
+	lk, err := acquireProjectLock(ctx, p, "index", "chunk", *waitLock, *breakLock)
+	if err != nil {
+		return err
+	}
+	if lk == nil {
+		return nil // another indexer is running; message already printed
+	}
+	defer lk.Release()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
@@ -581,6 +675,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	// invalidate a fresh embed pass.
 	var gstats *graph.Stats
 	if *graphMode != "off" {
+		_ = lk.SetPhase("graph")
 		s, gerr := runGraphPhase(ctx, p, st, *verbose)
 		if gerr != nil {
 			if *graphMode == "only" {
@@ -1268,6 +1363,8 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 		"dex index summarize [flags] <path>")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	waitLock := fs.Bool("wait", false, "if another dex indexer is running on this project, wait for it to finish instead of skipping")
+	breakLock := fs.Bool("break-lock", false, "discard an existing project lockfile (use only when the prior holder is gone)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1289,6 +1386,14 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
+	lk, err := acquireProjectLock(ctx, p, "summarize", "summarize", *waitLock, *breakLock)
+	if err != nil {
+		return err
+	}
+	if lk == nil {
+		return nil // another indexer is running; message already printed
+	}
+	defer lk.Release()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
@@ -1369,6 +1474,8 @@ func cmdReindex(ctx context.Context, args []string) error {
 	yes := fs.Bool("yes", false, "confirm the destructive sweep required by --all")
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
+	waitLock := fs.Bool("wait", false, "if another dex indexer is running on this project, wait for it to finish instead of skipping")
+	breakLock := fs.Bool("break-lock", false, "discard an existing project lockfile (use only when the prior holder is gone)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1396,7 +1503,7 @@ func cmdReindex(ctx context.Context, args []string) error {
 		var failed []string
 		for _, root := range roots {
 			fmt.Printf("→ reindexing %s\n", root)
-			if err := reindexOne(ctx, root, base, *verbose, *force); err != nil {
+			if err := reindexOne(ctx, root, base, *verbose, *force, *waitLock, *breakLock); err != nil {
 				fmt.Fprintf(os.Stderr, "  ✗ %v\n", err)
 				failed = append(failed, root)
 			}
@@ -1410,13 +1517,13 @@ func cmdReindex(ctx context.Context, args []string) error {
 	if len(rest) != 1 {
 		return fmt.Errorf("reindex needs exactly one path argument (or --all)")
 	}
-	return reindexOne(ctx, rest[0], base, *verbose, *force)
+	return reindexOne(ctx, rest[0], base, *verbose, *force, *waitLock, *breakLock)
 }
 
 // reindexOne drops the existing per-project cache dir and re-runs the
 // indexer from scratch. Used by both `reindex <path>` and the loop in
 // `reindex --all`.
-func reindexOne(ctx context.Context, root, base string, verbose, force bool) error {
+func reindexOne(ctx context.Context, root, base string, verbose, force, waitLock, breakLock bool) error {
 	p, err := proj.Resolve(root, base)
 	if err != nil {
 		return err
@@ -1424,14 +1531,21 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 	if err := proj.CheckIndexable(p, force); err != nil {
 		return err
 	}
-	if _, err := os.Stat(p.CacheDir); err == nil {
-		if err := os.RemoveAll(p.CacheDir); err != nil {
-			return err
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	// Ensure the cache dir exists before acquiring the lock — the lock
+	// file lives inside it. The destructive sweep below preserves the
+	// lockfile so the holder fd stays valid.
+	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
-	if err := p.EnsureCacheDir(); err != nil {
+	lk, err := acquireProjectLock(ctx, p, "reindex", "chunk", waitLock, breakLock)
+	if err != nil {
+		return err
+	}
+	if lk == nil {
+		return nil // another indexer is running; message already printed
+	}
+	defer lk.Release()
+	if err := clearCacheKeepLock(p); err != nil {
 		return err
 	}
 	st, err := openStore(ctx, p.DBPath)
@@ -1450,6 +1564,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force bool) err
 	if err := st.SetProjectRoot(ctx, p.Root); err != nil {
 		return err
 	}
+	_ = lk.SetPhase("graph")
 	gstats, gerr := runGraphPhase(ctx, p, st, verbose)
 	if gerr != nil {
 		fmt.Fprintf(os.Stderr, "⚠ graph phase failed for %s: %v (chunk index is still usable)\n", p.Root, gerr)

@@ -17,6 +17,7 @@ type Project struct {
 	ID       string // sha256(Root) hex — primary key for the cache dir
 	CacheDir string // $DEX_INDEX_DIR/<ID>
 	DBPath   string // CacheDir/index.db
+	LockPath string // CacheDir/index.lock — cross-process indexer mutex
 }
 
 // Resolve canonicalizes path and returns the project identity. The path
@@ -49,6 +50,7 @@ func Resolve(path, baseCacheDir string) (*Project, error) {
 		ID:       id,
 		CacheDir: cache,
 		DBPath:   filepath.Join(cache, "index.db"),
+		LockPath: filepath.Join(cache, "index.lock"),
 	}, nil
 }
 
