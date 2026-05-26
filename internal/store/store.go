@@ -844,6 +844,35 @@ func (s *Store) AllSummariesByKind(ctx context.Context, kind string) ([]string, 
 	return out, rows.Err()
 }
 
+// SummaryRow carries the columns the guide renderer needs.
+// last_seen_at is unix-nanoseconds; callers compare against
+// the guide's stored render timestamp to detect dirtiness.
+type SummaryRow struct {
+	Path       string
+	Content    string
+	LastSeenAt int64
+}
+
+// SummariesByKindWithMeta returns path + content + last_seen_at for every
+// chunk of the given kind, ordered by path. Drives the guide renderer.
+func (s *Store) SummariesByKindWithMeta(ctx context.Context, kind string) ([]SummaryRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, content, last_seen_at FROM chunks WHERE kind = ? ORDER BY path`, kind)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SummaryRow
+	for rows.Next() {
+		var r SummaryRow
+		if err := rows.Scan(&r.Path, &r.Content, &r.LastSeenAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // SearchSummaries runs a semantic search restricted to summary-kind chunks
 // (file_summary, package_summary, repo_summary). Fetches a larger candidate
 // pool than k to compensate for summaries being sparse relative to code

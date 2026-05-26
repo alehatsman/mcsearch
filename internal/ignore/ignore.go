@@ -79,6 +79,7 @@ var DefaultPatterns = []string{
 	".git/",
 	".hg/",
 	".svn/",
+	".dex/",
 	"*.log",
 	"*.lock",
 	"*.min.js",

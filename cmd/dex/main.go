@@ -24,6 +24,7 @@
 //	reindex <path>|--all          Drop and re-embed.
 //	watch <path>                  Keep the index fresh as files change.
 //	clone <src> <dst>             Seed dst's index from src's (worktrees).
+//	guide <path>                  Render LLM_GUIDE.txt from existing summaries.
 //	mcp                           Run as an MCP server over stdio.
 //	version                       Print the build version.
 package main
@@ -96,6 +97,8 @@ func main() {
 		err = cmdWatch(ctx, args)
 	case "clone":
 		err = cmdClone(ctx, args)
+	case "guide":
+		err = cmdGuide(ctx, args)
 	case "version", "-V", "--version":
 		fmt.Println(mcp.Version)
 		return
@@ -181,6 +184,12 @@ build / maintenance:
   dex clone  <src> <dst>             seed dst's index from src's (e.g. for a
                                           new git worktree); follow with
                                           `+"`dex index <dst>`"+` to reconcile
+  dex guide  <path>                  render LLM_GUIDE.txt from existing
+                                          repo + package summaries (zero LLM
+                                          calls — summaries are already
+                                          chunks). Flags: --full, --check,
+                                          --dry-run. Pre-commit usage:
+                                          `+"`dex index <path> && dex guide <path>`"+`
   dex mcp                            run as an MCP server over stdio
   dex version                        print the build version
 
