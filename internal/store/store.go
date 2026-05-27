@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
@@ -95,16 +96,29 @@ type Options struct {
 	// = better recall but slower rerank call.
 	RerankPool int
 
+	// RerankTimeout is the per-call deadline applied to the rerank
+	// request. A hung rerank endpoint must not stretch the whole `ask`
+	// round-trip past the MCP timeout. Zero = 1500ms.
+	RerankTimeout time.Duration
+
+	// RerankCache, when non-nil, memoizes rerank results across calls
+	// keyed on (query, sorted fused ids). Nil = the Store allocates a
+	// 256-entry LRU on first use. Set explicitly to a sized cache to
+	// override; pass a no-op cache to disable.
+	RerankCache RerankCache
+
 	// MaxHitsPerFile, when > 0, caps results returned per unique file path.
 	// Applied after ranking, before final truncation to k. Zero = no cap.
 	MaxHitsPerFile int
 }
 
 type Store struct {
-	db         *sql.DB
-	dim        atomic.Int64 // vector dimension; set once on first upsert, read concurrently
-	embedModel atomic.Value // string: model identity; "" until set by EnsureEmbedModel or recovered from meta
-	opts       Options      // immutable after Open
+	db          *sql.DB
+	dim         atomic.Int64 // vector dimension; set once on first upsert, read concurrently
+	embedModel  atomic.Value // string: model identity; "" until set by EnsureEmbedModel or recovered from meta
+	opts        Options      // immutable after Open
+	rerankCache RerankCache  // memoizes rerank results across calls; lazily set on first use
+	rerankInit  sync.Once    // guards lazy rerankCache init
 }
 
 // Open opens or creates the SQLite file at path with default
@@ -1163,10 +1177,35 @@ func inPlaceholders(n int) string {
 // rerank fetches `Content` for the fused pool, sends (query, docs) to
 // the reranker, maps the returned indices back to chunk IDs, and
 // returns the top-k slice together with a per-id rerank score map.
+//
+// Two safeguards beyond the bare delegation:
+//   - Per-call deadline derived from Options.RerankTimeout (default 1500ms).
+//     A hung rerank endpoint must not stretch the whole `ask` round-trip
+//     past the MCP timeout. Deadline expiry is wrapped as
+//     rerank.ErrUnreachable so the caller's existing fallback triggers.
+//   - In-process LRU keyed on (query, sorted fused ids). Interactive
+//     sessions iterate on the same query repeatedly; the cache avoids
+//     paying the rerank network call for an identical (query, id-set).
 func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k int) ([]scored, map[int64]float32, error) {
 	if len(fused) == 0 {
 		return nil, nil, nil
 	}
+
+	// Cache lookup: identical (query, id-set) returns the prior result.
+	cache := s.getRerankCache()
+	ids := make([]int64, len(fused))
+	for i, sc := range fused {
+		ids[i] = sc.id
+	}
+	key := rerankCacheKey(queryText, ids)
+	if cached, ok := cache.Get(key); ok {
+		out := cached.scored
+		if len(out) > k {
+			out = out[:k]
+		}
+		return out, cached.rerankScore, nil
+	}
+
 	idArgs := make([]any, len(fused))
 	for i, sc := range fused {
 		idArgs[i] = sc.id
@@ -1201,10 +1240,25 @@ func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k 
 		docs = append(docs, c)
 		docIDs = append(docIDs, sc.id)
 	}
-	scores, err := s.opts.Reranker.Rerank(ctx, queryText, docs)
+
+	timeout := s.opts.RerankTimeout
+	if timeout <= 0 {
+		timeout = 1500 * time.Millisecond
+	}
+	rerankCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	scores, err := s.opts.Reranker.Rerank(rerankCtx, queryText, docs)
 	if err != nil {
+		// Surface a deadline as ErrUnreachable so the existing fallback
+		// in Search degrades to the pre-rerank ordering. Without this,
+		// the timeout would propagate as DeadlineExceeded and bubble
+		// up to the caller as a hard search failure.
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return nil, nil, fmt.Errorf("%w: rerank timed out after %s", rerank.ErrUnreachable, timeout)
+		}
 		return nil, nil, err
 	}
+
 	reranked := make([]scored, 0, len(scores))
 	rerankScore := make(map[int64]float32, len(scores))
 	for _, sc := range scores {
@@ -1215,10 +1269,26 @@ func (s *Store) rerank(ctx context.Context, queryText string, fused []scored, k 
 		reranked = append(reranked, scored{id: id, score: sc.Score})
 		rerankScore[id] = sc.Score
 	}
+	// Cache the full ranked slice (before k truncation) so a follow-up
+	// query for a different k against the same id-set still benefits.
+	cache.Put(key, rerankCached{scored: append([]scored(nil), reranked...), rerankScore: rerankScore})
 	if len(reranked) > k {
 		reranked = reranked[:k]
 	}
 	return reranked, rerankScore, nil
+}
+
+// getRerankCache returns the configured RerankCache, lazily allocating
+// a default 256-entry LRU on first call.
+func (s *Store) getRerankCache() RerankCache {
+	s.rerankInit.Do(func() {
+		if s.opts.RerankCache != nil {
+			s.rerankCache = s.opts.RerankCache
+		} else {
+			s.rerankCache = newRerankLRU(256)
+		}
+	})
+	return s.rerankCache
 }
 
 // scoreSemantic returns up to `limit` chunks ranked by cosine similarity

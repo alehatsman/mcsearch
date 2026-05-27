@@ -688,6 +688,15 @@ func buildSummarizeSystem(focus string) string {
 
 type StatusInput struct{}
 
+// BreakerStatus mirrors rerank.BreakerState in the index_status JSON.
+// Surfaced under StatusOutput.RerankBreaker so operators can see when
+// the breaker is open (and until when) without grepping logs.
+type BreakerStatus struct {
+	Open             bool   `json:"open"`
+	OpenUntil        string `json:"open_until,omitempty"`
+	ConsecutiveFails int    `json:"consecutive_fails,omitempty"`
+}
+
 type ProjectStatus struct {
 	ID               string `json:"id"`
 	Root             string `json:"root,omitempty"`
@@ -710,6 +719,7 @@ type StatusOutput struct {
 	RerankEndpoint    string          `json:"rerank_endpoint,omitempty"`
 	RerankReachable   bool            `json:"rerank_reachable,omitempty"`
 	RerankModel       string          `json:"rerank_model,omitempty"`
+	RerankBreaker     *BreakerStatus  `json:"rerank_breaker,omitempty"`
 	CompressEndpoint  string          `json:"compress_endpoint,omitempty"`
 	CompressReachable bool            `json:"compress_reachable,omitempty"`
 	CompressModel     string          `json:"compress_model,omitempty"`
@@ -743,6 +753,17 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 	if s.RerankClient != nil {
 		out.RerankEndpoint = s.RerankClient.Endpoint()
 		out.RerankModel = s.RerankClient.ModelName()
+		// Surface circuit-breaker state if the rerank client is wrapped.
+		// A type assertion avoids leaking rerank.Breaker into the server's
+		// signature; callers that wire a bare client (no breaker) skip this.
+		if br, ok := s.RerankClient.(interface{ State() rerank.BreakerState }); ok {
+			st := br.State()
+			bs := &BreakerStatus{Open: st.Open, ConsecutiveFails: st.ConsecutiveFails}
+			if !st.OpenUntil.IsZero() {
+				bs.OpenUntil = st.OpenUntil.Format(time.RFC3339)
+			}
+			out.RerankBreaker = bs
+		}
 	}
 	if s.CompressClient != nil {
 		out.CompressEndpoint = s.CompressClient.Endpoint()

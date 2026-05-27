@@ -1997,9 +1997,16 @@ func cmdMCP(ctx context.Context, args []string) error {
 // that need it for separate purposes (e.g. health reporting) don't
 // have to redundantly construct another instance.
 func newServerFromEnv(base string) (*mcp.Server, rerank.HealthChecker) {
-	rerankClient := newRerankClient()
+	var rerankClient rerank.HealthChecker = newRerankClient()
 	opts := storeOpts()
 	if rerankClient != nil {
+		// Wrap in a circuit breaker so a hung rerank backend doesn't
+		// drag every search through its full timeout for the next 30s
+		// after a string of failures. The same wrapper is shared by
+		// status (RerankClient) and search (StoreOpts.Reranker) so the
+		// breaker state in `dex index status` reflects what callers
+		// actually see.
+		rerankClient = rerank.NewBreaker(rerankClient, 3, 30*time.Second)
 		opts.Reranker = rerankClient
 	}
 	srv := &mcp.Server{
