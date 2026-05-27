@@ -2,8 +2,8 @@ package store
 
 import (
 	"container/list"
-	"crypto/sha1"
-	"encoding/hex"
+	"encoding/binary"
+	"hash/fnv"
 	"sort"
 	"strconv"
 	"sync"
@@ -55,6 +55,15 @@ func newRerankLRU(capacity int) *rerankLRU {
 	}
 }
 
+// entryOf unwraps the list element's Value. The two-value form keeps
+// errcheck happy; the assertion is infallible by construction since
+// every PushFront writes a *lruEntry, but yielding ok=false on a stray
+// type means a misbehaving caller gets a miss rather than a panic.
+func entryOf(el *list.Element) (*lruEntry, bool) {
+	e, ok := el.Value.(*lruEntry)
+	return e, ok
+}
+
 func (c *rerankLRU) Get(key string) (rerankCached, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -63,14 +72,19 @@ func (c *rerankLRU) Get(key string) (rerankCached, bool) {
 		return rerankCached{}, false
 	}
 	c.ll.MoveToFront(el)
-	return el.Value.(*lruEntry).val, true
+	if e, ok := entryOf(el); ok {
+		return e.val, true
+	}
+	return rerankCached{}, false
 }
 
 func (c *rerankLRU) Put(key string, val rerankCached) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if el, ok := c.index[key]; ok {
-		el.Value.(*lruEntry).val = val
+		if e, ok := entryOf(el); ok {
+			e.val = val
+		}
 		c.ll.MoveToFront(el)
 		return
 	}
@@ -80,24 +94,29 @@ func (c *rerankLRU) Put(key string, val rerankCached) {
 		oldest := c.ll.Back()
 		if oldest != nil {
 			c.ll.Remove(oldest)
-			delete(c.index, oldest.Value.(*lruEntry).key)
+			if e, ok := entryOf(oldest); ok {
+				delete(c.index, e.key)
+			}
 		}
 	}
 }
 
 // rerankCacheKey builds a stable key from (query, fused ids). The fused
 // pool comes in score order — we sort by id so cosmetically different
-// orderings of the same set hit the cache.
+// orderings of the same set hit the cache. FNV-64a is a non-cryptographic
+// hash; the only failure mode is a key collision, which costs a wasted
+// cache miss not a security breach.
 func rerankCacheKey(query string, ids []int64) string {
 	sorted := make([]int64, len(ids))
 	copy(sorted, ids)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	h := sha1.New()
-	h.Write([]byte(query))
-	h.Write([]byte{0})
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(query))
+	_, _ = h.Write([]byte{0})
+	var buf [8]byte
 	for _, id := range sorted {
-		h.Write([]byte(strconv.FormatInt(id, 10)))
-		h.Write([]byte{','})
+		binary.LittleEndian.PutUint64(buf[:], uint64(id))
+		_, _ = h.Write(buf[:])
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	return strconv.FormatUint(h.Sum64(), 16)
 }

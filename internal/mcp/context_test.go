@@ -279,8 +279,8 @@ func TestIsBuildOrConfigPath(t *testing.T) {
 		"package.json":   false,
 	}
 	for p, want := range tests {
-		if got := isBuildOrConfigPath(p); got != want {
-			t.Errorf("isBuildOrConfigPath(%q) = %v, want %v", p, got, want)
+		if got := pathTags(p).has(tagBuild); got != want {
+			t.Errorf("pathTags(%q).has(tagBuild) = %v, want %v", p, got, want)
 		}
 	}
 }
@@ -296,8 +296,8 @@ func TestIsDocPath(t *testing.T) {
 		"cmd/main.py":             false,
 	}
 	for p, want := range tests {
-		if got := isDocPath(p); got != want {
-			t.Errorf("isDocPath(%q) = %v, want %v", p, got, want)
+		if got := pathTags(p).has(tagDoc); got != want {
+			t.Errorf("pathTags(%q).has(tagDoc) = %v, want %v", p, got, want)
 		}
 	}
 }
@@ -822,8 +822,8 @@ func TestIsFixturePath(t *testing.T) {
 		"docs/README.md":                                false,
 	}
 	for path, want := range cases {
-		if got := isFixturePath(path); got != want {
-			t.Errorf("isFixturePath(%q) = %v, want %v", path, got, want)
+		if got := pathTags(path).has(tagFixture); got != want {
+			t.Errorf("pathTags(%q).has(tagFixture) = %v, want %v", path, got, want)
 		}
 	}
 }

@@ -685,9 +685,9 @@ func (s *Server) runSemanticLane(ctx context.Context, st *store.Store, question 
 	return out, false
 }
 
-// Path-classification helpers (isDocPath, isTestPath, isNonImplPath,
-// pathTags, …) live in path_tags.go — one rule table for every demotion
-// the suggested_reads ranker applies.
+// Path-classification helpers (isTestPath, isNonImplPath, pathTags)
+// live in path_tags.go — one rule table for every demotion the
+// suggested_reads ranker applies.
 
 // ─── suggested_reads ──────────────────────────────────────────────────────
 

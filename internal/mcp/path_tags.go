@@ -87,13 +87,9 @@ func isFixturePathRaw(p string) bool {
 	return false
 }
 
-// The legacy isXPath helpers are thin wrappers over pathTags. They
-// remain because callers thread different demotion rules through the
-// same input — and because keeping the names stable means the ranker's
-// branching logic still reads naturally.
-
-func isDocPath(p string) bool           { return pathTags(p).has(tagDoc) }
-func isBuildOrConfigPath(p string) bool { return pathTags(p).has(tagBuild) }
-func isTestPath(p string) bool          { return pathTags(p).has(tagTest) }
-func isFixturePath(p string) bool       { return pathTags(p).has(tagFixture) }
-func isNonImplPath(p string) bool       { return pathTags(p) != 0 }
+// Thin wrappers over pathTags for the two demotions production code
+// actually threads as distinct rules. Doc / build / fixture variants
+// are exercised by context_test.go through pathTags(p).has(...) so
+// the rule table stays under test without needing a per-bucket helper.
+func isTestPath(p string) bool    { return pathTags(p).has(tagTest) }
+func isNonImplPath(p string) bool { return pathTags(p) != 0 }
