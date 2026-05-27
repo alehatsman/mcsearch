@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the entry point package, output file, inputs (repo/package summary chunks and graph data), and the mechanical sections generated from graph data, matching all key details in the ground truth."
+}

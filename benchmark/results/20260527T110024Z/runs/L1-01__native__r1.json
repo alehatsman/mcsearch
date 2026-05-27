@@ -1,0 +1,81 @@
+{
+  "qid": "L1-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "Where is `Store.UpsertMany` defined? Give the file and line.",
+  "ground_truth": "`internal/store/store.go:546` — `func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Time) error`.",
+  "started": 1779879633,
+  "finished": 1779879670,
+  "wall_seconds": 37,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 36990,
+    "duration_api_ms": 38536,
+    "ttft_ms": 34704,
+    "num_turns": 2,
+    "result": "`internal/store/store.go:546`",
+    "stop_reason": "end_turn",
+    "session_id": "ff0b0098-e3a0-4e60-9168-d2e9e2c49cfe",
+    "total_cost_usd": 0.029225899999999996,
+    "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 4746,
+      "cache_read_input_tokens": 30308,
+      "output_tokens": 119,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 4746,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 14,
+          "cache_read_input_tokens": 17447,
+          "cache_creation_input_tokens": 160,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 160
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000539,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 4,
+        "outputTokens": 119,
+        "cacheReadInputTokens": 30308,
+        "cacheCreationInputTokens": 4746,
+        "webSearchRequests": 0,
+        "costUSD": 0.028686899999999994,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "9c6ffca0-3913-4189-a1cc-4a6f842acab3"
+  }
+}

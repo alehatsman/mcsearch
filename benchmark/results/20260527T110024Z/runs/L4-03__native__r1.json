@@ -1,0 +1,81 @@
+{
+  "qid": "L4-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "Why are timestamps stored as Unix nanoseconds rather than seconds? What goes wrong otherwise?",
+  "ground_truth": "`PruneUnseen` uses a strict-less-than cutoff on `last_seen`. With second-resolution timestamps, the index pass and the prune call can both happen in the same wall-clock second, so freshly-upserted rows can have `last_seen == cutoff` and be wrongly deleted. Nanoseconds make the collision astronomically unlikely. See `internal/store/store.go` (UpsertMany / PruneUnseen) — timestamps are `time.Time.UnixNano()`.",
+  "started": 1779880353,
+  "finished": 1779880377,
+  "wall_seconds": 24,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 25280,
+    "duration_api_ms": 26369,
+    "ttft_ms": 3827,
+    "num_turns": 7,
+    "result": "The reason is explained directly in `store.go:9-13` and confirmed by the regression test at `index_test.go:236-276`.\n\n**The problem:** `PruneUnseen` deletes chunks where `last_seen_at < cutoff` (strict less-than). The cutoff is the timestamp recorded at the *start* of an index run. If two consecutive runs complete within the same millisecond and timestamps were stored in milliseconds, both runs would produce the same cutoff value. Then `last_seen_at < cutoff` would be false for all rows the first run touched — nothing would be pruned, even for files that were deleted between the two runs.\n\n**Why nanoseconds fix it:** Even two back-to-back in-process calls to `time.Now()` differ by at least ~100 ns on modern hardware, so the second run's cutoff always strictly exceeds the first run's `last_seen_at` values. The strict-less-than predicate then correctly identifies stale rows (files deleted between the two runs) and deletes them.\n\nThe regression is directly tested in `TestPruneAtSameMillisecond` (`index_test.go:240`): it deletes `a.go` between two runs forced to complete within the same millisecond and asserts the stale chunks are pruned.",
+    "stop_reason": "end_turn",
+    "session_id": "c1abb15f-46ab-4824-932e-b3af2bf94dc8",
+    "total_cost_usd": 0.07603025,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 8717,
+      "cache_read_input_tokens": 90005,
+      "output_tokens": 1052,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8717,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 305,
+          "cache_read_input_tokens": 21069,
+          "cache_creation_input_tokens": 509,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 509
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000539,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 1052,
+        "cacheReadInputTokens": 90005,
+        "cacheCreationInputTokens": 8717,
+        "webSearchRequests": 0,
+        "costUSD": 0.07549125,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "9f6a8050-d0cc-487e-8d3a-71f7903d58d4"
+  }
+}

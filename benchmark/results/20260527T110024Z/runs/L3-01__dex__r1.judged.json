@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that Go code does not write to chunk_vecs directly, that the mechanism is SQLite triggers on the chunks table (INSERT/UPDATE/DELETE), that UpsertMany is the entry point that drives the triggers, and even correctly notes the one-time migration backfill — all matching the ground truth with additional accurate detail."
+}

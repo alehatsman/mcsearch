@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all main concerns: canonical path resolution, SHA-256-based cache dir derivation, DBPath/LockPath exposure, and the indexability guard with home-dir/system-root denial and the git work-tree check — matching the ground truth completely."
+}

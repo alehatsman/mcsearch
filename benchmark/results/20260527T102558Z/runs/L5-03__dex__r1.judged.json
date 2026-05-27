@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The agent correctly identifies internal/mcp/server.go and splitting into a new server_*.go file, but misses the store layer (internal/store/store.go for new queries) and README.md tool table, both of which the ground truth calls out as required edits."
+}

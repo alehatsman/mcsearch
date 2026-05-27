@@ -1,0 +1,81 @@
+{
+  "qid": "L4-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Why are timestamps stored as Unix nanoseconds rather than seconds? What goes wrong otherwise?",
+  "ground_truth": "`PruneUnseen` uses a strict-less-than cutoff on `last_seen`. With second-resolution timestamps, the index pass and the prune call can both happen in the same wall-clock second, so freshly-upserted rows can have `last_seen == cutoff` and be wrongly deleted. Nanoseconds make the collision astronomically unlikely. See `internal/store/store.go` (UpsertMany / PruneUnseen) — timestamps are `time.Time.UnixNano()`.",
+  "started": 1779880322,
+  "finished": 1779880352,
+  "wall_seconds": 30,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 31191,
+    "duration_api_ms": 32097,
+    "ttft_ms": 7550,
+    "num_turns": 3,
+    "result": "The answer is documented in the package comment at `internal/store/store.go:9-13` and the mechanism spans `UpsertMany` + `PruneUnseen`.\n\n**The mechanism:**\n\n`PruneUnseen` deletes rows where `last_seen_at < cutoff` (strict less-than). The cutoff is a timestamp captured *before* the index pass starts; `UpsertMany` stamps every upserted row with `time.Now().UnixNano()` during the pass.\n\n**What goes wrong with lower resolution:**\n\nIf timestamps had only second (or millisecond) resolution, the cutoff capture and the upserts could land on the same wall-clock tick, producing `last_seen_at == cutoff` for freshly-written rows. The strict `<` predicate then *wrongly deletes* rows that were just indexed — i.e., chunks for files that still exist get pruned because the cutoff equals their `last_seen_at`.\n\nThe result: files present in the repo appear to vanish from the index after a fast index run.\n\n**Why nanoseconds fix it:**\n\n`time.Time.UnixNano()` on Linux has true nanosecond resolution, so the cutoff (taken before the pass) is always strictly less than any `last_seen_at` written during the pass. The `<` predicate then correctly identifies only rows that weren't touched by the current run (i.e., genuinely stale/deleted files).\n\nThere's a regression test for this at `internal/index/index_test.go:236-276` (`TestPruneAtSameMillisecond`).",
+    "stop_reason": "end_turn",
+    "session_id": "b3e22419-30da-4324-964a-28a99ddff8d3",
+    "total_cost_usd": 0.06475505000000001,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 8341,
+      "cache_read_input_tokens": 55071,
+      "output_tokens": 1093,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8341,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 835,
+          "cache_read_input_tokens": 19219,
+          "cache_creation_input_tokens": 7048,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 7048
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000539,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 1093,
+        "cacheReadInputTokens": 55071,
+        "cacheCreationInputTokens": 8341,
+        "webSearchRequests": 0,
+        "costUSD": 0.06421605,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "c736f29d-2b31-4477-926d-550da18b5b8e"
+  }
+}

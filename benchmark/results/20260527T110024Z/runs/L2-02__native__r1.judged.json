@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the role of internal/guide (renders LLM_GUIDE.md from store data), names the right entry-point concepts, lists all the key inputs (repo summary, package summaries, graph data), and describes the output structure accurately — matching and expanding on the ground truth without hallucinating."
+}

@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that dim is baked into the vec0 DDL at creation time, that changing to a model with a different output dim requires a full reindex, and that this is enforced by the schema — all matching the ground truth. The answer provides additional correct detail about the runtime mismatch check and the silent-corruption gap for same-dim model swaps, which is extra correct information rather than contradiction."
+}

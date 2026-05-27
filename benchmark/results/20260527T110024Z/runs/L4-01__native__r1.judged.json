@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all major stages and responsible packages in order: watch/debounce (internal/watch), index walk (internal/index), ignore filtering, chunking (internal/chunk with tree-sitter), embedding (internal/embed via OpenAI-compatible endpoint), upsert into store with FTS5 and sqlite-vec (internal/store), and pruning stale rows — matching the ground truth with additional correct detail."
+}

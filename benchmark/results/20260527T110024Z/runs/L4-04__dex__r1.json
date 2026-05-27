@@ -1,0 +1,81 @@
+{
+  "qid": "L4-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Why does dex use SQLite triggers to populate `chunks_fts` and `chunk_vecs` instead of writing those tables directly from Go?",
+  "ground_truth": "Both are SQLite virtual tables (FTS5 + sqlite-vec `vec0`). Writing to them must go through specific INSERT/DELETE shapes — getting that wrong corrupts the index. Centralising the mirror logic in triggers means there is exactly one place that maintains the invariant `chunks ↔ chunks_fts` and `chunks ↔ chunk_vecs`, regardless of which Go path (UpsertMany, PruneUnseen, backfill) touched the base table. Callers never need to know about the virtual tables.",
+  "started": 1779880377,
+  "finished": 1779880408,
+  "wall_seconds": 31,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 31491,
+    "duration_api_ms": 31928,
+    "ttft_ms": 2607,
+    "num_turns": 7,
+    "result": "Three reasons, grounded in the code:\n\n**1. FTS5 external-content requires a fiddly tombstone protocol** (`store.go:159–177`)\n\n`chunks_fts` is declared `content='chunks', content_rowid='id'` — it stores *only tokenizer state*, no text. FTS5 external-content tables don't self-maintain; DELETE and UPDATE must use a special tombstone `INSERT INTO chunks_fts(chunks_fts, ...) VALUES ('delete', ...)` syntax. Getting this wrong silently corrupts the index. Encoding it once in three triggers is far safer than requiring every Go write site to remember the protocol.\n\n**2. `chunk_vecs` doesn't exist at startup — it's created lazily** (`store.go:315–348`)\n\n`vec0` requires a concrete `FLOAT[dim]` at `CREATE TABLE` time, and `dim` is only known after the first embedding arrives. `chunk_vecs` is created by `ensureVecTable` on the first `UpsertMany`. If Go code were responsible for writing it directly, every write site would need to check whether the table exists yet. Triggers mean callers just write `chunks` and the mirror happens automatically once the table materializes.\n\n**3. Single write surface across many mutators** (`store.go:159`, `STORAGE.md`)\n\n`chunks` is mutated by `UpsertMany`, `PruneUnseen`, `DeletePath`, `DeletePathPrefix`, and more. Without triggers, all of them would need to replicate sync logic for two virtual tables with *incompatible* write semantics (FTS5 tombstones vs. plain vec0 rows). Triggers make `chunks` the only surface callers touch — the virtual tables follow automatically, atomically, within the same SQLite transaction.\n\nThe one exception is the one-shot backfill at `store.go:366–370` for pre-vec0 indexes, where `ensureVecTable` directly `INSERT ... SELECT`s existing rows because triggers only fire on future writes.",
+    "stop_reason": "end_turn",
+    "session_id": "e83d2930-a594-4ea5-944d-b30949e0d507",
+    "total_cost_usd": 0.11524055,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 16831,
+      "cache_read_input_tokens": 109831,
+      "output_tokens": 1240,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 16831,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 473,
+          "cache_read_input_tokens": 32469,
+          "cache_creation_input_tokens": 2302,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2302
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 468,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000548,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 1240,
+        "cacheReadInputTokens": 109831,
+        "cacheCreationInputTokens": 16831,
+        "webSearchRequests": 0,
+        "costUSD": 0.11469255,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "77c793c9-1479-4239-a468-1dcd77ee18fd"
+  }
+}

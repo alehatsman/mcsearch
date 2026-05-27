@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that no Go code writes to chunk_vecs directly, that SQLite triggers on the chunks table (INSERT/UPDATE/DELETE) keep chunk_vecs in sync, that UpsertMany is the only public write path into chunks, and even notes the one-shot backfill migration case. All key details match the ground truth with correct file references."
+}

@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "Correctly identifies the file internal/store/store.go and the line number is close enough (542 vs 546) — minor off-by-a-few difference likely due to version differences, but the file and function are correct."
+}

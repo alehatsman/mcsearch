@@ -1,0 +1,81 @@
+{
+  "qid": "L2-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "What is `internal/proj`? List its main concerns.",
+  "ground_truth": "Project root resolution + cache-dir layout + indexability guard. Computes `CacheDir = baseCacheDir/sha256(realpath(root))`, exposes `DBPath` / `LockPath`, and the guard refuses to index dangerous roots (e.g. `$HOME`, non-git non-allowlisted dirs).",
+  "started": 1779879874,
+  "finished": 1779879900,
+  "wall_seconds": 26,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 26639,
+    "duration_api_ms": 22592,
+    "ttft_ms": 4868,
+    "num_turns": 6,
+    "result": "`internal/proj` has two concerns:\n\n**1. Project resolution (`proj.go`)**\n- `Resolve(path, baseCacheDir)` — canonicalizes a user-supplied path (resolves symlinks) and constructs a `Project` struct.\n- `Project` holds `Root`, `ID` (SHA-256 hex of root path), `CacheDir`, `DBPath`, and `LockPath`.\n- `EnsureCacheDir()` — creates the per-project cache directory (`0755`).\n\n**2. Indexing safety guard (`guard.go`)**\n- `CheckIndexable(*Project, force bool)` — gates whether a project root is safe to index.\n- Hard-denies a set of critical system paths (`systemHardDeny`).\n- Soft-denies paths outside the user's home directory unless `force` is set or the path is in the `DEX_ALLOW_PATHS` env-var allowlist.\n- Requires the path to be inside a git work tree (or submodule) unless force/allowlisted.\n\nIn short: the package owns the identity of a project on disk and decides whether it's safe to index.",
+    "stop_reason": "end_turn",
+    "session_id": "543d61e7-9ca3-4f7e-b3e1-39bd4e7d3612",
+    "total_cost_usd": 0.0437814,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 1294,
+      "cache_read_input_tokens": 92093,
+      "output_tokens": 717,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 1294,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 273,
+          "cache_read_input_tokens": 18694,
+          "cache_creation_input_tokens": 1044,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1044
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 449,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000519,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 717,
+        "cacheReadInputTokens": 92093,
+        "cacheCreationInputTokens": 1294,
+        "webSearchRequests": 0,
+        "costUSD": 0.0432624,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "95b30131-68eb-4c6a-a20f-c8b5c3581bd5"
+  }
+}

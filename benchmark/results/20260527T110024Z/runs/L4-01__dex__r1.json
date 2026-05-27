@@ -1,0 +1,81 @@
+{
+  "qid": "L4-01",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Trace the path of a single saved file from filesystem change to becoming searchable. Name every stage and the package responsible.",
+  "ground_truth": "1. `internal/watch` (fsnotify) sees the write, debounces 500ms.\n2. On flush, `internal/index` walks the project (respecting `internal/ignore`), chunks each eligible file with `internal/chunk` (tree-sitter).\n3. Chunks are embedded via `internal/embed` (HTTP to OpenAI-shape /v1/embeddings).\n4. `internal/store.UpsertMany` writes rows into `chunks`; triggers populate `chunks_fts` (FTS5) and `chunk_vecs` (sqlite-vec).\n5. `internal/graph` rebuilds the Go static graph and PageRank.\n6. Optional summary passes (chunk/file/package/repo) via `internal/chat`.\n7. `internal/store.PruneUnseen` removes rows from the previous indexing generation.\nAfter step 4 the file is searchable via `Store.Search`.",
+  "started": 1779880180,
+  "finished": 1779880232,
+  "wall_seconds": 52,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 53675,
+    "duration_api_ms": 54234,
+    "ttft_ms": 3309,
+    "num_turns": 6,
+    "result": "Here is the complete trace, every stage with its responsible package and key call site:\n\n---\n\n## Stage 1 — FS event capture · `internal/watch` + `fsnotify`\n\n`Watcher.Run` (`watch.go:81`) opens an `fsnotify.Watcher` and calls `addWatches` recursively on the project root. Raw `fsnotify.Event` (Write/Create/Rename/Remove) flows into `handle()` (`watch.go:117`), which filters through `internal/ignore` (ignored paths + non-indexable extensions). New directory creates get `fw.Add()`-ed to maintain coverage.\n\n---\n\n## Stage 2 — Debounce · `internal/watch`\n\nQualifying events reach `markDirty()` (`watch.go:151`): sets `dirty=true`, cancels any in-flight idle work, resets `time.AfterFunc(500ms, flush)`. Every subsequent event within the window restarts the clock. After the quiet window, `flush()` fires (`watch.go:169`). If a flush is already running, `dirty=true` causes it to re-loop — no concurrent indexers ever run.\n\n---\n\n## Stage 3 — Directory walk + mtime filter · `internal/index`\n\n`Indexer.Run` (`index.go:137`) calls `filepath.WalkDir` on the project root. Each file is checked:\n- **Mtime fast-path**: mtime ≤ last index time → `TouchPath()` only, skip.\n- **SHA fast-path**: content hash unchanged → bump `last_seen_at`, skip.\n- **Slow path**: changed/new file → `pathTask` sent to a worker pool.\n\n---\n\n## Stage 4 — Read + parse into chunks · `internal/index` workers + `internal/chunk`\n\nWorker goroutines read file bytes; `internal/ignore` rejects binaries (`LooksBinary`) and secrets (`LooksLikeSecret`). Surviving content goes to `chunk.Chunks()` (`chunk.go:232`): for known languages, tree-sitter extracts structural declarations (functions, methods, types) + orphan sliding windows; unknown files get a plain sliding-window fallback.\n\n---\n\n## Stage 5 — SHA dedup · `internal/index` + `internal/store`\n\nPass 2 calls `Store.ExistingSHAsBatch()` — one batch query against SQLite — to identify which `(path, content_sha1)` pairs are already stored. Unchanged chunks get `TouchSeen()` (bumps `last_seen_at`); genuinely new/changed chunks are enqueued in `toEmbed`.\n\n---\n\n## Stage 6 — Embedding · `internal/embed`\n\n`embed.Client.Embed()` batches chunk text (path + kind + name header prepended to source via `Chunk.EmbedText()`) and POSTs to the configured `/v1/embeddings` endpoint (vLLM / Ollama / TEI). Returns `[][]float32` vectors.\n\n---\n\n## Stage 7 — Upsert to SQLite · `internal/store`\n\n`Store.UpsertMany()` (`store.go:546`) writes each chunk (content, metadata, float32 vector BLOB) into the `chunks` table via `INSERT … ON CONFLICT DO UPDATE`. Two SQLite triggers fire synchronously on each row:\n- → mirrors vector into `chunk_vecs` (sqlite-vec `vec0` virtual table — cosine KNN)\n- → mirrors text into `chunks_fts` (FTS5 — BM25)\n\n**The chunk is searchable immediately after this commit.**\n\n---\n\n## Stage 8 — Prune stale rows · `internal/store`\n\n`PruneUnseen` deletes `chunks` rows with `last_seen_at < run start time` — files that have been deleted or moved away since the run began.\n\n---\n\n## Stage 9 — Graph rebuild (via `AfterIndex` hook) · `internal/graph`\n\n`graph.Indexer.Run` (`graph.go:251`) re-runs `ExtractGo` (go/packages static analysis) + `ExtractYAML`, calls `linkChunks` to join graph nodes to their chunk rows, upserts via `GraphUpsertNodes`/`GraphUpsertEdges`, prunes, then `ComputeCentrality` (PageRank + in/out-degree + cross-pkg callers) → `GraphSetCentrality`. Errors are logged but don't kill the watcher.\n\n---\n\n## Stage 10 — Summary drain (async/idle) · `internal/index` + `internal/chat`\n\nAfter `OnIdleAfter` (default 5s) of quiet, `IdleSummaryDrainer` calls `DrainPendingSummariesBatch`: LLM summaries are generated for deferred chunks via `internal/chat`, then embedded and upserted back into `chunks` (chunk → file → package → repo summary cascade). Any new fs event cancels the in-flight drain immediately.\n\n---\n\n**Summary table:**\n\n| Stage | Package | Key call |\n|---|---|---|\n| 1. FS event | `internal/watch` + `fsnotify` | `Watcher.handle()` · `watch.go:117` |\n| 2. Debounce | `internal/watch` | `markDirty()` → `flush()` · `watch.go:151,169` |\n| 3. Dir walk + mtime filter | `internal/index` | `Indexer.Run` / `filepath.WalkDir` · `index.go:137` |\n| 4. Read + chunk | `internal/index` workers + `internal/chunk` | `chunk.Chunks()` · `chunk.go:232` |\n| 5. SHA dedup | `internal/index` + `internal/store` | `Store.ExistingSHAsBatch`, `TouchSeen` |\n| 6. Embed | `internal/embed` | `embed.Client.Embed()` |\n| 7. Upsert → **searchable** | `internal/store` | `Store.UpsertMany()` · `store.go:546` |\n| 8. Prune stale | `internal/store` | `PruneUnseen` |\n| 9. Graph rebuild | `internal/graph` | `graph.Indexer.Run` · `graph.go:251` |\n| 10. Summary drain | `internal/index` + `internal/chat` | `IdleSummaryDrainer` / `DrainPendingSummariesBatch` |\n\nThe file becomes cosine-searchable and BM25-searchable at **Stage 7** — the moment `UpsertMany` commits. Graph centrality scores (Stage 9) and LLM summaries (Stage 10) arrive asynchronously but don't gate retrieval.",
+    "stop_reason": "end_turn",
+    "session_id": "4bf2ecdb-ae5a-4226-8e63-d6d66ed7209e",
+    "total_cost_usd": 0.14354119999999998,
+    "usage": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 22054,
+      "cache_read_input_tokens": 84029,
+      "output_tokens": 2338,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 22054,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 1686,
+          "cache_read_input_tokens": 28527,
+          "cache_creation_input_tokens": 11460,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 11460
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 461,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000536,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 8,
+        "outputTokens": 2338,
+        "cacheReadInputTokens": 84029,
+        "cacheCreationInputTokens": 22054,
+        "webSearchRequests": 0,
+        "costUSD": 0.1430052,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "92ccfb09-ef47-4b4b-854f-d56ad117eb36"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies internal/watch as a filesystem watcher that debounces fsnotify events and triggers re-indexing, and correctly names the 500ms default debounce for Options.Debounce."
+}

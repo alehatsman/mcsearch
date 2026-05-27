@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the file (internal/store/store.go), the function (Search at line 928), and the RRF constant rrfK = 60 at line 924, matching the ground truth exactly."
+}

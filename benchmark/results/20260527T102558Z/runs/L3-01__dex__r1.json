@@ -1,0 +1,81 @@
+{
+  "qid": "L3-01",
+  "mode": "dex",
+  "rep": 1,
+  "question": "What writes to the `chunk_vecs` virtual table? Trace the actual mechanism.",
+  "ground_truth": "Nothing in Go code writes to `chunk_vecs` directly. It is a `vec0` virtual table populated by SQLite triggers on the base `chunks` table (`internal/store/store.go` around lines 333-358): INSERT on `chunks` fires a trigger that mirrors `chunks.vec` into `chunk_vecs.embedding`; UPDATE/DELETE keep them in sync. Callers only ever upsert into `chunks` via `Store.UpsertMany`.",
+  "started": 1779877866,
+  "finished": 1779877889,
+  "wall_seconds": 23,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 22343,
+    "duration_api_ms": 22937,
+    "ttft_ms": 2365,
+    "num_turns": 4,
+    "result": "**Nothing in Go writes to `chunk_vecs` directly.** The mechanism is entirely SQLite triggers on the base `chunks` table.\n\n## Mechanism (`internal/store/store.go:315–373`)\n\n`ensureVecTable` creates the `vec0` virtual table and three triggers:\n\n```sql\n-- INSERT on chunks → mirror embedding into chunk_vecs\nchunks_vec_ai  AFTER INSERT ON chunks\n  → INSERT INTO chunk_vecs(rowid, embedding) VALUES (new.id, new.vec)\n\n-- DELETE on chunks → remove from chunk_vecs\nchunks_vec_ad  AFTER DELETE ON chunks\n  → DELETE FROM chunk_vecs WHERE rowid = old.id\n\n-- UPDATE of vec on chunks → delete + reinsert\nchunks_vec_au  AFTER UPDATE OF vec ON chunks\n  → DELETE + INSERT\n```\n\n## Write path that drives the triggers\n\n1. **`Store.UpsertMany`** (`store.go:542`) — the only public write path. It `INSERT … ON CONFLICT DO UPDATE` into `chunks` (never touches `chunk_vecs`). The triggers fire automatically in-transaction.\n\n2. **`PruneUnseen` / `DeletePath` / `DeletePathPrefix`** — delete from `chunks`; `chunks_vec_ad` fires and removes the corresponding `chunk_vecs` rows.\n\n3. **One-shot backfill** (`store.go:355–373`) — for indexes that pre-date sqlite-vec: if `chunk_vecs` is empty but `chunks` is not, `ensureVecTable` runs `INSERT INTO chunk_vecs(rowid, embedding) SELECT id, vec FROM chunks` directly (this is the only explicit Go-side write to `chunk_vecs`, and it only runs once on migration).\n\n## When `ensureVecTable` runs\n\nIt's a no-op until `dim` is known. `dim` is set either from `meta.dim` on `Store.Open`, or on the **first call to `UpsertMany`** when it stores the dim and then calls `ensureVecTable` (`store.go:519–528`). After that, all subsequent `chunks` mutations keep `chunk_vecs` in sync automatically via the triggers.",
+    "stop_reason": "end_turn",
+    "session_id": "a2fe55f0-a1e1-4b76-8ac7-0795a945b63f",
+    "total_cost_usd": 0.0792575,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 13810,
+      "cache_read_input_tokens": 49380,
+      "output_tokens": 806,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 13810,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 522,
+          "cache_read_input_tokens": 18592,
+          "cache_creation_input_tokens": 8079,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8079
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000545,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 806,
+        "cacheReadInputTokens": 49380,
+        "cacheCreationInputTokens": 13810,
+        "webSearchRequests": 0,
+        "costUSD": 0.07871249999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "09a5fa84-8f8c-4ef6-8007-1bf7cf880fb1"
+  }
+}

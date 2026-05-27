@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The agent correctly identifies internal/mcp/server.go (registration) and a handler file, but misses important files from the ground truth: the store layer (internal/store/store.go for new queries), README.md tool table updates, and test files — making it an incomplete answer."
+}

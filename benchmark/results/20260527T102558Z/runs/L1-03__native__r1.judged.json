@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies internal/store/store.go, names the Search function (and searchRaw as the implementation), and gives the correct rrfK=60 constant at line 924."
+}

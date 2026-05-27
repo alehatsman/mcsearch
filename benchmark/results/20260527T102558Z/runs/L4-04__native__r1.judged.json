@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the core invariant-maintenance rationale (one place that keeps chunks ↔ chunks_fts and chunks ↔ chunk_vecs consistent regardless of which Go path touches the base table), explains the FTS5 external-content protocol complexity, and notes that callers never need to know about the virtual tables — all matching the ground truth's key points, with additional correct technical detail."
+}

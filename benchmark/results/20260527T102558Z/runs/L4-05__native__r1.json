@@ -1,0 +1,81 @@
+{
+  "qid": "L4-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is the concurrency model for an index running concurrently with a watch on the same project?",
+  "ground_truth": "`internal/lock` takes a POSIX flock on a lock file inside the per-project cache dir (`flock(LOCK_EX|LOCK_NB)` in `internal/lock/lock.go:60`). Both `dex index` and `dex watch` acquire this lock around their write phases; whichever loses gets `EWOULDBLOCK` and bails out (rather than corrupting the index). The kernel releases the lock automatically if the holder dies, so a crashed dex never leaves a stuck lock.",
+  "started": 1779878420,
+  "finished": 1779878464,
+  "wall_seconds": 44,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 44607,
+    "duration_api_ms": 45290,
+    "ttft_ms": 2788,
+    "num_turns": 10,
+    "result": "Here is the complete concurrency model:\n\n---\n\n## Concurrency model: `dex index` vs `dex watch` on the same project\n\n### Cross-process mutual exclusion — the project lock\n\nBoth `index` and `watch` call `acquireProjectLock` (`cmd/dex/main.go:538`) before doing any work. This takes a **POSIX `flock(2)` exclusive lock** on `<CacheDir>/index.lock` (`internal/lock/lock.go:60`).\n\n- `flock` is non-blocking by default. If another process holds it, `lock.Acquire` returns `ErrLocked` immediately.\n- The caller prints \"another dex indexer is running\" and exits 0 unless `--wait` (→ `AcquireWait`: exponential backoff up to 2 s between polls) or `--break-lock` (→ `Steal`: removes the file and re-acquires) was passed.\n- The kernel releases the lock automatically on process death, even SIGKILL — no stale-lock cleanup needed.\n\n**Result: only one of `index` or `watch` can run at a time on the same project, system-wide.**\n\n---\n\n### Within-process watch concurrency (the `flush` serializer)\n\nInside `watch.Watcher`, a `sync.Mutex` (`w.mu`) guards `dirty`, `running`, and the timers. The flush logic (`watch.go:169`) enforces a **single-indexer invariant**:\n\n```\nflush() {\n    lock w.mu\n    if w.running → leave dirty=true, return   // already indexing, will re-run\n    w.dirty = false; w.running = true\n    unlock\n\n    loop:\n        w.indexer.Run(ctx)                    // the full index pass\n        lock; if dirty → clear, loop again    // coalesce events that arrived mid-run\n        else w.running = false; arm idle; unlock; return\n}\n```\n\n- `time.AfterFunc` fires `flush` on its own goroutine after the debounce window (default 500 ms).\n- If a second timer fires while an index is in flight, `w.running == true` causes it to return immediately; `dirty=true` ensures the in-flight pass re-loops.\n- **No two `index.Indexer.Run` calls ever overlap**, even if dozens of fs events arrive during a long embed pass.\n\n---\n\n### Inside a single index run\n\n`index.Indexer.Run` (`internal/index/index.go:137`) uses its own internal concurrency:\n\n- **Pass 1**: a pool of `GOMAXPROCS` worker goroutines fan out file reads and tree-sitter parsing over `pathCh`/`resultCh` channels; the walker is single-threaded (cheap IO + serial SQLite `TouchPath` updates avoid writer contention).\n- **Pass 3b** (inline summaries): `errgroup` bounded by `SummaryConcurrency` for parallel chat calls.\n- All SQLite writes (`TouchSeen`, `UpsertMany`, `PruneUnseen`) go through `store.Store`, which manages its own connection pool — concurrent reads are fine; the serial plan phases avoid piling write contention.\n\n---\n\n### Summary\n\n| Layer | Mechanism | Guarantee |\n|---|---|---|\n| Cross-process | `flock(2)` on `index.lock` | Only one `dex` command touches the project DB at a time |\n| Within-watch | `sync.Mutex` + `running` flag | At most one `indexer.Run` in flight; extra events coalesce |\n| Within-index | `errgroup` + worker pool | Bounded parallelism on IO/chat; serial SQLite writes |",
+    "stop_reason": "end_turn",
+    "session_id": "775a4f0b-3d0d-4e47-b86f-7e9ca859e1b9",
+    "total_cost_usd": 0.1921559,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 29058,
+      "cache_read_input_tokens": 189048,
+      "output_tokens": 1728,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 29058,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 888,
+          "cache_read_input_tokens": 41034,
+          "cache_creation_input_tokens": 885,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 885
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 457,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000527,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 1728,
+        "cacheReadInputTokens": 189048,
+        "cacheCreationInputTokens": 29058,
+        "webSearchRequests": 0,
+        "costUSD": 0.1916289,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "ab157c10-fa3d-47cd-ba46-abb9e203fb25"
+  }
+}

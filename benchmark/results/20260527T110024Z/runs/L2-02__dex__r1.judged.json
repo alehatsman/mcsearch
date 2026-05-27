@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the role of internal/guide (renders LLM_GUIDE.md from store data), the correct inputs (repo summary, package summaries, graph data), the entry point (guide.Render in internal/guide/render.go), and adds accurate extra detail about incremental guards and config — all consistent with the ground truth."
+}

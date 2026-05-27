@@ -1,0 +1,81 @@
+{
+  "qid": "L5-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "If I want to add a new MCP tool (say `mcp__dex__find_imports`), what files do I edit?",
+  "ground_truth": "- `internal/mcp/server.go` — add the handler method, register it in the tool list assembled by `RunStdio` / server initialisation.\n- `internal/mcp/<tool>.go` if you split it out, plus a `_test.go`.\n- The store layer if a new query is needed (e.g. `internal/store/store.go` with a corresponding `Store.FindImports`).\n- `README.md` MCP tool table.\n- `LLM_GUIDE.md` is regenerated, do not hand-edit.\nNo changes to `internal/index`, `internal/watch`, `internal/embed` etc.",
+  "started": 1779880804,
+  "finished": 1779880820,
+  "wall_seconds": 16,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 17233,
+    "duration_api_ms": 18415,
+    "ttft_ms": 1843,
+    "num_turns": 5,
+    "result": "The pattern is clear. To add a new MCP tool like `mcp__dex__find_imports`, you edit **two files**:\n\n---\n\n### 1. `internal/mcp/server_graph.go` (if it's a graph tool) or `internal/mcp/server.go` (for others)\n\nAdd:\n- The `Input` / `Output` structs\n- The unexported handler method `func (s *Server) findImports(ctx context.Context, _ *sdk.CallToolRequest, in FindImportsInput) (*sdk.CallToolResult, FindImportsOutput, error)`\n- The exported wrapper `func (s *Server) FindImports(ctx context.Context, in FindImportsInput) (FindImportsOutput, error)` (so CLI commands can reuse it)\n\nSince `find_imports` is import-related, `server_graph.go` is the right home — it already handles `graph_deps` which deals with import edges (`server_graph.go:42-60`).\n\n### 2. `internal/mcp/server.go` — `RunStdio` function (~line 860)\n\nRegister the tool with the SDK:\n```go\nsdk.AddTool(srv, &sdk.Tool{\n    Name:        \"find_imports\",\n    Description: \"...\",\n}, s.findImports)\n```\n\nAll existing tools follow exactly this two-part pattern: handler+types in their respective file, registration in `RunStdio`.",
+    "stop_reason": "end_turn",
+    "session_id": "f503b907-e346-4a5e-8bdc-c2f0bd61e4d2",
+    "total_cost_usd": 0.11272835,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 20463,
+      "cache_read_input_tokens": 80927,
+      "output_tokens": 743,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 20463,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 344,
+          "cache_read_input_tokens": 32307,
+          "cache_creation_input_tokens": 1017,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1017
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 466,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005510000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 743,
+        "cacheReadInputTokens": 80927,
+        "cacheCreationInputTokens": 20463,
+        "webSearchRequests": 0,
+        "costUSD": 0.11217735,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "bf79df32-6290-41e8-88cd-7f39a2e1e0ff"
+  }
+}

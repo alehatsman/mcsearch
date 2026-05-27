@@ -1,0 +1,81 @@
+{
+  "qid": "L5-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "If I want to add support for a new language (say Rust) to the chunker, what packages and code areas are involved?",
+  "ground_truth": "- `internal/chunk` — register the tree-sitter Rust grammar, add a language detector branch (by extension), and a chunking strategy (which node kinds become chunk boundaries — `fn`, `impl`, etc.).\n- `go.mod` — add the tree-sitter Rust grammar Go binding.\n- `internal/ignore` — confirm Rust-specific build dirs (`target/`) are excluded.\n- `internal/graph` is Go-only via `go/packages`; Rust would not get graph nodes unless a separate extractor is added (out of scope for chunker-only support).\n- Tests: `internal/chunk/*_test.go` add fixtures for a `.rs` file.\nEmbedding/store/search are language-agnostic — no changes there.",
+  "started": 1779880872,
+  "finished": 1779880907,
+  "wall_seconds": 35,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 35119,
+    "duration_api_ms": 35785,
+    "ttft_ms": 3362,
+    "num_turns": 7,
+    "result": "Note: **Rust is already supported** in this codebase. Here's the full map of what's involved for any new language (using Rust as the worked example):\n\n---\n\n## Required changes\n\n### `internal/chunk/chunk.go` — primary work\n\n**1. Import the tree-sitter grammar** (lines 19–31):\n```go\n\"github.com/smacker/go-tree-sitter/rust\"\n```\n\n**2. Register in `languages` map** (`chunk.go:110–153`) — extension → `langConfig{*sitter.Language, nodeKinds}`:\n```go\n\".rs\": {rust.GetLanguage(), set(\n    \"function_item\", \"struct_item\", \"enum_item\",\n    \"impl_item\", \"trait_item\", \"mod_item\",\n)},\n```\nThe dispatch entry point is `Chunks()` at `chunk.go:232`: looks up extension in this map, runs tree-sitter, falls back to sliding-window if unknown.\n\n**3. `containerMethods` map** (`chunk.go:159–186`) — if the language has methods nested inside containers (Rust's `impl`/`trait` → `function_item`). This causes nested methods to be emitted as separate chunks with `Parent` set to the container name.\n\n### `internal/ignore/ignore.go`\n\n- **`IndexableExtensions`** (`ignore.go:117`): add the extension so `IndexableExt()` lets files through the walk filter — without this the file never reaches the chunker.\n- **`defaultIgnore` patterns** (`ignore.go:74`): add language-specific build dirs (e.g. `target/` for Rust).\n\n### `go.mod`\n\nAdd the `github.com/smacker/go-tree-sitter/<lang>` dependency.\n\n---\n\n## Optional (but recommended)\n\n| File | What |\n|------|------|\n| `internal/ignore/ignore.go:~265` | Skip test files (e.g. `*_test.rs`) |\n| `internal/mcp/context.go:~1368` | Add `extractXImports()` — per-language import extraction for `search_symbol` context assembly. Dispatched by a hand-rolled switch on extension. |\n| `internal/chunk/chunk_test.go` | Fixture cases for the new extension |\n\n---\n\n## What you do NOT touch\n\n- `internal/embed`, `internal/store`, `internal/index` — operate on `[]Chunk` regardless of language.\n- `internal/graph` — Go-only via `go/packages`; a new language gets no call-graph nodes without a separate extractor.",
+    "stop_reason": "end_turn",
+    "session_id": "680fe005-6c6e-4d8b-bcdb-1f4164d00cef",
+    "total_cost_usd": 0.12161125,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 17493,
+      "cache_read_input_tokens": 111855,
+      "output_tokens": 1459,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 17493,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 691,
+          "cache_read_input_tokens": 33493,
+          "cache_creation_input_tokens": 1936,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1936
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 464,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000544,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 1459,
+        "cacheReadInputTokens": 111855,
+        "cacheCreationInputTokens": 17493,
+        "webSearchRequests": 0,
+        "costUSD": 0.12106725,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "4e62a2ab-fca8-458f-934d-b5bd4108d520"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "qid": "L3-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "When `dex watch` sees a change, what runs and in what order?",
+  "ground_truth": "`internal/watch` debounces fsnotify events (default 500ms), then on the timer flush it runs the indexer pass first (walk → chunk → embed → upsert into store) and then the graph rebuild (`internal/graph` via `go/packages` + YAML extractor + PageRank). Summaries are produced asynchronously if configured.",
+  "started": 1779880043,
+  "finished": 1779880067,
+  "wall_seconds": 24,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 25516,
+    "duration_api_ms": 26883,
+    "ttft_ms": 2777,
+    "num_turns": 6,
+    "result": "Here is the complete picture of what runs and in what order when `dex watch` sees a change:\n\n---\n\n**Trigger: any `Create`, `Write`, `Remove`, or `Rename` fs event on a non-ignored path**\n\n1. **`markDirty`** (`watch.go:151`) — cancels any in-flight idle timer/context, resets the debounce timer.\n\n2. **Debounce window** (default 500 ms, `--debounce` flag) — the timer resets on every event within the window; `flush` only fires once the fs goes quiet.\n\n3. **`indexer.Run`** (`watch.go:188`) — full `index.Indexer` walk. Because the indexer is content-hash incremental, only changed files get re-embedded. If `autoSummarizeEnabled()` is true (a chat/summary URL is set), this also queues new chunk summaries into `pending_summaries` (deferred, not inline).\n\n4. **`AfterIndex` hook** (`watch.go:197`) — calls `runGraphPhase` (`main.go:1831`), which rebuilds the Go static graph in the same SQLite file.\n\n5. **If dirty again** (events landed during steps 3–4): loop back to step 3 in the same goroutine — no concurrent indexers.\n\n6. **`OnIdle` hook** (only when auto-summarize is enabled) — armed `OnIdleAfter` (default 5 s) after a clean flush. Fires `ix.IdleSummaryDrainer` to drain `pending_summaries` in batches (`DEX_SUMMARIZE_BATCH`, default 10). If the drain signals `done=false` (more work pending), the idle timer re-arms. A new fs event cancels the in-flight drain immediately via context cancellation.\n\n**Key files:**\n- `internal/watch/watch.go:117` — event filter and `markDirty`\n- `internal/watch/watch.go:169` — `flush` loop (steps 3–5)\n- `cmd/dex/main.go:1831` — `AfterIndex` wired to `runGraphPhase`\n- `cmd/dex/main.go:1841` — `OnIdle` wired to `IdleSummaryDrainer`",
+    "stop_reason": "end_turn",
+    "session_id": "7b0fae8e-3786-486d-87c2-d8596a8a902e",
+    "total_cost_usd": 0.08407709999999999,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 12446,
+      "cache_read_input_tokens": 71662,
+      "output_tokens": 1024,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 12446,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 556,
+          "cache_read_input_tokens": 22908,
+          "cache_creation_input_tokens": 2399,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2399
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 453,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000528,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 1024,
+        "cacheReadInputTokens": 71662,
+        "cacheCreationInputTokens": 12446,
+        "webSearchRequests": 0,
+        "costUSD": 0.08354909999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "2a3df992-e295-4846-8cf9-441c5e754ba7"
+  }
+}

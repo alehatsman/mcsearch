@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies both key responsibilities: splitting source files into bounded chunks using tree-sitter grammars, and producing the chunks that feed the indexer — with accurate extra detail about fallback behavior and size limits."
+}

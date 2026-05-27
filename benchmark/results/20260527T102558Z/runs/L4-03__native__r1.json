@@ -1,0 +1,81 @@
+{
+  "qid": "L4-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "Why are timestamps stored as Unix nanoseconds rather than seconds? What goes wrong otherwise?",
+  "ground_truth": "`PruneUnseen` uses a strict-less-than cutoff on `last_seen`. With second-resolution timestamps, the index pass and the prune call can both happen in the same wall-clock second, so freshly-upserted rows can have `last_seen == cutoff` and be wrongly deleted. Nanoseconds make the collision astronomically unlikely. See `internal/store/store.go` (UpsertMany / PruneUnseen) — timestamps are `time.Time.UnixNano()`.",
+  "started": 1779878296,
+  "finished": 1779878326,
+  "wall_seconds": 30,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 30602,
+    "duration_api_ms": 32236,
+    "ttft_ms": 2083,
+    "num_turns": 6,
+    "result": "The answer is in `internal/store/store.go:9-13` and the regression test at `internal/index/index_test.go:236-276`.\n\n**The core issue:** `PruneUnseen` (`store.go:656`) deletes rows with `last_seen_at < cutoff` (strict less-than). The cutoff is the timestamp recorded at the start of an index run. If two consecutive runs complete within the same **millisecond**, millisecond-precision timestamps would be identical — the second run's cutoff equals the first run's `last_seen_at`, so `<` is false and stale rows from deleted files survive the prune instead of being evicted.\n\nWith **nanosecond** precision, successive runs always produce strictly increasing timestamps (Go's `time.Now()` has nanosecond resolution on Linux), so the strict-less-than comparison reliably identifies rows that weren't touched by the latest run.\n\n**What goes wrong otherwise:** files deleted between two rapid index runs would appear to still be indexed — their chunks would never be pruned, leaving stale embeddings in the DB indefinitely.",
+    "stop_reason": "end_turn",
+    "session_id": "1aac3eb3-f212-4d73-ab45-8291a97ef34b",
+    "total_cost_usd": 0.0627731,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 7568,
+      "cache_read_input_tokens": 69287,
+      "output_tokens": 870,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 7568,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 256,
+          "cache_read_input_tokens": 19970,
+          "cache_creation_input_tokens": 459,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 459
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000539,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 870,
+        "cacheReadInputTokens": 69287,
+        "cacheCreationInputTokens": 7568,
+        "webSearchRequests": 0,
+        "costUSD": 0.06223410000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "cf48ac3b-bddb-4c6a-9b39-e9233e5091a8"
+  }
+}

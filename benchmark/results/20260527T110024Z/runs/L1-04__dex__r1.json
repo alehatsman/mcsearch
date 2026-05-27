@@ -1,0 +1,81 @@
+{
+  "qid": "L1-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Which function resolves a project root path to its cache directory? File and signature.",
+  "ground_truth": "`internal/proj/proj.go:26` — `func Resolve(path, baseCacheDir string) (*Project, error)`. Companion: `(*Project).EnsureCacheDir` at `internal/proj/proj.go:58`.",
+  "started": 1779879724,
+  "finished": 1779879735,
+  "wall_seconds": 11,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 9708,
+    "duration_api_ms": 10382,
+    "ttft_ms": 2463,
+    "num_turns": 3,
+    "result": "`internal/proj/proj.go:26` — `func Resolve(path, baseCacheDir string) (*Project, error)`\n\nIt canonicalizes the path (abs + symlink resolution), SHA-256 hashes the real path to produce a stable ID, and sets `CacheDir = filepath.Join(baseCacheDir, id)`.\n\nCompanion: `(*Project).EnsureCacheDir` at `internal/proj/proj.go:58`.",
+    "stop_reason": "end_turn",
+    "session_id": "fc11128f-b125-4dc0-9d8c-6ac841ec9540",
+    "total_cost_usd": 0.030102700000000003,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 2160,
+      "cache_read_input_tokens": 54629,
+      "output_tokens": 338,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 2160,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 108,
+          "cache_read_input_tokens": 18352,
+          "cache_creation_input_tokens": 2160,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2160
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 453,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000523,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 338,
+        "cacheReadInputTokens": 54629,
+        "cacheCreationInputTokens": 2160,
+        "webSearchRequests": 0,
+        "costUSD": 0.0295797,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "3a32d9e2-1be2-4012-82b5-65f5f14518c4"
+  }
+}

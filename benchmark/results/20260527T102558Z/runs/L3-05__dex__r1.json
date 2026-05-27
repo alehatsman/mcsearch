@@ -1,0 +1,81 @@
+{
+  "qid": "L3-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "How does the agent's `mcp__dex__ask` tool relate to the lower-level MCP tools (search, find_symbol, graph_*)?",
+  "ground_truth": "`ask` is the primary, composite MCP tool. The other tools (`search_semantic`, `search_symbol`, `graph_callers`/`callees`/`deps`/`neighbors`, `view_summarize`) are the legs `ask` composes — it plans a retrieval, calls those legs internally, and returns a synthesised answer. Defined in `internal/mcp`.",
+  "started": 1779878059,
+  "finished": 1779878091,
+  "wall_seconds": 32,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 32727,
+    "duration_api_ms": 33309,
+    "ttft_ms": 2062,
+    "num_turns": 6,
+    "result": "Here's the precise picture:\n\n**`ask` is a query planner / compositor** (`internal/mcp/context.go:257`, handler `contextRouter`). It does not call the other MCP tools as tool invocations — it calls the **same underlying Go functions** those tools expose, in a single server-side request:\n\n1. **Intent routing** (`resolveIntent`) — classifies the question into one of `behavior_search | symbol_lookup | callers | callees | architecture | package_topology | editing_context`, then extracts identifier candidates from the text.\n\n2. **Symbol lane** (`runSymbolLane`, `context.go:313`) — the same SQL lookup `search_symbol` uses. Runs whenever identifier-shaped tokens are detected, regardless of intent.\n\n3. **Semantic lane** (`runSemanticLane`, `context.go:318`) — the same cosine+BM25 hybrid search `search_semantic` performs. Always runs (unless the embedding service is offline).\n\n4. **Summary lane** (`runSummaryLane`, `context.go:323`) — activated for `architecture` / `package_topology` intents; merges package/file summary chunks into semantic hits.\n\n5. **Graph expansion** (`enrichGraph`, `context.go:368`) — pulls callers/callees/deps from the `calls` edge table that `graph_callers` / `graph_callees` / `graph_deps` / `graph_neighbors` expose individually.\n\n6. **Annotation enrichment** (`enrich`, `context.go:373`) — adds sibling tests, nearest doc, git blame, CODEOWNERS, build tags depending on intent.\n\n7. **Inline content** (`inlineContent`) — reads and inlines file content for `suggested_reads` and `semantic_hits` into a shared byte-budget pool so the agent usually needs no follow-up `Read`.\n\n**The lower-level tools are thin wrappers** over the same store/graph calls — they exist for cases where you already know exactly what you want (exact symbol name → `search_symbol`; specific file → `view_summarize`; known function → `graph_callers`). `ask` composes all of them in one round-trip, adds intent-aware filtering, and returns a synthesised bundle with `next_action` and `avoid` guidance.",
+    "stop_reason": "end_turn",
+    "session_id": "27a92da4-360f-456f-a063-9e9fe32a2fd7",
+    "total_cost_usd": 0.12323855,
+    "usage": {
+      "input_tokens": 12,
+      "cache_creation_input_tokens": 17173,
+      "cache_read_input_tokens": 125926,
+      "output_tokens": 1364,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 17173,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 575,
+          "cache_read_input_tokens": 27995,
+          "cache_creation_input_tokens": 2039,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2039
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 471,
+        "outputTokens": 19,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000566,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 12,
+        "outputTokens": 1364,
+        "cacheReadInputTokens": 125926,
+        "cacheCreationInputTokens": 17173,
+        "webSearchRequests": 0,
+        "costUSD": 0.12267254999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "3c5e27da-43cf-426e-b987-8ab9dd01978b"
+  }
+}

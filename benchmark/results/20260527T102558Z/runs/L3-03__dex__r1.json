@@ -1,0 +1,81 @@
+{
+  "qid": "L3-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "When `dex watch` sees a change, what runs and in what order?",
+  "ground_truth": "`internal/watch` debounces fsnotify events (default 500ms), then on the timer flush it runs the indexer pass first (walk → chunk → embed → upsert into store) and then the graph rebuild (`internal/graph` via `go/packages` + YAML extractor + PageRank). Summaries are produced asynchronously if configured.",
+  "started": 1779877935,
+  "finished": 1779877973,
+  "wall_seconds": 38,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 39301,
+    "duration_api_ms": 40586,
+    "ttft_ms": 2981,
+    "num_turns": 7,
+    "result": "Here's the full sequence:\n\n---\n\n**1. fsnotify event arrives** (`internal/watch/watch.go:103`)\n- `handle()` filters out ignored paths and non-indexable extensions.\n- A new directory creation triggers recursive `addWatches` to maintain coverage.\n\n**2. `markDirty` → debounce timer reset** (`watch.go:151`)\n- Sets `dirty=true`, cancels any in-flight idle work (`idleCancel`), stops the idle timer.\n- Resets `time.AfterFunc(debounce, flush)` — default **500ms**. Each new event restarts the clock.\n\n**3. Debounce fires → `flush()`** (`watch.go:169`)\n- Skips if a flush is already running (sets `dirty=true` so the running flush will loop).\n- Otherwise runs `indexer.Run(ctx)` **synchronously** (single goroutine — no concurrent indexers).\n\n**4. `indexer.Run` — the chunk pipeline** (`internal/index`)\n- Walk → chunk (tree-sitter) → mtime/SHA fast-path skips → embed (`/v1/embeddings`) → `store.UpsertMany` (triggers keep `chunk_vecs` + `chunks_fts` in sync) → `PruneUnseen` (delete stale rows) → package/repo summary passes (if summarize mode, summaries are **deferred** to `pending_summaries`, not run inline).\n\n**5. `AfterIndex` hook → graph rebuild** (`cmd/dex/main.go:1831`)\n- Calls `runGraphPhase` → `graph.ExtractGo` + `ExtractYAML` → `linkChunks` → `GraphUpsertNodes/Edges` → `GraphPruneUnseen` → `ComputeCentrality` (PageRank + in/out degree) → `GraphSetCentrality`.\n- Errors are logged but don't kill the watcher.\n\n**6. Re-loop if dirty** (`watch.go:208`)\n- If events landed during the run, the same goroutine loops back to step 4 immediately (no new timer needed).\n- Otherwise: `running=false`, arm idle timer.\n\n**7. Idle phase** (optional, only if `DEX_SUMMARY_URL` is set)\n- After **`OnIdleAfter`** (default 5s) of quiet, `runIdle` calls `ix.IdleSummaryDrainer` to drain `pending_summaries` in batches.\n- Each new fs event cancels the in-flight drain and restarts from step 2.",
+    "stop_reason": "end_turn",
+    "session_id": "9c05f057-4a86-4be8-bf1a-b5fd3841d226",
+    "total_cost_usd": 0.15335105,
+    "usage": {
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 22909,
+      "cache_read_input_tokens": 144631,
+      "output_tokens": 1566,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 22909,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 629,
+          "cache_read_input_tokens": 34866,
+          "cache_creation_input_tokens": 904,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 904
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 453,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000533,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 10,
+        "outputTokens": 1566,
+        "cacheReadInputTokens": 144631,
+        "cacheCreationInputTokens": 22909,
+        "webSearchRequests": 0,
+        "costUSD": 0.15281804999999998,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "45d7e9f3-b8ad-4d4f-820e-439c7da281e2"
+  }
+}

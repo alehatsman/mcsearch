@@ -1,0 +1,81 @@
+{
+  "qid": "L4-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "Why does dex use SQLite triggers to populate `chunks_fts` and `chunk_vecs` instead of writing those tables directly from Go?",
+  "ground_truth": "Both are SQLite virtual tables (FTS5 + sqlite-vec `vec0`). Writing to them must go through specific INSERT/DELETE shapes — getting that wrong corrupts the index. Centralising the mirror logic in triggers means there is exactly one place that maintains the invariant `chunks ↔ chunks_fts` and `chunks ↔ chunk_vecs`, regardless of which Go path (UpsertMany, PruneUnseen, backfill) touched the base table. Callers never need to know about the virtual tables.",
+  "started": 1779880408,
+  "finished": 1779880431,
+  "wall_seconds": 23,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 23656,
+    "duration_api_ms": 25401,
+    "ttft_ms": 2986,
+    "num_turns": 6,
+    "result": "Two concrete reasons, both stated in the code comments:\n\n**1. `vec0` and `fts5` are virtual tables with constrained write APIs.**\n\n`chunk_vecs` is a `vec0` virtual table (sqlite-vec extension) and `chunks_fts` is an `fts5` virtual table. Virtual tables in SQLite have their own internal storage; you can't `INSERT`/`UPDATE` them in the same statement as a regular table inside a transaction in a way that keeps them atomically in sync. Triggers fire inside the same transaction as the `chunks` write, so consistency is guaranteed — if the `chunks` INSERT is rolled back, the trigger's virtual-table write is too.\n\n**2. The embedding dimension isn't known at schema creation time.**\n\n`chunk_vecs` requires `FLOAT[%d]` with a fixed dimension at `CREATE` time (`store.go:333`). It's created lazily in `ensureVecTable`, called the first time `UpsertMany` sees a vector (`store.go:559-563`). Between schema creation and that first write, triggers are the only mechanism that can mirror future `chunks` rows without Go code explicitly threading through two separate write paths in every callsite.\n\n**Bonus — backfill for pre-existing rows.** Triggers only fire on future writes, so `ensureVecTable` does a one-shot `INSERT INTO chunk_vecs SELECT id, vec FROM chunks` to catch rows that existed before the vec/FTS tables were added (`store.go:355-368`, `store.go:254-261`). This makes migrations cheap and idempotent without changing the normal write path.\n\nIn short: triggers keep the virtual tables in sync atomically without every `chunks` write callsite needing to know the virtual tables exist.",
+    "stop_reason": "end_turn",
+    "session_id": "66b382bc-04dc-4455-9034-ecbf3b7f0929",
+    "total_cost_usd": 0.07072524999999999,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 8029,
+      "cache_read_input_tokens": 86675,
+      "output_tokens": 936,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8029,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 407,
+          "cache_read_input_tokens": 20090,
+          "cache_creation_input_tokens": 800,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 800
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 468,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000553,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 936,
+        "cacheReadInputTokens": 86675,
+        "cacheCreationInputTokens": 8029,
+        "webSearchRequests": 0,
+        "costUSD": 0.07017224999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "00efee49-e4d5-4489-820e-73c83d28e3f2"
+  }
+}

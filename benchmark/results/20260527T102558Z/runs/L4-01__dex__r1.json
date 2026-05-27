@@ -1,0 +1,81 @@
+{
+  "qid": "L4-01",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Trace the path of a single saved file from filesystem change to becoming searchable. Name every stage and the package responsible.",
+  "ground_truth": "1. `internal/watch` (fsnotify) sees the write, debounces 500ms.\n2. On flush, `internal/index` walks the project (respecting `internal/ignore`), chunks each eligible file with `internal/chunk` (tree-sitter).\n3. Chunks are embedded via `internal/embed` (HTTP to OpenAI-shape /v1/embeddings).\n4. `internal/store.UpsertMany` writes rows into `chunks`; triggers populate `chunks_fts` (FTS5) and `chunk_vecs` (sqlite-vec).\n5. `internal/graph` rebuilds the Go static graph and PageRank.\n6. Optional summary passes (chunk/file/package/repo) via `internal/chat`.\n7. `internal/store.PruneUnseen` removes rows from the previous indexing generation.\nAfter step 4 the file is searchable via `Store.Search`.",
+  "started": 1779878124,
+  "finished": 1779878158,
+  "wall_seconds": 34,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 35198,
+    "duration_api_ms": 35883,
+    "ttft_ms": 2271,
+    "num_turns": 6,
+    "result": "Here is the complete path, every stage named with the responsible package:\n\n---\n\n## Saved file → searchable: all stages\n\n**Stage 1 — fsnotify event** · `internal/watch`  \n`Watcher.Run` (`watch.go:81`) receives a raw `fsnotify.Event` (Write/Create/Remove/Rename). `handle()` (`watch.go:117`) filters it through `internal/ignore` (ignored paths, non-indexable extensions). Qualifying events call `markDirty`.\n\n**Stage 2 — Debounce** · `internal/watch`  \n`markDirty` (`watch.go:151`) sets `dirty=true`, cancels any in-flight idle work, and resets `time.AfterFunc(500ms, flush)`. Every new event restarts the clock. On expiry, `flush()` fires.\n\n**Stage 3 — Walk + chunk** · `internal/index` + `internal/chunk` + `internal/ignore`  \n`Indexer.Run` (`index.go:137`) walks the project tree. Each file is checked:\n- **Mtime fast-path**: mtime ≤ last index time → `TouchPath()` only (no parse).\n- **SHA fast-path**: content hash unchanged → bump `last_seen_at`, no re-embed.\n- **Slow path**: file becomes a `slowFile`; `internal/chunk` (tree-sitter grammars) splits it into `[]chunk.Chunk`.\n\n**Stage 4 — Embed** · `internal/embed`  \nSlow-path chunks are batched and sent via HTTP to an OpenAI-compatible `/v1/embeddings` endpoint. Returns float32 vectors.\n\n**Stage 5 — Upsert into store** · `internal/store`  \n`store.UpsertMany` writes rows to the `chunks` table. Three SQLite triggers fire automatically:\n- INSERT on `chunks` → mirrors `vec` into `chunk_vecs` (sqlite-vec virtual table — enables cosine KNN).\n- INSERT on `chunks` → mirrors content/path/kind into `chunks_fts` (FTS5 — enables BM25).\n- UPDATE/DELETE keep both virtual tables in sync.\n\n**Stage 6 — Prune stale rows** · `internal/store`  \n`PruneUnseen` deletes `chunks` rows whose `last_seen_at < run start time` (files deleted or renamed away).\n\n**Stage 7 — Graph rebuild** (via `AfterIndex` hook) · `internal/graph`  \n`graph.Indexer.Run` re-runs `ExtractGo` (go/packages static analysis) + `ExtractYAML`, calls `linkChunks` to join graph nodes to their chunk rows, upserts via `GraphUpsertNodes`/`GraphUpsertEdges`, prunes, then `ComputeCentrality` (PageRank + in/out-degree) → `GraphSetCentrality`. Errors are logged but don't kill the watcher.\n\n**Stage 8 — Summary drain** (async/idle) · `internal/index`  \nAfter `OnIdleAfter` (default 5s) of quiet, `IdleSummaryDrainer` calls `DrainPendingSummariesBatch` to generate LLM summaries for chunks that were deferred (chunk → file → package → repo summary chain via `internal/chat`). Summaries are embedded and stored back into `chunks`. A new fs event cancels the in-flight drain immediately.\n\n---\n\n**The file is searchable (cosine + BM25) as soon as Stage 5 commits** — `chunk_vecs` and `chunks_fts` are updated synchronously by the upsert triggers. Graph centrality and LLM summaries arrive later but don't gate retrieval.",
+    "stop_reason": "end_turn",
+    "session_id": "e706c948-1ade-4afd-96ae-38b4ab3e233c",
+    "total_cost_usd": 0.1587212,
+    "usage": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 29600,
+      "cache_read_input_tokens": 78554,
+      "output_tokens": 1572,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 29600,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 953,
+          "cache_read_input_tokens": 28131,
+          "cache_creation_input_tokens": 14330,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 14330
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 461,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000551,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 8,
+        "outputTokens": 1572,
+        "cacheReadInputTokens": 78554,
+        "cacheCreationInputTokens": 29600,
+        "webSearchRequests": 0,
+        "costUSD": 0.15817019999999998,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "6bb9ac60-51df-4569-a0cc-1c2e9e197967"
+  }
+}

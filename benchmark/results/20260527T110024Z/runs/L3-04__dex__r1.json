@@ -1,0 +1,81 @@
+{
+  "qid": "L3-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Which retrieval signals does `Store.Search` combine, and how are they fused?",
+  "ground_truth": "Two signals run in parallel: cosine KNN via the `sqlite-vec` `chunk_vecs` virtual table, and BM25 via the FTS5 `chunks_fts` table. They are fused with Reciprocal Rank Fusion (`rrfK=60`, Cormack 2009): `score(id) = Σ 1/(60+rank)` over both lists. An optional cross-encoder rerank pass can then reorder the fused pool.",
+  "started": 1779880067,
+  "finished": 1779880086,
+  "wall_seconds": 19,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 19352,
+    "duration_api_ms": 20287,
+    "ttft_ms": 2595,
+    "num_turns": 3,
+    "result": "Two signals, fused with RRF, with an optional third rerank pass (`internal/store/store.go`):\n\n**Signals**\n\n| Signal | Mechanism |\n|--------|-----------|\n| **Cosine similarity** | `sqlite-vec` KNN against `chunk_vecs` virtual table — query text embedded via `/v1/embeddings`, score = `1 − distance` |\n| **BM25** | FTS5 `bm25(chunks_fts)` via `buildFTSQuery(queryText)` |\n\n**Fusion — Reciprocal Rank Fusion (RRF)**  `store.go:924`\n\n```\nrrf[id] = Σ 1 / (rrfK + rank_in_list)    rrfK = 60  (Cormack 2009)\n```\n\nBoth lists contribute independently into a `map[int64]float32` keyed by chunk ID. A hit appearing in both legs accumulates contributions from each. BM25-only hits (absent from the cosine pool) get their cosine score back-filled via `scoreSemanticForIDs` so every `Hit.Score` is always populated.\n\n**Optional third pass — cross-encoder rerank**\n\nIf `DEX_RERANK_URL` is set, the fused pool (capped at `Options.RerankPool`) is reordered by the cross-encoder. On `rerank.ErrUnreachable` it silently falls through to RRF order.\n\n**Escape hatches:**\n- Empty `queryText` or `Options.DisableBM25` → BM25 leg skipped entirely, pure cosine path\n- `Options.MaxHitsPerFile` → post-fusion per-file diversity cap via `diversify` (applied in the public `Search` wrapper at `store.go:928`, not inside `searchRaw`)",
+    "stop_reason": "end_turn",
+    "session_id": "138f092d-47d7-49d9-b57d-716d97ae8b4b",
+    "total_cost_usd": 0.0780978,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 12844,
+      "cache_read_input_tokens": 55006,
+      "output_tokens": 858,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 12844,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 587,
+          "cache_read_input_tokens": 19152,
+          "cache_creation_input_tokens": 11619,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 11619
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00054,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 858,
+        "cacheReadInputTokens": 55006,
+        "cacheCreationInputTokens": 12844,
+        "webSearchRequests": 0,
+        "costUSD": 0.07755780000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "546a31d8-89b2-4fbe-929e-30702d436721"
+  }
+}

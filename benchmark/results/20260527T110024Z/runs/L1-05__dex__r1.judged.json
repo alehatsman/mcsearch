@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "Exact match on package, file, line, function, and syscall including flags."
+}

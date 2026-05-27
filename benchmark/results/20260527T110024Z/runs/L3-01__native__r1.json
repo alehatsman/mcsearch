@@ -1,0 +1,81 @@
+{
+  "qid": "L3-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "What writes to the `chunk_vecs` virtual table? Trace the actual mechanism.",
+  "ground_truth": "Nothing in Go code writes to `chunk_vecs` directly. It is a `vec0` virtual table populated by SQLite triggers on the base `chunks` table (`internal/store/store.go` around lines 333-358): INSERT on `chunks` fires a trigger that mirrors `chunks.vec` into `chunk_vecs.embedding`; UPDATE/DELETE keep them in sync. Callers only ever upsert into `chunks` via `Store.UpsertMany`.",
+  "started": 1779879981,
+  "finished": 1779879994,
+  "wall_seconds": 13,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 12785,
+    "duration_api_ms": 14429,
+    "ttft_ms": 2621,
+    "num_turns": 2,
+    "result": "`chunk_vecs` is written by **three SQLite triggers** defined in `ensureVecTable` (`store.go:339–348`), plus a **one-shot backfill**:\n\n| Mechanism | SQL | Location |\n|---|---|---|\n| Trigger `chunks_vec_ai` | `AFTER INSERT ON chunks` → `INSERT INTO chunk_vecs(rowid, embedding) VALUES (new.id, new.vec)` | `store.go:339–341` |\n| Trigger `chunks_vec_au` | `AFTER UPDATE OF vec ON chunks` → delete old row, re-insert new | `store.go:345–348` |\n| Trigger `chunks_vec_ad` | `AFTER DELETE ON chunks` → `DELETE FROM chunk_vecs WHERE rowid = old.id` | `store.go:342–344` |\n| Backfill | `INSERT INTO chunk_vecs(rowid, embedding) SELECT id, vec FROM chunks` — runs once at `ensureVecTable` time when `chunk_vecs` is empty but `chunks` is not | `store.go:366–370` |\n\n**The actual write path:** Go code calls `UpsertMany` → inserts/updates rows in the `chunks` table (which holds the raw `vec` BLOB) → the triggers fire and mirror every change into `chunk_vecs`. No Go code writes to `chunk_vecs` directly. The backfill at `store.go:368` covers pre-existing rows from before the sqlite-vec table existed; after that, triggers own all writes. `ensureVecTable` is called from `UpsertMany` on the first write to a fresh index (`store.go:561`).",
+    "stop_reason": "end_turn",
+    "session_id": "ba167006-3cea-4bbb-8b5e-2493537f8a23",
+    "total_cost_usd": 0.04624095,
+    "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 7639,
+      "cache_read_input_tokens": 30309,
+      "output_tokens": 530,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 7639,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 402,
+          "cache_read_input_tokens": 17448,
+          "cache_creation_input_tokens": 3052,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3052
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00054,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 4,
+        "outputTokens": 530,
+        "cacheReadInputTokens": 30309,
+        "cacheCreationInputTokens": 7639,
+        "webSearchRequests": 0,
+        "costUSD": 0.045700950000000004,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "1e574ae5-c951-4a22-bc6e-2906e721cd64"
+  }
+}

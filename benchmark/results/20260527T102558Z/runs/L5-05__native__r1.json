@@ -1,0 +1,103 @@
+{
+  "qid": "L5-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "If I want to add support for a new language (say Rust) to the chunker, what packages and code areas are involved?",
+  "ground_truth": "- `internal/chunk` — register the tree-sitter Rust grammar, add a language detector branch (by extension), and a chunking strategy (which node kinds become chunk boundaries — `fn`, `impl`, etc.).\n- `go.mod` — add the tree-sitter Rust grammar Go binding.\n- `internal/ignore` — confirm Rust-specific build dirs (`target/`) are excluded.\n- `internal/graph` is Go-only via `go/packages`; Rust would not get graph nodes unless a separate extractor is added (out of scope for chunker-only support).\n- Tests: `internal/chunk/*_test.go` add fixtures for a `.rs` file.\nEmbedding/store/search are language-agnostic — no changes there.",
+  "started": 1779878753,
+  "finished": 1779878845,
+  "wall_seconds": 92,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 96034,
+    "duration_api_ms": 97048,
+    "ttft_ms": 2385,
+    "num_turns": 2,
+    "result": "Here's the map of what's involved. Note: **Rust is already supported** — but this shows exactly where you'd touch things for any new language.\n\n---\n\n## Packages Involved\n\n### `internal/chunk/` — Core chunker\n**`chunk.go`** is the only file you *must* change for basic support:\n\n1. **Import the tree-sitter binding** (lines 19–31):\n   ```go\n   \"github.com/smacker/go-tree-sitter/rust\"\n   ```\n\n2. **Register in the `languages` map** (`chunk.go:110–153`) — maps file extension → `langConfig{lang, nodeKinds}`:\n   ```go\n   \".rs\": {rust.GetLanguage(), set(\n       \"function_item\", \"struct_item\", \"enum_item\",\n       \"impl_item\", \"trait_item\", \"mod_item\",\n   )},\n   ```\n\n3. **`containerMethods` map** (`chunk.go:159–186`) — if the language has methods nested inside a container (Rust's `impl`/`trait`):\n   ```go\n   \"impl_item\":  {\"function_item\": true},\n   \"trait_item\": {\"function_item\": true},\n   ```\n   This causes nested `function_item`s to be emitted as separate chunks with `Parent` set to the `impl`/`trait` name.\n\nThe dispatch entry point is `Chunks()` at `chunk.go:232–243`: extracts the file extension, looks it up in `languages`, runs tree-sitter, then falls back to sliding-window chunks if the language is unknown.\n\n---\n\n### `internal/ignore/` — File extension filtering\n**`ignore.go:115–150`**: the `supportedLangs` map gates which extensions `dex index` will process at all. Add `.rs` there or it's skipped before even reaching the chunker.\n\n**`ignore.go:250–280`**: test-file filtering (e.g., skip `*_test.rs`).\n\n---\n\n### `internal/mcp/context.go` — Import extraction (optional)\n`extractImports()` at line `1368–1384` dispatches per-extension to extract `use`/`import` statements for the `search_symbol` feature. For Rust, `extractRustImports()` lives at line `1499–1516`. Add a parallel function for a new language here.\n\n---\n\n## Minimal vs. Full Checklist\n\n| Step | File | Required? |\n|------|------|-----------|\n| Add tree-sitter import | `internal/chunk/chunk.go:~29` | Yes |\n| Register in `languages` map | `internal/chunk/chunk.go:~110` | Yes |\n| Register in `supportedLangs` | `internal/ignore/ignore.go:~120` | Yes |\n| Add `containerMethods` entry | `internal/chunk/chunk.go:~159` | If nested methods exist |\n| Add `extractXImports()` | `internal/mcp/context.go:~1384` | Optional |\n| Add test-file skip pattern | `internal/ignore/ignore.go:~265` | Optional |\n| Add test in `chunk_test.go` | `internal/chunk/chunk_test.go` | Recommended |\n\nThe tree-sitter node kinds to use (`function_item`, etc.) come from the target language's tree-sitter grammar — you'd look those up in the grammar's `grammar.js` or `node-types.json`.",
+    "stop_reason": "end_turn",
+    "session_id": "37729798-a10b-4235-906f-1c8e3b1b9284",
+    "total_cost_usd": 0.19695035,
+    "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 8472,
+      "cache_read_input_tokens": 30563,
+      "output_tokens": 1205,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8472,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 874,
+          "cache_read_input_tokens": 17702,
+          "cache_creation_input_tokens": 3631,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3631
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 582,
+        "outputTokens": 5960,
+        "cacheReadInputTokens": 560887,
+        "cacheCreationInputTokens": 41163,
+        "webSearchRequests": 0,
+        "costUSD": 0.13792444999999998,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 4,
+        "outputTokens": 1205,
+        "cacheReadInputTokens": 30563,
+        "cacheCreationInputTokens": 8472,
+        "webSearchRequests": 0,
+        "costUSD": 0.05902589999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01XJg6ZzNwmHbDq2dVfDdzJB",
+        "tool_input": {
+          "command": "find /home/aleh/projects/dex/internal -name \"*chunk*\" -type f"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_018rqTuEVkXpaopmtj5AspWq",
+        "tool_input": {
+          "command": "find /home/aleh/projects/dex/internal -name \"*lang*\" -type f"
+        }
+      },
+      {
+        "tool_name": "Bash",
+        "tool_use_id": "toolu_01DMeF7wbs1HVNZue36dcsHS",
+        "tool_input": {
+          "command": "find /home/aleh/projects/dex -name \"README*\" -type f | head -5"
+        }
+      }
+    ],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "fdbb7742-eace-4337-859a-f5379d3a11cb"
+  }
+}

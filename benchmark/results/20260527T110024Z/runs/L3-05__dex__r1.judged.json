@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies `ask` as a composite/orchestrator tool that calls the same underlying primitives as the lower-level tools, correctly maps each lower-level tool to its corresponding lane in `ask`, and correctly locates the implementation in `internal/mcp`. The extra implementation detail (function names, line numbers) is correct additional specificity, not hallucination."
+}

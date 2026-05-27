@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the file `internal/mcp/server.go` and the function `RunStdio`; the line number difference (846 vs 851) is minor and likely due to version/context differences, pointing at the same symbol."
+}

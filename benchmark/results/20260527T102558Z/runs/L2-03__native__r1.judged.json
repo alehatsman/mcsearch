@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the package as a filesystem watcher using fsnotify that triggers re-indexing, and correctly states the 500ms debounce default with the right file reference."
+}

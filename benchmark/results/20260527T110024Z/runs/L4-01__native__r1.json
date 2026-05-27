@@ -1,0 +1,81 @@
+{
+  "qid": "L4-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "Trace the path of a single saved file from filesystem change to becoming searchable. Name every stage and the package responsible.",
+  "ground_truth": "1. `internal/watch` (fsnotify) sees the write, debounces 500ms.\n2. On flush, `internal/index` walks the project (respecting `internal/ignore`), chunks each eligible file with `internal/chunk` (tree-sitter).\n3. Chunks are embedded via `internal/embed` (HTTP to OpenAI-shape /v1/embeddings).\n4. `internal/store.UpsertMany` writes rows into `chunks`; triggers populate `chunks_fts` (FTS5) and `chunk_vecs` (sqlite-vec).\n5. `internal/graph` rebuilds the Go static graph and PageRank.\n6. Optional summary passes (chunk/file/package/repo) via `internal/chat`.\n7. `internal/store.PruneUnseen` removes rows from the previous indexing generation.\nAfter step 4 the file is searchable via `Store.Search`.",
+  "started": 1779880232,
+  "finished": 1779880265,
+  "wall_seconds": 33,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 33745,
+    "duration_api_ms": 34923,
+    "ttft_ms": 2369,
+    "num_turns": 7,
+    "result": "Now I have a complete picture. Here is the full pipeline:\n\n---\n\n## Filesystem change → searchable: all stages\n\n### Stage 1 — OS event detection  \n**Package: `internal/watch`** (`watch.go:103`)  \n`fsnotify.Watcher` (via `github.com/fsnotify/fsnotify`) delivers a kernel `inotify`/`kqueue` event for the saved file. `Watcher.handle` filters out ignored paths (`internal/ignore`) and non-indexable extensions.\n\n### Stage 2 — Debounce  \n**Package: `internal/watch`** (`watch.go:151–166`)  \n`markDirty` resets a `time.AfterFunc` timer (default 500 ms). Multiple rapid saves coalesce into one. When the quiet window expires, `flush` fires.\n\n### Stage 3 — Full index pass triggered  \n**Package: `internal/watch` → `internal/index`** (`watch.go:188`, `index.go:137`)  \n`flush` calls `index.Indexer.Run(ctx)`. The indexer walks the whole project via `filepath.WalkDir`.\n\n### Stage 4 — Mtime fast-path check  \n**Package: `internal/index`** (`index.go:356–368`)  \nFor each file, if `mtime ≤ lastIndexedAt`, `store.TouchPath` bumps `last_seen_at` and skips all further processing. The changed file fails this check and continues to the slow path.\n\n### Stage 5 — Read + filter  \n**Package: `internal/index`** (worker goroutines, `index.go:229–262`)  \nWorkers call `os.ReadFile`, then `ignore.LooksBinary` and `ignore.LooksLikeSecret` to reject binary or secret-containing files.\n\n### Stage 6 — Parse into chunks  \n**Package: `internal/chunk`** (`index.go:249`, `chunk.go`)  \n`chunk.Chunks(ctx, rel, data)` runs a tree-sitter grammar (Go, Python, Rust, TS, …) to extract named declarations as individual `Chunk` structs. Unknown languages fall back to a fixed sliding-window.\n\n### Stage 7 — Content-SHA deduplication  \n**Package: `internal/index` + `internal/store`** (`index.go:456–465`)  \nSHA-1 of each chunk's content is compared against a batch query (`store.ExistingSHAsBatch`). Unchanged chunks get `TouchSeen`; only genuinely new/changed chunks proceed.\n\n### Stage 8 — Embedding  \n**Package: `internal/embed`** (`index.go:682–685`)  \n`embed.Client.Embed(ctx, texts)` POSTs batches of chunk text to an OpenAI-compatible `/v1/embeddings` endpoint, returning `[]float32` vectors.\n\n### Stage 9 — Upsert into SQLite  \n**Package: `internal/store`** (`index.go:700`, `store.go`)  \n`store.UpsertMany` writes each chunk (path, kind, content, SHA, vector) into SQLite. The vector goes into the `chunk_vecs` `vec0` virtual table (via `sqlite-vec`), and the text goes into `chunks_fts` (FTS5). Both are now live for queries.\n\n### Stage 10 — Stale chunks pruned  \n**Package: `internal/store`** (`index.go:872`)  \n`store.PruneUnseen` deletes any rows whose `last_seen_at < startTime` — covering chunks from a deleted or renamed file.\n\n---\n\n**Result:** the file is now searchable via hybrid BM25 (`chunks_fts` FTS5) + cosine KNN (`chunk_vecs` vec0) in `store.Search`.",
+    "stop_reason": "end_turn",
+    "session_id": "db974f66-9b53-4962-b32e-65879e100152",
+    "total_cost_usd": 0.1418827,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 25216,
+      "cache_read_input_tokens": 83929,
+      "output_tokens": 1439,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 25216,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 978,
+          "cache_read_input_tokens": 35414,
+          "cache_creation_input_tokens": 2663,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2663
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 461,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000541,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 1439,
+        "cacheReadInputTokens": 83929,
+        "cacheCreationInputTokens": 25216,
+        "webSearchRequests": 0,
+        "costUSD": 0.1413417,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "63e416b2-582f-471e-8655-4abbd42633bc"
+  }
+}

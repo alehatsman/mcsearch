@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies both core responsibilities: splitting source files using tree-sitter grammars and producing structured chunk records ready for downstream embedding/indexing."
+}

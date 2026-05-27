@@ -1,0 +1,3 @@
+qid,band,mode,rep,rc,wall_seconds,input_tokens,output_tokens,cache_read_tokens,cache_create_tokens,cost_usd,num_turns,tool_calls,score,judge_reason
+L1-01,L1,dex,1,0,7,7,214,36205,19380,0.0873065,3,0,2,The agent correctly identifies the file (internal/store/store.go) and the function UpsertMany; the line number difference (542 vs 546) is minor and likely due to minor code changes — the location is s
+L1-01,L1,native,1,0,5,4,117,30553,5121,0.03067565,2,0,2,The answer correctly identifies the exact file and line number where Store.UpsertMany is defined.

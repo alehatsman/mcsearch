@@ -1,0 +1,81 @@
+{
+  "qid": "L3-02",
+  "mode": "dex",
+  "rep": 1,
+  "question": "How do `chunks_fts` rows get kept in sync with `chunks`?",
+  "ground_truth": "Three SQLite triggers on the base `chunks` table (`internal/store/store.go:159-176`): INSERT mirrors content/path/kind into `chunks_fts`; UPDATE issues a `chunks_fts` delete+insert; DELETE removes the row. There is also a one-time backfill (`chunks_fts(rebuild)`) for databases that pre-date the FTS5 migration (~line 254-261).",
+  "started": 1779877905,
+  "finished": 1779877921,
+  "wall_seconds": 16,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 15179,
+    "duration_api_ms": 16199,
+    "ttft_ms": 2290,
+    "num_turns": 3,
+    "result": "Three SQLite triggers on the `chunks` table, created in `migrate` (`internal/store/store.go:159-176`):\n\n| Trigger | Event | Action |\n|---|---|---|\n| `chunks_ai` | `AFTER INSERT` | `INSERT INTO chunks_fts(rowid, content, path, kind)` |\n| `chunks_ad` | `AFTER DELETE` | FTS5 tombstone: `INSERT INTO chunks_fts(chunks_fts, rowid, ...) VALUES('delete', ...)` |\n| `chunks_au` | `AFTER UPDATE` | Delete + reinsert in `chunks_fts` |\n\n`chunks_fts` is an FTS5 **external-content** table (`content='chunks', content_rowid='id'`), so it stores only tokenizer state — no duplicate text on disk. The triggers are the only sync mechanism; Go code never writes to `chunks_fts` directly.\n\nThere is also a one-time backfill for pre-FTS5 databases: `INSERT INTO chunks_fts(chunks_fts) VALUES('rebuild')` runs during migration (~`store.go:254-261`) when upgrading an older index.",
+    "stop_reason": "end_turn",
+    "session_id": "b5585ea9-b2a0-42a0-a846-66101d75d4cd",
+    "total_cost_usd": 0.08539165000000001,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 16499,
+      "cache_read_input_tokens": 49718,
+      "output_tokens": 536,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 16499,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 280,
+          "cache_read_input_tokens": 18931,
+          "cache_creation_input_tokens": 10429,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 10429
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000544,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 536,
+        "cacheReadInputTokens": 49718,
+        "cacheCreationInputTokens": 16499,
+        "webSearchRequests": 0,
+        "costUSD": 0.08484765000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "f24fd0a3-1637-46c0-8d66-79da73687c8e"
+  }
+}

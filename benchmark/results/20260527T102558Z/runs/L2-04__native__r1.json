@@ -1,0 +1,81 @@
+{
+  "qid": "L2-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is `internal/proj`? List its main concerns.",
+  "ground_truth": "Project root resolution + cache-dir layout + indexability guard. Computes `CacheDir = baseCacheDir/sha256(realpath(root))`, exposes `DBPath` / `LockPath`, and the guard refuses to index dangerous roots (e.g. `$HOME`, non-git non-allowlisted dirs).",
+  "started": 1779877808,
+  "finished": 1779877823,
+  "wall_seconds": 15,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 14256,
+    "duration_api_ms": 15297,
+    "ttft_ms": 3253,
+    "num_turns": 4,
+    "result": "`internal/proj` has two concerns:\n\n**1. Project identity (`proj.go`)**\n- Resolves a user-supplied path to a canonical absolute path (symlinks expanded, must be a directory).\n- Derives a stable `ID` as `sha256(canonicalRoot)` hex — used as the per-project cache directory name under `$DEX_INDEX_DIR`.\n- Bundles the derived paths (`CacheDir`, `DBPath`, `LockPath`) into a `Project` struct that the rest of the codebase passes around.\n- `EnsureCacheDir()` creates the cache directory on demand.\n\n**2. Indexing safety guard (`guard.go`)**\n- `CheckIndexable` refuses to index dangerous paths: a hard-coded deny-list of system roots (`/`, `/etc`, `/proc`, etc.), the user's home directory, and any path that isn't inside a git work tree.\n- Escape hatch: `--force` bypasses all checks; `DEX_ALLOW_PATHS` (colon-separated) adds extra allowed prefixes (supports `~` and `$ENV` expansion).\n- The git-work-tree check walks parent directories looking for `.git` (handles both normal repos and worktrees/submodules where `.git` is a file).",
+    "stop_reason": "end_turn",
+    "session_id": "4bf78706-d11f-4dec-8d77-ecf72c3121d1",
+    "total_cost_usd": 0.048811850000000004,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 6959,
+      "cache_read_input_tokens": 48372,
+      "output_tokens": 511,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 6959,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 300,
+          "cache_read_input_tokens": 17824,
+          "cache_creation_input_tokens": 1996,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1996
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 449,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000524,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 511,
+        "cacheReadInputTokens": 48372,
+        "cacheCreationInputTokens": 6959,
+        "webSearchRequests": 0,
+        "costUSD": 0.04828785,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "09225f07-527b-48b0-9836-4e87bab81ad9"
+  }
+}

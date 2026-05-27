@@ -1,0 +1,81 @@
+{
+  "qid": "L4-02",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Where does the dimension of the embedding vector get locked in, and what happens if the embedding model changes?",
+  "ground_truth": "Dim is fixed at index creation time — the `chunk_vecs` `vec0` virtual table is declared with a specific embedding dim, and the `chunks.vec` blobs are sized to match. Changing `DEX_EMBED_MODEL` to a model with a different output dim requires a full `dex reindex` (cannot be hot-swapped). This is enforced by the schema, not by application checks.",
+  "started": 1779880265,
+  "finished": 1779880297,
+  "wall_seconds": 32,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 32975,
+    "duration_api_ms": 33948,
+    "ttft_ms": 3106,
+    "num_turns": 7,
+    "result": "Here's the full picture:\n\n---\n\n## Where dim is locked in\n\n**`Store.dim`** (`internal/store/store.go:76`) — an `atomic.Int64`, set exactly once via two paths:\n\n1. **On `OpenWith`** (`store.go:109–119`): reads `meta.dim` from SQLite and restores it into `s.dim`. Covers process restarts.\n\n2. **On first `UpsertMany`** (`store.go:550–561`): if `s.dim == 0` (fresh index), snapshots `len(rows[0].Vec)`, writes it to `meta` under key `\"dim\"`, then calls `ensureVecTable`.\n\n**`ensureVecTable`** (`store.go:315–373`) bakes the number into the sqlite-vec DDL:\n```sql\nCREATE VIRTUAL TABLE IF NOT EXISTS chunk_vecs USING vec0(\n    embedding FLOAT[<dim>] distance_metric=cosine\n)\n```\n`CREATE VIRTUAL TABLE IF NOT EXISTS` is a no-op after the first call — the schema is **immutable for the life of the index file**.\n\n---\n\n## What happens if the model changes\n\n**Different dimension** — `UpsertMany` (`store.go:582–585`) checks every incoming vector:\n```go\nif int64(len(r.Vec)) != s.dim.Load() {\n    _ = tx.Rollback()\n    return fmt.Errorf(\"vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)\", ...)\n}\n```\nHard error, full rollback. The index becomes unwritable. **Resolution: delete the SQLite file and run `dex reindex`.**\n\n**Same dimension, different model** (e.g. two different 2560-dim models) — **currently undetected**. Vectors from incompatible latent spaces land in the table silently and retrieval quality collapses. This is a known gap tracked in `docs/next-priorities.md:37–52`: the fix is to also store the model name in `meta` and reject on name mismatch.\n\n---\n\n| Scenario | Outcome |\n|---|---|\n| Same model, re-index | No-op (SHA fast-path) |\n| Model change, different dim | Hard error at `UpsertMany`; `dex reindex` required |\n| Model change, same dim | Silent corruption (not yet guarded) |",
+    "stop_reason": "end_turn",
+    "session_id": "0bf65889-600b-40d9-b40b-9ce8c73b1f54",
+    "total_cost_usd": 0.12176605,
+    "usage": {
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 15043,
+      "cache_read_input_tokens": 149526,
+      "output_tokens": 1329,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 15043,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 580,
+          "cache_read_input_tokens": 32594,
+          "cache_creation_input_tokens": 378,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 378
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 457,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000532,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 10,
+        "outputTokens": 1329,
+        "cacheReadInputTokens": 149526,
+        "cacheCreationInputTokens": 15043,
+        "webSearchRequests": 0,
+        "costUSD": 0.12123405,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "71024267-b433-4d51-8258-854b71e71259"
+  }
+}

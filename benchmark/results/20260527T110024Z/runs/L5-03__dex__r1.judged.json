@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies internal/mcp/server.go as the primary file to edit, explains the handler registration pattern, mentions the option to split into a peer file, and notes no separate schema file is needed — all consistent with the ground truth's main points. Minor omissions (store layer, README, LLM_GUIDE note) don't detract from the core answer being substantively correct."
+}

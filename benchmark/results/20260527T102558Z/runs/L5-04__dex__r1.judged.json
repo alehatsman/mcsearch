@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the right file/line (watch.go:71), confirms tests are unaffected because they pass explicit debounce values, flags PIPELINE.md as needing a doc update, and accurately describes the user-visible behavioral change — all matching the ground truth, with extra correct detail on MCP and comments."
+}

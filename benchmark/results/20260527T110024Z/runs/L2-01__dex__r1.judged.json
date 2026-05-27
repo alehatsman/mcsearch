@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the core responsibility: splitting source files into bounded code chunks using tree-sitter grammars, and producing chunk records for later embedding/indexing. The extra detail about fallback strategies and metadata is correct and additive, not misleading."
+}

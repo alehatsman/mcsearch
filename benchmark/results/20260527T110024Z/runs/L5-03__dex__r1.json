@@ -1,0 +1,81 @@
+{
+  "qid": "L5-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "If I want to add a new MCP tool (say `mcp__dex__find_imports`), what files do I edit?",
+  "ground_truth": "- `internal/mcp/server.go` — add the handler method, register it in the tool list assembled by `RunStdio` / server initialisation.\n- `internal/mcp/<tool>.go` if you split it out, plus a `_test.go`.\n- The store layer if a new query is needed (e.g. `internal/store/store.go` with a corresponding `Store.FindImports`).\n- `README.md` MCP tool table.\n- `LLM_GUIDE.md` is regenerated, do not hand-edit.\nNo changes to `internal/index`, `internal/watch`, `internal/embed` etc.",
+  "started": 1779880763,
+  "finished": 1779880804,
+  "wall_seconds": 41,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 41758,
+    "duration_api_ms": 35851,
+    "ttft_ms": 2697,
+    "num_turns": 9,
+    "result": "The pattern is clear. Here's what you edit to add `mcp__dex__find_imports`:\n\n---\n\n**1. `internal/mcp/server.go`** (or a new peer file like `server_imports.go`) — two things:\n\n- Define the input/output types and the handler method `(s *Server) findImports(ctx, *sdk.CallToolRequest, FindImportsInput) (*sdk.CallToolResult, FindImportsOutput, error)`\n- Register the tool in `RunStdio` (~line 860) with `sdk.AddTool(srv, &sdk.Tool{Name: \"find_imports\", Description: \"...\"}, s.findImports)`\n\n**2. That's it for the MCP wiring.** The `sdk.AddTool` call uses Go generics to infer the JSON schema from the input struct, so no separate schema file is needed.\n\n---\n\n**Pattern to follow** (graph tools are the closest analogue since they're pure-index, no chat):\n- Handler signature: `func (s *Server) findImports(ctx context.Context, _ *sdk.CallToolRequest, in FindImportsInput) (*sdk.CallToolResult, FindImportsOutput, error)` — `server_graph.go:66`\n- Export wrapper (optional, for CLI reuse): `func (s *Server) FindImports(...) (FindImportsOutput, error)` — `server_graph.go:27`\n- `sdk.AddTool` call: `server.go:886–892` is the `graph_deps` registration to copy\n\nThe internal logic (`extractGoImports` etc.) already exists in `internal/mcp/` — search for `extractImports` in `server.go` if you want to reuse it for the handler body.",
+    "stop_reason": "end_turn",
+    "session_id": "93ffe656-2307-4ff6-afca-ce76146de68a",
+    "total_cost_usd": 0.11905835,
+    "usage": {
+      "input_tokens": 15,
+      "cache_creation_input_tokens": 9911,
+      "cache_read_input_tokens": 197987,
+      "output_tokens": 1460,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 9911,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 415,
+          "cache_read_input_tokens": 26500,
+          "cache_creation_input_tokens": 1349,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1349
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 466,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005510000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 15,
+        "outputTokens": 1460,
+        "cacheReadInputTokens": 197987,
+        "cacheCreationInputTokens": 9911,
+        "webSearchRequests": 0,
+        "costUSD": 0.11850735,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "f8e9c8bb-7821-4c9f-b72e-3ac564febbc8"
+  }
+}

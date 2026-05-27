@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies most core files (store.go, server.go, context.go, store_test.go, bench_test.go) and adds plausible extra call sites (cmd/dex/main.go, index_test.go), but it incorrectly dismisses context_test.go as mere string literals and omits enrich.go/enrich_test.go, both of which the ground truth flags as needing verification/changes."
+}

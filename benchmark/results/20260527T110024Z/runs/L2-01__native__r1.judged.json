@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies both core responsibilities: using tree-sitter to split source files into bounded chunks, and producing the chunk records (with EmbedText output) that the indexer later embeds — matching the ground truth with additional correct detail about fallback behavior and gap-filling."
+}

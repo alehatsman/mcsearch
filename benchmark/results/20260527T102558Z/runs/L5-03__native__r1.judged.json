@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies server.go for tool registration and mentions splitting logic into separate files (server_graph.go pattern), but misses the store layer changes needed for new queries, README.md updates, and doesn't clearly state that LLM_GUIDE.md should not be hand-edited. The core mechanics are right but key files from the ground truth are omitted."
+}

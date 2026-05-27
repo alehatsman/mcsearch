@@ -1,0 +1,81 @@
+{
+  "qid": "L5-02",
+  "mode": "native",
+  "rep": 1,
+  "question": "What breaks if I change the `rrfK` constant from 60 to 30?",
+  "ground_truth": "Functionally: rank fusion gets sharper (lower `k` weights top ranks more heavily). Tests that assert specific ordering or `RRFScore` thresholds in `internal/store/store_test.go` (around the `validateToken` test and the BM25/RRF tests at lines ~383-488) may flip — particularly the assertions about `RRFScore > 0` and the order of needle-vs-distractor rows. No other package reads `rrfK`. Comment at `store.go:922` should be updated to match.",
+  "started": 1779880712,
+  "finished": 1779880763,
+  "wall_seconds": 51,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 53374,
+    "duration_api_ms": 54606,
+    "ttft_ms": 1609,
+    "num_turns": 5,
+    "result": "**Nothing hard-breaks, but ranking behavior changes and one comment becomes stale.**\n\n**Mathematical effect**: RRF score = `1/(k+rank)`. Lowering k from 60→30 amplifies the spread between top and bottom ranks:\n\n| rank | k=60 | k=30 |\n|------|------|------|\n| 1    | 1/61 ≈ 0.0164 | 1/31 ≈ 0.0323 |\n| 10   | 1/70 ≈ 0.0143 | 1/40 ≈ 0.0250 |\n| 60   | 1/120 ≈ 0.0083 | 1/90 ≈ 0.0111 |\n\nTop-ranked documents pull further ahead relative to lower-ranked ones — the fusion becomes more \"winner-takes-all.\"\n\n**Tests**: No test asserts a specific RRF score magnitude. Tests only check `RRFScore > 0` or `RRFScore == 0` and result ordering. `TestHybridSearchBM25Surfaces` (`store_test.go:384`) verifies `auth.go` is the top hybrid hit because it's BM25 rank #1 and that ordering survives k=30 fine.\n\n**Stale comments** (would need updating):\n- `store.go:922–923`: \"60 is the canonical default from Cormack et al. (2009)\"\n- `store.go:721`: documents the formula as `1/(60+sem_rank) + 1/(60+bm25_rank)`\n\n**Downstream score usage**: `context.go:666` falls back to `h.RRFScore` for ordering when cosine is zero. The comment at line 663 already notes scale doesn't matter (\"ordering within the list is what matters\"), so the ~2× larger values are harmless.\n\nThe comment at `store.go:923` says the value is \"robust to values in [10, 100]\", so 30 is within the stated safe range — no correctness breakage, just a ranking shift toward top-rank dominance.",
+    "stop_reason": "end_turn",
+    "session_id": "b4dea548-ae75-44e7-bfeb-addf591a2002",
+    "total_cost_usd": 0.14026689999999997,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 20944,
+      "cache_read_input_tokens": 78273,
+      "output_tokens": 2512,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 20944,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 1253,
+          "cache_read_input_tokens": 29807,
+          "cache_creation_input_tokens": 3998,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3998
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 457,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000547,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 2512,
+        "cacheReadInputTokens": 78273,
+        "cacheCreationInputTokens": 20944,
+        "webSearchRequests": 0,
+        "costUSD": 0.1397199,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "f8b812a0-b303-4ced-8bd9-904e3fbae7db"
+  }
+}

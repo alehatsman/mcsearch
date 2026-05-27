@@ -1,0 +1,81 @@
+{
+  "qid": "L1-02",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Where is the MCP stdio server entry point? File and function.",
+  "ground_truth": "`internal/mcp/server.go:851` — `func (s *Server) RunStdio(ctx context.Context) error`.",
+  "started": 1779877576,
+  "finished": 1779877586,
+  "wall_seconds": 10,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 9345,
+    "duration_api_ms": 10402,
+    "ttft_ms": 2361,
+    "num_turns": 4,
+    "result": "`cmd/dex/main.go:1961`, function `cmdMCP`.\n\nIt parses flags, builds a server via `newServerFromEnv`, then calls `srv.RunStdio(ctx)` — that's the stdio transport entry point for the MCP server.",
+    "stop_reason": "end_turn",
+    "session_id": "12514cfe-8331-4c2c-b0cd-beecd7c77eee",
+    "total_cost_usd": 0.05278775000000001,
+    "usage": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 7127,
+      "cache_read_input_tokens": 68675,
+      "output_tokens": 327,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 7127,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 66,
+          "cache_read_input_tokens": 19614,
+          "cache_creation_input_tokens": 374,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 374
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 450,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00053,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 8,
+        "outputTokens": 327,
+        "cacheReadInputTokens": 68675,
+        "cacheCreationInputTokens": 7127,
+        "webSearchRequests": 0,
+        "costUSD": 0.052257750000000006,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "fe13421c-8a2c-44c8-b02c-3cbe354d17ce"
+  }
+}

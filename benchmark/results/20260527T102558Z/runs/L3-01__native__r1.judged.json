@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that nothing writes to chunk_vecs directly, that SQLite triggers on the chunks table (INSERT/UPDATE/DELETE) mirror data into chunk_vecs, references the correct file (internal/store/store.go) with accurate line ranges, and accurately traces the call chain through UpsertMany — fully matching the ground truth."
+}

@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "Correctly identifies the file (internal/store/store.go) and the RRF constant rrfK=60 at line 924, but names the wrong function — the ground truth specifies `Search` at line 928, not `searchRaw` at line 958."
+}

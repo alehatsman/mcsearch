@@ -1,0 +1,81 @@
+{
+  "qid": "L1-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Which package and function acquires the per-cache-dir lock? Name the syscall used.",
+  "ground_truth": "Package `internal/lock`. `lock.go:60` calls `syscall.Flock(fd, LOCK_EX|LOCK_NB)`. POSIX flock(2), non-blocking exclusive.",
+  "started": 1779879743,
+  "finished": 1779879755,
+  "wall_seconds": 12,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 11517,
+    "duration_api_ms": 12817,
+    "ttft_ms": 2691,
+    "num_turns": 3,
+    "result": "Package **`internal/lock`**, function **`Acquire`** (`internal/lock/lock.go:60`).\n\nSyscall: `syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)` — POSIX `flock(2)`, non-blocking exclusive.",
+    "stop_reason": "end_turn",
+    "session_id": "ab4a4ea8-dcf4-4524-93c4-4906eee808bc",
+    "total_cost_usd": 0.0474497,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 6854,
+      "cache_read_input_tokens": 54434,
+      "output_tokens": 323,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 6854,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 86,
+          "cache_read_input_tokens": 18578,
+          "cache_creation_input_tokens": 6204,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 6204
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 456,
+        "outputTokens": 19,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005510000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 323,
+        "cacheReadInputTokens": 54434,
+        "cacheCreationInputTokens": 6854,
+        "webSearchRequests": 0,
+        "costUSD": 0.0468987,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "04911c63-37d2-4c16-961d-14b91f281fba"
+  }
+}

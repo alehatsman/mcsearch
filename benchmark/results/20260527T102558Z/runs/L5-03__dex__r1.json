@@ -1,0 +1,81 @@
+{
+  "qid": "L5-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "If I want to add a new MCP tool (say `mcp__dex__find_imports`), what files do I edit?",
+  "ground_truth": "- `internal/mcp/server.go` — add the handler method, register it in the tool list assembled by `RunStdio` / server initialisation.\n- `internal/mcp/<tool>.go` if you split it out, plus a `_test.go`.\n- The store layer if a new query is needed (e.g. `internal/store/store.go` with a corresponding `Store.FindImports`).\n- `README.md` MCP tool table.\n- `LLM_GUIDE.md` is regenerated, do not hand-edit.\nNo changes to `internal/index`, `internal/watch`, `internal/embed` etc.",
+  "started": 1779878608,
+  "finished": 1779878647,
+  "wall_seconds": 39,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 40586,
+    "duration_api_ms": 36282,
+    "ttft_ms": 3411,
+    "num_turns": 10,
+    "result": "Now I have a complete picture. Here's exactly what to edit:\n\n**1. `internal/mcp/server.go` — register the tool**\n\nIn `RunStdio` (around line 860), add an `sdk.AddTool` call:\n\n```go\nsdk.AddTool(srv, &sdk.Tool{\n    Name:        \"find_imports\",\n    Description: \"...\",\n}, s.findImports)\n```\n\n**2. `internal/mcp/server.go` (or a new file) — implement the handler**\n\nAdd the method on `*Server`. Look at `s.graphDeps` (`server_graph.go`) as the closest analogue — it also deals with import edges. The handler signature follows the SDK pattern:\n\n```go\nfunc (s *Server) findImports(\n    ctx context.Context,\n    req *sdk.CallToolRequest,\n    in FindImportsInput,\n) (*sdk.CallToolResult, FindImportsOutput, error) { ... }\n```\n\nAlso add the exported CLI wrapper (see `Search`/`FindSymbol` at lines 93–100):\n\n```go\nfunc (s *Server) FindImports(ctx context.Context, in FindImportsInput) (FindImportsOutput, error) {\n    _, out, err := s.findImports(ctx, nil, in)\n    return out, err\n}\n```\n\n**That's it — two changes, both in `internal/mcp/`.** If the handler is large, put it in a new file like `internal/mcp/server_imports.go` (mirroring `server_graph.go`).\n\n**Files summary:**\n\n| File | What to add |\n|---|---|\n| `internal/mcp/server.go` | `sdk.AddTool(...)` call in `RunStdio` + exported wrapper method |\n| `internal/mcp/server.go` or new `server_imports.go` | handler implementation + input/output types |",
+    "stop_reason": "end_turn",
+    "session_id": "067534f5-9398-425d-b2c3-ce1638bda98a",
+    "total_cost_usd": 0.10897414999999999,
+    "usage": {
+      "input_tokens": 12,
+      "cache_creation_input_tokens": 10917,
+      "cache_read_input_tokens": 150628,
+      "output_tokens": 1484,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 10917,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 519,
+          "cache_read_input_tokens": 21602,
+          "cache_creation_input_tokens": 2176,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2176
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 466,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005510000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 12,
+        "outputTokens": 1484,
+        "cacheReadInputTokens": 150628,
+        "cacheCreationInputTokens": 10917,
+        "webSearchRequests": 0,
+        "costUSD": 0.10842315,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "bdc49dd5-3e5d-4766-bab6-cb653b9551b0"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "qid": "L2-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "What is `internal/ignore` for? Beyond .gitignore, what does it block?",
+  "ground_truth": "Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dex-ignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.",
+  "started": 1779879913,
+  "finished": 1779879937,
+  "wall_seconds": 24,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 25070,
+    "duration_api_ms": 28368,
+    "ttft_ms": 3592,
+    "num_turns": 5,
+    "result": "The package is a 4-layer filter chain for deciding what gets indexed. Beyond `.gitignore`:\n\n**1. Extension/basename allow-list (first gate — most files die here)**\n- Only files with extensions in `IndexableExtensions` (`.go`, `.py`, `.ts`, `.md`, `.yaml`, etc.) or exact basenames in `IndexableBasenames` (`Makefile`, `Dockerfile`, `go.mod`, etc.) are even considered. Everything else is dropped immediately.\n\n**2. `DefaultPatterns` (hard-coded gitignore-style rules)**\nApplied before `.gitignore`. Blocks:\n- **Secret-shaped filenames**: `.env`, `.env.*`, `*.pem`, `*.key`, `*.key.gpg`, `*.kdbx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `authorized_keys`, `known_hosts`, `secrets.yml/yaml`, `*.tfvars`\n- **Dependency/build dirs**: `node_modules/`, `vendor/`, `.venv/`, `venv/`, `.tox/`, `__pycache__/`, `target/`, `dist/`, `build/`, `.next/`, `.cache/`\n- **VCS/tool dirs**: `.git/`, `.hg/`, `.svn/`, `.dex/`, `.terraform/`\n- **Noise files**: `*.log`, `*.lock`, `*.min.js`, `*.min.css`\n- **Legal/license files**: `LICENSE*`, `LICENCE*`, `COPYING*`, `COPYRIGHT*`, `NOTICE*`, `AUTHORS*`, `PATENTS*`, `LEGAL*` — excluded because their uniform legalese pollutes RAG results\n\n**3. `.dex-ignore`** — project-root user override, same gitignore syntax, evaluated after `.gitignore`\n\n**4. Content heuristics (applied to file bytes)**\n- `LooksBinary`: NUL byte in first 8 KB → skip\n- `LooksLikeSecret`: first 4 KB scanned against regexes for AWS keys (`AKIA…`, `ASIA…`), PEM blocks, GitHub PATs, Slack tokens, OpenAI/Anthropic-style keys, Google API keys, Stripe keys, GitLab PATs, SendGrid tokens → skip (suppressed for test paths)\n\nNote: only the **root-level** `.gitignore` is read — nested `.gitignore` files are intentionally ignored.",
+    "stop_reason": "end_turn",
+    "session_id": "ac05dc6b-a0f2-44ac-bc17-8c5773b726a9",
+    "total_cost_usd": 0.059639849999999994,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 4647,
+      "cache_read_input_tokens": 92102,
+      "output_tokens": 935,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 4647,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 583,
+          "cache_read_input_tokens": 18680,
+          "cache_creation_input_tokens": 4416,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 4416
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 456,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000531,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 935,
+        "cacheReadInputTokens": 92102,
+        "cacheCreationInputTokens": 4647,
+        "webSearchRequests": 0,
+        "costUSD": 0.05910884999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "aabf690a-a3a4-41dc-829b-d075ecb61101"
+  }
+}

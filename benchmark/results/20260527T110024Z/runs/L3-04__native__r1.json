@@ -1,0 +1,81 @@
+{
+  "qid": "L3-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "Which retrieval signals does `Store.Search` combine, and how are they fused?",
+  "ground_truth": "Two signals run in parallel: cosine KNN via the `sqlite-vec` `chunk_vecs` virtual table, and BM25 via the FTS5 `chunks_fts` table. They are fused with Reciprocal Rank Fusion (`rrfK=60`, Cormack 2009): `score(id) = Σ 1/(60+rank)` over both lists. An optional cross-encoder rerank pass can then reorder the fused pool.",
+  "started": 1779880086,
+  "finished": 1779880109,
+  "wall_seconds": 23,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 23491,
+    "duration_api_ms": 24757,
+    "ttft_ms": 2670,
+    "num_turns": 5,
+    "result": "`Store.Search` combines **two retrieval signals**:\n\n1. **Semantic (cosine similarity)** — via `sqlite-vec` KNN over chunk embeddings (`scoreSemantic`)\n2. **BM25 (lexical)** — via FTS5 full-text search (`scoreBM25`)\n\n**Fusion: Reciprocal Rank Fusion (RRF)**\n\nEach leg independently retrieves a candidate pool of `max(k*5, 30)` results. RRF then combines them:\n\n```\nrrf_score(id) = 1/(60 + rank_sem)  +  1/(60 + rank_bm25)\n```\n\n- `rrfK = 60` (Cormack et al. 2009 canonical constant) — `store.go:924`\n- IDs appearing in only one leg get a contribution only from that leg; missing ranks simply contribute 0\n- For BM25-only hits, cosine similarity is back-filled via `scoreSemanticForIDs` so `Hit.Score` is populated for every result — `store.go:1019–1029`\n- The fused list is sorted descending by RRF score — `store.go:1043`\n\n**Optional third stage: cross-encoder reranking**\n\nIf `opts.Reranker != nil` and `len(fused) > k`, the RRF-ranked pool is passed to a reranker (cross-encoder) which re-scores and truncates to `k`. On `ErrUnreachable`, it falls back to the RRF ordering without failing — `store.go:1049–1059`.\n\n**Degradation**: if `queryText` is empty or `DisableBM25` is set, the BM25 leg is skipped entirely and only semantic ranking is used — `store.go:962–975`.\n\n**Post-fusion diversity**: `Search` (the public method) optionally applies `diversify()` to cap hits per file path via `opts.MaxHitsPerFile` — `store.go:930–933`.",
+    "stop_reason": "end_turn",
+    "session_id": "7bd09f63-5fd0-4db9-9aed-3933ed5fe83b",
+    "total_cost_usd": 0.0679525,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 9050,
+      "cache_read_input_tokens": 69240,
+      "output_tokens": 846,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 9050,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 488,
+          "cache_read_input_tokens": 20318,
+          "cache_creation_input_tokens": 1593,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1593
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000535,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 846,
+        "cacheReadInputTokens": 69240,
+        "cacheCreationInputTokens": 9050,
+        "webSearchRequests": 0,
+        "costUSD": 0.0674175,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "99c6d23f-b211-4ca4-8680-ea16db9a1ba7"
+  }
+}

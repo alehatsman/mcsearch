@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies `ask` as the primary composite/orchestrating tool that calls the same underlying primitives as the lower-level tools, accurately describes the relationship (lower-level tools as single-lane primitives vs. ask as a multi-lane planner), and confirms it's defined in the internal/mcp area — fully consistent with the ground truth."
+}

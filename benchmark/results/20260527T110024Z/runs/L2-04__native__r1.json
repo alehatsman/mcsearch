@@ -1,0 +1,81 @@
+{
+  "qid": "L2-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is `internal/proj`? List its main concerns.",
+  "ground_truth": "Project root resolution + cache-dir layout + indexability guard. Computes `CacheDir = baseCacheDir/sha256(realpath(root))`, exposes `DBPath` / `LockPath`, and the guard refuses to index dangerous roots (e.g. `$HOME`, non-git non-allowlisted dirs).",
+  "started": 1779879900,
+  "finished": 1779879913,
+  "wall_seconds": 13,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 12310,
+    "duration_api_ms": 13368,
+    "ttft_ms": 2445,
+    "num_turns": 4,
+    "result": "`internal/proj` has two concerns:\n\n**1. Project identity resolution (`proj.go`)**\n- Canonicalizes a user-supplied path (abs + symlink resolution) and validates it's a directory.\n- Derives a stable `ID` as `sha256(canonical_root)` hex, used as the per-project cache directory name under `$DEX_INDEX_DIR`.\n- Constructs the `Project` struct: `Root`, `ID`, `CacheDir`, `DBPath` (`index.db`), `LockPath` (`index.lock`).\n- `EnsureCacheDir()` creates the cache directory on demand.\n\n**2. Indexability guard (`guard.go`)**\n- `CheckIndexable` prevents accidentally indexing destructive paths.\n- Hard-denies a fixed set of system roots (`/`, `/etc`, `/usr`, `/home`, etc., plus macOS paths).\n- Hard-denies the user's home directory.\n- Allows paths that are inside a git work tree (walks up looking for `.git`).\n- Also allows paths under prefixes listed in `DEX_ALLOW_PATHS` (colon-separated, `~`-expanded).\n- All restrictions are bypassable with `--force`.",
+    "stop_reason": "end_turn",
+    "session_id": "d8e80b3d-7a86-4362-b625-75730cc0ab6e",
+    "total_cost_usd": 0.047581700000000005,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 6714,
+      "cache_read_input_tokens": 47884,
+      "output_tokens": 500,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 6714,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 289,
+          "cache_read_input_tokens": 17581,
+          "cache_creation_input_tokens": 1994,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1994
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 449,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000524,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 500,
+        "cacheReadInputTokens": 47884,
+        "cacheCreationInputTokens": 6714,
+        "webSearchRequests": 0,
+        "costUSD": 0.0470577,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "e48a2944-a433-4b35-86d6-e58f9924774f"
+  }
+}

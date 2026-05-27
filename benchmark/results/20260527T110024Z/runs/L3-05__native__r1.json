@@ -1,0 +1,81 @@
+{
+  "qid": "L3-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "How does the agent's `mcp__dex__ask` tool relate to the lower-level MCP tools (search, find_symbol, graph_*)?",
+  "ground_truth": "`ask` is the primary, composite MCP tool. The other tools (`search_semantic`, `search_symbol`, `graph_callers`/`callees`/`deps`/`neighbors`, `view_summarize`) are the legs `ask` composes — it plans a retrieval, calls those legs internally, and returns a synthesised answer. Defined in `internal/mcp`.",
+  "started": 1779880140,
+  "finished": 1779880180,
+  "wall_seconds": 40,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 40889,
+    "duration_api_ms": 41648,
+    "ttft_ms": 3341,
+    "num_turns": 5,
+    "result": "`ask` (`mcp__dex__ask`) is a query planner that **does not call the other MCP tool handlers** — it reaches past them and calls the same underlying primitives directly, then merges and enriches everything in one response.\n\nHere's what it does internally (`context.go:257`):\n\n1. **Intent classification** (`resolveIntent`, line 410): keyword regexes + identifier shape detection → one of `behavior_search | symbol_lookup | callers | callees | architecture | package_topology | editing_context`.\n\n2. **Symbol lane** (`runSymbolLane`, line 539): for any identifier-shaped token in the question, calls `st.FindSymbol` directly — the same store call that `search_symbol` wraps at `server.go:404`. Runs even for non-symbol intents.\n\n3. **Semantic lane** (`runSemanticLane`, line 643): embeds the question via `EmbedClient.Embed` + `st.Search` — identical to what `search_semantic` does at `server.go:303–331`. Always runs (for recall). For `architecture`/`package_topology`, also runs a **summary lane** (`runSummaryLane`, line 598) against `st.SearchSummaries` and prepends its results.\n\n4. **Graph enrichment** (`enrichGraph`, called at line 368, defined in `context_graph.go`): calls `loadGraphView` which reads the static graph stored in the index — the same data that `graph_deps`, `graph_callers`, `graph_callees` expose. For callers/callees intents, also populates `references` via ripgrep fallback (non-Go languages).\n\n5. **Merging + output**: calls `pickSuggestedReads`, `inlineContent` (inlines file slices into the response using a shared byte budget), `enrich` (adds annotations: tests, blame, CODEOWNERS, nearest doc), `buildNextAction`, `buildAvoid`.\n\n**Why this design**: The individual tools (`search_semantic`, `search_symbol`, `graph_neighbors`, etc.) are deliberately left as escape hatches — their descriptions all say \"Prefer `ask`\". `ask` exists precisely because the right answer to most questions requires *all three lanes simultaneously* (symbol + semantic + graph), routed by intent, not piecemeal tool calls. The registered tool descriptions (`server.go:862–876`) reinforce this explicitly.",
+    "stop_reason": "end_turn",
+    "session_id": "351f5386-e556-409c-b4b2-892812b23526",
+    "total_cost_usd": 0.20160495,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 41189,
+      "cache_read_input_tokens": 80924,
+      "output_tokens": 1487,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 41189,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 1120,
+          "cache_read_input_tokens": 32303,
+          "cache_creation_input_tokens": 21747,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 21747
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 471,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000546,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 1487,
+        "cacheReadInputTokens": 80924,
+        "cacheCreationInputTokens": 41189,
+        "webSearchRequests": 0,
+        "costUSD": 0.20105895000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "58efa2e3-ccc6-491e-b0fa-6e845502c9df"
+  }
+}

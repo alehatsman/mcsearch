@@ -1,0 +1,81 @@
+{
+  "qid": "L3-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "Which retrieval signals does `Store.Search` combine, and how are they fused?",
+  "ground_truth": "Two signals run in parallel: cosine KNN via the `sqlite-vec` `chunk_vecs` virtual table, and BM25 via the FTS5 `chunks_fts` table. They are fused with Reciprocal Rank Fusion (`rrfK=60`, Cormack 2009): `score(id) = Σ 1/(60+rank)` over both lists. An optional cross-encoder rerank pass can then reorder the fused pool.",
+  "started": 1779878037,
+  "finished": 1779878059,
+  "wall_seconds": 22,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 23033,
+    "duration_api_ms": 24233,
+    "ttft_ms": 3576,
+    "num_turns": 5,
+    "result": "**`Store.Search` combines two retrieval signals:**\n\n1. **Semantic (cosine similarity)** — `scoreSemantic`: sqlite-vec KNN over the embedding index, returning cosine distances sorted descending.\n2. **Lexical (BM25)** — `scoreBM25`: FTS5 full-text search, returning BM25 scores sorted descending.\n\n**Fusion: Reciprocal Rank Fusion (RRF)**\n\nBoth legs independently retrieve a candidate pool of `max(k×5, 30)` results. Each hit is scored as:\n\n```\nrrf_score(id) = Σ  1 / (60 + rank_in_list)\n```\n\nwhere `rrfK = 60` (Cormack et al. 2009 canonical default). The two rank lists are summed — a hit appearing in both legs accumulates contributions from each. The merged list is sorted descending by RRF score and truncated to `k`.\n\n**Key details:**\n- `store.go:962`: BM25 leg is skipped entirely if `queryText` is empty or `DisableBM25` is set — degrades to semantic-only.\n- `store.go:1019–1029`: For BM25-only hits (not in the semantic pool), cosine scores are back-filled via `scoreSemanticForIDs` so `Hit.Score` is always populated.\n- `store.go:1049–1058`: After fusion, an optional **reranker** (cross-encoder) can re-order the top-`k` pool; if the reranker is unreachable (`ErrUnreachable`), it silently falls back to RRF order.\n- `store.go:930–933`: The public `Search` wraps `searchRaw` and optionally applies **per-file diversity** capping via `diversify` (`MaxHitsPerFile` option).",
+    "stop_reason": "end_turn",
+    "session_id": "0dfad9dd-ad7e-403d-aa86-e8d0c9dfb87b",
+    "total_cost_usd": 0.07121354999999999,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 9763,
+      "cache_read_input_tokens": 71331,
+      "output_tokens": 843,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 9763,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 452,
+          "cache_read_input_tokens": 21278,
+          "cache_creation_input_tokens": 1346,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1346
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00054,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 843,
+        "cacheReadInputTokens": 71331,
+        "cacheCreationInputTokens": 9763,
+        "webSearchRequests": 0,
+        "costUSD": 0.07067355,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "a8d98a81-e4c3-4931-bd63-901a8224ed47"
+  }
+}

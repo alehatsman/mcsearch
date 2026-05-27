@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the POSIX flock exclusive lock in internal/lock/lock.go:60, explains the non-blocking behavior returning ErrLocked/EWOULDBLOCK, and notes the kernel auto-releases the lock on process death — all matching the ground truth. Additional detail about within-process concurrency is correct and not misleading."
+}

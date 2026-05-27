@@ -1,0 +1,81 @@
+{
+  "qid": "L2-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is `internal/ignore` for? Beyond .gitignore, what does it block?",
+  "ground_truth": "Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dex-ignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.",
+  "started": 1779879938,
+  "finished": 1779879955,
+  "wall_seconds": 17,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 16830,
+    "duration_api_ms": 17885,
+    "ttft_ms": 2220,
+    "num_turns": 3,
+    "result": "`internal/ignore` is the indexing filter chain. Beyond `.gitignore`, it blocks:\n\n**Extension allow-list (gate 1)** — only files with extensions in `IndexableExtensions` (`.go`, `.py`, `.ts`, `.yaml`, etc.) or basenames in `IndexableBasenames` (`Makefile`, `Dockerfile`, `go.mod`, etc.) are even considered. Everything else is dropped immediately.\n\n**Hard-coded `DefaultPatterns` (gitignore layer a)** — always applied regardless of what `.gitignore` says:\n- Secret-shaped files: `.env`, `.env.*`, `*.pem`, `*.key`, `*.key.gpg`, `*.kdbx`, SSH key files (`id_rsa`, `id_ed25519`, `id_ecdsa`, `authorized_keys`, `known_hosts`), `*.tfvars`, `secrets.yml/yaml`\n- Dependency/build dirs: `node_modules/`, `vendor/`, `.venv/`, `venv/`, `__pycache__/`, `target/`, `dist/`, `build/`, `.next/`, `.cache/`, `.tox/`\n- VCS dirs: `.git/`, `.hg/`, `.svn/`\n- Noise files: `*.log`, `*.lock`, `*.min.js`, `*.min.css`, `.dex/`, `.terraform/`\n- Legal text files: `LICENSE*`, `LICENCE*`, `COPYING*`, `COPYRIGHT*`, `NOTICE*`, `AUTHORS*`, `PATENTS*`, `LEGAL*` — specifically excluded because their legalese pollutes RAG results\n\n**`.dex-ignore`** (gitignore layer c) — project-specific ignore file, same syntax as `.gitignore`, root-only (nested files not read).\n\n**Binary heuristic** — NUL byte in first 8 KB (`LooksBinary`), catches files like a `.yml` that's actually a packed binary.\n\n**Secret content scan** — first 4 KB checked against regexes for AWS keys (`AKIA*`/`ASIA*`), PEM blocks, GitHub PATs, Slack tokens, OpenAI-style keys, Google API keys, Stripe keys, GitLab PATs, SendGrid keys. Suppressed for test paths (`IsTestPath`) since test fixtures routinely embed fake credentials.",
+    "stop_reason": "end_turn",
+    "session_id": "94e298e5-3088-4dff-ae3b-0941243b43e2",
+    "total_cost_usd": 0.059738799999999995,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 9120,
+      "cache_read_input_tokens": 47876,
+      "output_tokens": 709,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 9120,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 554,
+          "cache_read_input_tokens": 17566,
+          "cache_creation_input_tokens": 4415,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 4415
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 456,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000526,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 709,
+        "cacheReadInputTokens": 47876,
+        "cacheCreationInputTokens": 9120,
+        "webSearchRequests": 0,
+        "costUSD": 0.059212799999999996,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "6d0d9f58-83f3-4b29-9483-afcaf04cebeb"
+  }
+}

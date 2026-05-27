@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies the PruneUnseen strict-less-than cutoff mechanism and that nanoseconds prevent timestamp collisions, but incorrectly describes the failure mode as 'two consecutive runs completing within the same millisecond' rather than the actual issue: the index pass and prune call in the *same* run can happen within the same second, causing freshly-upserted rows (last_seen == cutoff) to be wrongly deleted."
+}

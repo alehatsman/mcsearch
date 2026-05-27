@@ -1,0 +1,81 @@
+{
+  "qid": "L2-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "What is `internal/ignore` for? Beyond .gitignore, what does it block?",
+  "ground_truth": "Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dex-ignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.",
+  "started": 1779877823,
+  "finished": 1779877849,
+  "wall_seconds": 26,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 26320,
+    "duration_api_ms": 27456,
+    "ttft_ms": 3064,
+    "num_turns": 5,
+    "result": "The package is a 4-gate filter chain for deciding what gets indexed:\n\n**Gate 1 — Extension/basename allow-list** (first, not last)\nOnly files with a known extension (`IndexableExtensions`) or a known special basename (`Makefile`, `Dockerfile`, `go.mod`, `Caddyfile`, etc.) are admitted. Everything else is dropped immediately.\n\n**Gate 2 — Pattern matcher** (gitignore semantics via `go-gitignore`, later rule wins)\nThree layers composed in order:\n- `DefaultPatterns` — hard-coded blocks:\n  - Secrets by filename: `.env`, `.env.*`, `*.pem`, `*.key`, `*.key.gpg`, `*.kdbx`, `id_rsa`, `id_ed25519`, `id_ecdsa`, `authorized_keys`, `known_hosts`, `secrets.yml/yaml`, `*.tfvars`, `.terraform/`\n  - Dependency/build dirs: `node_modules/`, `vendor/`, `.venv/`, `venv/`, `.tox/`, `__pycache__/`, `target/`, `dist/`, `build/`, `.next/`, `.cache/`\n  - VCS dirs: `.git/`, `.hg/`, `.svn/`, `.dex/`\n  - Generated files: `*.log`, `*.lock`, `*.min.js`, `*.min.css`\n  - **Legal/license files**: `LICENSE*`, `LICENCE*`, `COPYING*`, `COPYRIGHT*`, `NOTICE*`, `AUTHORS*`, `PATENTS*`, `LEGAL*` — blocked because their uniform legalese pollutes RAG results\n- Root `.gitignore`\n- Root `.dex-ignore` (same syntax, user-extensible)\n\nNote: only the **root-level** `.gitignore` is read; nested ones are intentionally ignored.\n\n**Gate 3 — Binary heuristic**\nNUL byte in the first 8 KB → skip. Catches e.g. a `.yml` that's actually a packed binary.\n\n**Gate 4 — Secret content scan**\nFirst 4 KB is matched against regexes for: AWS access keys (`AKIA…`, `ASIA…`), PEM private keys, GitHub PATs (classic + fine-grained), Slack tokens, OpenAI/Anthropic-style API keys, Google API keys, Stripe live/restricted keys, GitLab PATs, SendGrid keys. This gate is **suppressed for test paths** (files under `tests/`, `testdata/`, `fixtures/`, `*_test.go`, `*.test.ts`, etc.) since test files legitimately embed fake credentials.",
+    "stop_reason": "end_turn",
+    "session_id": "4abaded4-e974-4f0b-923f-9e79d40a447e",
+    "total_cost_usd": 0.07964845,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 10235,
+      "cache_read_input_tokens": 86514,
+      "output_tokens": 984,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 10235,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 632,
+          "cache_read_input_tokens": 18680,
+          "cache_creation_input_tokens": 4416,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 4416
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 456,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000526,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 984,
+        "cacheReadInputTokens": 86514,
+        "cacheCreationInputTokens": 10235,
+        "webSearchRequests": 0,
+        "costUSD": 0.07912245,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "5055a5d2-7640-4e3b-bd27-ebe76a28bc17"
+  }
+}

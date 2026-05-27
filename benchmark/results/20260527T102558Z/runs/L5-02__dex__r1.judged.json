@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies the rank-fusion sharpening effect and the stale comment, but directly contradicts the ground truth on the most important point: it claims tests survive and remain green, whereas the ground truth says the BM25/RRF tests at lines ~383-488 may flip due to changed ordering and RRFScore assertions."
+}

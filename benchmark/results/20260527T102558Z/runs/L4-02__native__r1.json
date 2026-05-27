@@ -1,0 +1,81 @@
+{
+  "qid": "L4-02",
+  "mode": "native",
+  "rep": 1,
+  "question": "Where does the dimension of the embedding vector get locked in, and what happens if the embedding model changes?",
+  "ground_truth": "Dim is fixed at index creation time — the `chunk_vecs` `vec0` virtual table is declared with a specific embedding dim, and the `chunks.vec` blobs are sized to match. Changing `DEX_EMBED_MODEL` to a model with a different output dim requires a full `dex reindex` (cannot be hot-swapped). This is enforced by the schema, not by application checks.",
+  "started": 1779878244,
+  "finished": 1779878267,
+  "wall_seconds": 23,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 23623,
+    "duration_api_ms": 24951,
+    "ttft_ms": 2243,
+    "num_turns": 7,
+    "result": "Here's the full picture:\n\n**Where the dimension gets locked in:**\n\n1. **First write** — `UpsertMany` at `store.go:550-563`: on the very first batch, `len(rows[0].Vec)` is recorded in `s.dim` (an `atomic.Int64`) and persisted to the `meta` table under key `\"dim\"`.\n2. **On open** — `OpenWith` at `store.go:108-119`: the stored dim is read back from `meta` and restored into `s.dim`, so the dimension is remembered across process restarts.\n3. **`chunk_vecs` schema** — `ensureVecTable` at `store.go:333-335`: the `vec0` virtual table is created with `embedding FLOAT[%d]` where `%d` is `s.dim`. This schema is immutable once the table exists — SQLite's `CREATE VIRTUAL TABLE IF NOT EXISTS` is a no-op after the first time.\n\n**What happens if the embedding model changes:**\n\nIf a new model produces vectors of a different dimension, `UpsertMany` at `store.go:586-588` detects the mismatch and hard-errors:\n\n```\nvector dim mismatch: index has dim=%d, got %d (did the embedding model change?)\n```\n\nThe transaction is rolled back and nothing is written. The index is effectively stuck — you can't add new chunks. **There is no automatic migration path.** The only resolution is to delete the index file and re-index from scratch with the new model (which will set a fresh dim on the first write).",
+    "stop_reason": "end_turn",
+    "session_id": "4bf932cf-7041-4832-91e8-eda0249a682b",
+    "total_cost_usd": 0.08222075,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 10123,
+      "cache_read_input_tokens": 90855,
+      "output_tokens": 1097,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 10123,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 372,
+          "cache_read_input_tokens": 21913,
+          "cache_creation_input_tokens": 1071,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1071
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 457,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000527,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 1097,
+        "cacheReadInputTokens": 90855,
+        "cacheCreationInputTokens": 10123,
+        "webSearchRequests": 0,
+        "costUSD": 0.08169375,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "4b2f4cc2-d8bb-4a31-b200-da799822d311"
+  }
+}

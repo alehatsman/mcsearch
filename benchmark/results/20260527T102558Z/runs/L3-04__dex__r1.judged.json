@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies both signals (cosine KNN via sqlite-vec and BM25 via FTS5), correctly describes RRF fusion with rrfK=60 citing Cormack 2009, and accurately describes the optional cross-encoder rerank pass — all matching the ground truth precisely."
+}

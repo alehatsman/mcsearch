@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies the chunk_vecs vec0 virtual table locked to a specific dim and that a full reindex is needed, but it contradicts the ground truth on enforcement mechanism: ground truth says it is 'enforced by the schema, not by application checks,' while the answer describes explicit application-level mismatch detection in UpsertMany. The answer also omits that chunks.vec blobs are sized to match."
+}

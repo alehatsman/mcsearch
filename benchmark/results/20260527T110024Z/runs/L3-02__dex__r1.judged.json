@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all three triggers (chunks_ai, chunks_ad, chunks_au) at the exact file location (store.go:159–176), explains the FTS5 external-content table mechanism, and notes the one-time backfill at ~store.go:254–261 with the meta flag guard — matching all key details from the ground truth."
+}

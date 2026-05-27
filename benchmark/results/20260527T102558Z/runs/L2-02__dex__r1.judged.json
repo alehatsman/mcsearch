@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the role of internal/guide (renders LLM_GUIDE.md), the correct inputs (repo/package summaries from the store, graph data), the entry point (guide.Render in render.go), and mentions the CLI command implicitly through the context. All key details match the ground truth."
+}

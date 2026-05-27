@@ -1,0 +1,81 @@
+{
+  "qid": "L5-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "If I rename `Store.Search` to `Store.Query`, which files need to change? List them.",
+  "ground_truth": "- `internal/store/store.go` (definition + comments referencing `Search`)\n- `internal/store/store_test.go` (`TestUpsertAndSearch`, RRF tests)\n- `internal/store/bench_test.go` (`BenchmarkSearch_*`, `benchSearch`)\n- `internal/mcp/server.go` (`(*Server).Search` wraps it; also any internal calls)\n- `internal/mcp/context.go` and `internal/mcp/context_test.go` (router uses `Store.Search`)\n- `internal/mcp/enrich.go` / `enrich_test.go` (uses signature strings — only the comments mention `Search`, but verify)\n- Any other call sites: grep `store.Search\\|st.Search\\|s.Search` across the repo.\nTests must be updated too; the `dex ask` flow calls `Search` transitively.",
+  "started": 1779878494,
+  "finished": 1779878534,
+  "wall_seconds": 40,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 41136,
+    "duration_api_ms": 42340,
+    "ttft_ms": 2285,
+    "num_turns": 10,
+    "result": "No interface declares `Search`. Here are all the files that need to change:\n\n| File | What changes |\n|------|-------------|\n| `internal/store/store.go:928` | Method definition `func (s *Store) Search(...)` |\n| `internal/mcp/server.go:331` | Call `st.Search(...)` inside `Server.Search` |\n| `internal/mcp/context.go:652` | Call `st.Search(...)` inside `runSemanticLane` |\n| `cmd/dex/main.go:876` | Call `st.Search(...)` inside `cmdSearch` |\n| `cmd/dex/main.go:1184` | Call `st.Search(...)` inside the ask/chat loop |\n| `internal/store/store_test.go` | All `st.Search(...)` / `reader.Search(...)` call sites |\n| `internal/store/bench_test.go:79` | `st.Search(...)` inside `benchSearch` |\n| `internal/index/index_test.go:156,340` | `st.Search(...)` calls |\n\nNote: `internal/mcp/server.go:93` defines `func (s *Server) Search(...)` — that's a separate method on `Server`, not `Store`, so it only needs updating if you're renaming all `Search` methods. The `enrich_test.go` and `context_test.go` hits are string literals in test fixtures, not real call sites — update if you care about accuracy there too.",
+    "stop_reason": "end_turn",
+    "session_id": "9c520005-e795-4af1-ad58-cc2eb34cbe14",
+    "total_cost_usd": 0.15809859999999998,
+    "usage": {
+      "input_tokens": 11,
+      "cache_creation_input_tokens": 18626,
+      "cache_read_input_tokens": 200897,
+      "output_tokens": 1826,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 18626,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 368,
+          "cache_read_input_tokens": 29162,
+          "cache_creation_input_tokens": 2325,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 2325
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 459,
+        "outputTokens": 20,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000559,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 11,
+        "outputTokens": 1826,
+        "cacheReadInputTokens": 200897,
+        "cacheCreationInputTokens": 18626,
+        "webSearchRequests": 0,
+        "costUSD": 0.15753959999999997,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "0a191c17-160b-4355-b84f-10c8b02c054f"
+  }
+}

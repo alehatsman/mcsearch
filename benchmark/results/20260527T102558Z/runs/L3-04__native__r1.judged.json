@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies both retrieval signals (cosine KNN via sqlite-vec and BM25 via FTS5), the RRF fusion formula with rrfK=60 citing Cormack 2009, and the optional cross-encoder rerank pass — all matching the ground truth exactly, with additional correct implementation details."
+}

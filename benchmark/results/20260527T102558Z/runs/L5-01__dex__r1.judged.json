@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies most key files (store.go, store_test.go, bench_test.go, context.go, server.go) and adds plausible extra call sites (cmd/dex/main.go, index_test.go), but misses internal/mcp/context_test.go which the ground truth explicitly names, and omits the enrich.go/enrich_test.go verification note."
+}

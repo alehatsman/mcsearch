@@ -1,0 +1,81 @@
+{
+  "qid": "L5-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "What changes if I make the watcher debounce default 2 seconds instead of 500ms?",
+  "ground_truth": "Code: `internal/watch/watch.go:70-71` (the default initialiser). Tests: `internal/watch/watch_test.go:84` passes a 50ms debounce explicitly and is unaffected; any test that relies on the default would need updating (grep `Debounce` in tests). User-visible: `dex watch` reacts slower; bursts of saves coalesce more aggressively (good for editors that save-on-every-keystroke). README mentions \"default 500ms\" in PIPELINE.md — that comment needs updating.",
+  "started": 1779878693,
+  "finished": 1779878706,
+  "wall_seconds": 13,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 12920,
+    "duration_api_ms": 16997,
+    "ttft_ms": 1872,
+    "num_turns": 2,
+    "result": "There are three places that define the default, and all three would need to change:\n\n| Location | Line | Current |\n|---|---|---|\n| `internal/watch/watch.go:71` | fallback when `Debounce <= 0` | `500 * time.Millisecond` |\n| `cmd/dex/main.go:1775` | `watch` subcommand `--debounce` flag default | `500*time.Millisecond` |\n| `cmd/dex/main.go:2021` | MCP auto-watcher via `DEX_WATCH_DEBOUNCE` env | `500*time.Millisecond` |\n\nThe comment at `cmd/dex/env.go:70` documents `DEX_WATCH_DEBOUNCE` as `\"500ms\"` — that string is the human-readable default shown in help/docs, so it would also need updating.\n\n**Behavioural effect:** After each file-save event, the watcher waits for a 2-second quiet window before triggering a re-index pass (`markDirty` → `time.AfterFunc` at `watch.go:166`). Bursts of saves (e.g. a formatter touching many files) are already coalesced by the timer reset, so the main practical difference is:\n\n- Rapid individual saves feel slower to reflect in the index (up to 2s extra latency).\n- Very fast typists who save frequently will see fewer redundant re-index runs, slightly reducing CPU/IO during active editing.\n- The auto-summarize idle drain (`OnIdleAfter`) runs after the debounce fires, so it too gets pushed out by 1.5 s per save cycle.",
+    "stop_reason": "end_turn",
+    "session_id": "b7eae4c0-4f54-4284-bd58-3396389264f2",
+    "total_cost_usd": 0.040903350000000005,
+    "usage": {
+      "input_tokens": 4,
+      "cache_creation_input_tokens": 6111,
+      "cache_read_input_tokens": 30557,
+      "output_tokens": 551,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 6111,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 404,
+          "cache_read_input_tokens": 17696,
+          "cache_creation_input_tokens": 1276,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1276
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-sonnet-4-6": {
+        "inputTokens": 4,
+        "outputTokens": 551,
+        "cacheReadInputTokens": 30557,
+        "cacheCreationInputTokens": 6111,
+        "webSearchRequests": 0,
+        "costUSD": 0.04036035,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 458,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005430000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "060d23b8-8776-440c-a69f-97980f317c48"
+  }
+}

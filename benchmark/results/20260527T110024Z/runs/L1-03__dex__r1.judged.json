@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "Correctly identifies internal/store/store.go, the Search function at line 928, and rrfK = 60 at line 924 — all matching the ground truth exactly, with additional correct detail about searchRaw."
+}

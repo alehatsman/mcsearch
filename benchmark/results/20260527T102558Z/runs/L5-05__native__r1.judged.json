@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies internal/chunk as the core location (languages map, node kinds, containerMethods), internal/ignore for extension filtering, go.mod implicitly via the tree-sitter binding import, and chunk_test.go for tests — all matching the ground truth. The extra detail about internal/mcp/context.go for import extraction is additive and not contradictory."
+}

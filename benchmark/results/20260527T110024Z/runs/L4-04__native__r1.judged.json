@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The agent correctly identifies both tables as virtual tables (fts5/vec0) and captures the atomicity/consistency benefit of triggers and the callsite-isolation point, but misses the ground truth's key emphasis: that virtual tables require specific INSERT/DELETE shapes and getting those wrong corrupts the index. The agent also doesn't clearly articulate that triggers centralize the invariant across multiple distinct Go write paths (UpsertMany, PruneUnseen, backfill), which is the ground truth's central argument. The extra 'embedding dimension not known at schema creation time' reasoning is not in the ground truth and may be spurious."
+}

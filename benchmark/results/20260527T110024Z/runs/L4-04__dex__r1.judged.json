@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that both are virtual tables with specific write semantics, that centralizing the mirror logic in triggers creates a single invariant-maintaining place, and that all Go write paths (UpsertMany, PruneUnseen, etc.) benefit from not needing to know about virtual table specifics — matching the ground truth's core reasoning with additional accurate detail."
+}

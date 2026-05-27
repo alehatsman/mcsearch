@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the exact file and line number (internal/store/store.go:546) and the correct function signature."
+}

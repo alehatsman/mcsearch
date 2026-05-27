@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies UpsertMany/PruneUnseen in store.go, explains the strict less-than cutoff, and explains why nanosecond resolution prevents the race condition where cutoff and upsert timestamps could collide at second resolution, matching the ground truth."
+}

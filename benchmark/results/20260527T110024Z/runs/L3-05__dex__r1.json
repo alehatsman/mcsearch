@@ -1,0 +1,81 @@
+{
+  "qid": "L3-05",
+  "mode": "dex",
+  "rep": 1,
+  "question": "How does the agent's `mcp__dex__ask` tool relate to the lower-level MCP tools (search, find_symbol, graph_*)?",
+  "ground_truth": "`ask` is the primary, composite MCP tool. The other tools (`search_semantic`, `search_symbol`, `graph_callers`/`callees`/`deps`/`neighbors`, `view_summarize`) are the legs `ask` composes — it plans a retrieval, calls those legs internally, and returns a synthesised answer. Defined in `internal/mcp`.",
+  "started": 1779880109,
+  "finished": 1779880140,
+  "wall_seconds": 31,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 31740,
+    "duration_api_ms": 32431,
+    "ttft_ms": 1818,
+    "num_turns": 5,
+    "result": "Here's the precise picture, confirmed from `internal/mcp/context.go`:\n\n**`ask` is a query planner / compositor** (`contextRouter`, `context.go:257`). It does **not** call the other MCP tools as tool invocations — it calls the **same underlying Go store/embed primitives** those tools wrap, in one server-side request:\n\n| Step | Function | What it does | Lower-level equivalent |\n|---|---|---|---|\n| Intent routing | `resolveIntent` | Classifies question → one of 7 intents; extracts identifier candidates | — |\n| Symbol lane | `runSymbolLane` (`context.go:313`) | SQL lookup by identifier name | `search_symbol` |\n| Semantic lane | `runSemanticLane` (`context.go:318`) | cosine+BM25 hybrid search | `search_semantic` |\n| Summary lane | `runSummaryLane` (`context.go:323`) | Package/file summaries — only for `architecture`/`package_topology` intents | `view_summarize` |\n| Graph expansion | `enrichGraph` (`context.go:368`) | Pulls callers/callees/deps from the `calls` edge table | `graph_callers` / `graph_callees` / `graph_deps` / `graph_neighbors` |\n| Annotation enrichment | `enrich` (`context.go:373`) | Adds sibling tests, nearest doc, git blame, CODEOWNERS, build tags | — |\n| Inline content | `inlineContent` | Reads + inlines file slices into a shared byte-budget pool | — |\n\n**The lower-level tools are thin wrappers** over those same store/graph calls. They exist for cases where you already know exactly what you want:\n- Exact identifier → `search_symbol` directly\n- Specific file/package → `view_summarize` directly  \n- Known function's callers → `graph_callers` directly\n\n`ask` runs all applicable lanes in one round-trip, applies intent-aware ranking, inlines content, and returns `next_action` + `avoid` guidance. The lower-level tools return raw single-lane results with no orchestration.",
+    "stop_reason": "end_turn",
+    "session_id": "6f06d72a-e1e2-4f22-952c-8170271d8767",
+    "total_cost_usd": 0.09435265,
+    "usage": {
+      "input_tokens": 11,
+      "cache_creation_input_tokens": 11689,
+      "cache_read_input_tokens": 107633,
+      "output_tokens": 1176,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 11689,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 549,
+          "cache_read_input_tokens": 26334,
+          "cache_creation_input_tokens": 3298,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3298
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 471,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005560000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 11,
+        "outputTokens": 1176,
+        "cacheReadInputTokens": 107633,
+        "cacheCreationInputTokens": 11689,
+        "webSearchRequests": 0,
+        "costUSD": 0.09379665,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "c893ce9e-e507-4ff5-93c5-5d6f1434946b"
+  }
+}

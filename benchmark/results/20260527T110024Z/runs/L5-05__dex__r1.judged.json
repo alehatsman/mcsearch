@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all the key areas: internal/chunk (tree-sitter grammar registration, language map, node kinds), go.mod (grammar dependency), internal/ignore (extensions and build dirs like target/), internal/graph being Go-only, and chunk tests — matching the ground truth fully with additional correct detail."
+}

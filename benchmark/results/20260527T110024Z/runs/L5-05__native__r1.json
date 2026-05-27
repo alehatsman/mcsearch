@@ -1,0 +1,81 @@
+{
+  "qid": "L5-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "If I want to add support for a new language (say Rust) to the chunker, what packages and code areas are involved?",
+  "ground_truth": "- `internal/chunk` — register the tree-sitter Rust grammar, add a language detector branch (by extension), and a chunking strategy (which node kinds become chunk boundaries — `fn`, `impl`, etc.).\n- `go.mod` — add the tree-sitter Rust grammar Go binding.\n- `internal/ignore` — confirm Rust-specific build dirs (`target/`) are excluded.\n- `internal/graph` is Go-only via `go/packages`; Rust would not get graph nodes unless a separate extractor is added (out of scope for chunker-only support).\n- Tests: `internal/chunk/*_test.go` add fixtures for a `.rs` file.\nEmbedding/store/search are language-agnostic — no changes there.",
+  "started": 1779880907,
+  "finished": 1779880927,
+  "wall_seconds": 20,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 21498,
+    "duration_api_ms": 22720,
+    "ttft_ms": 4941,
+    "num_turns": 5,
+    "result": "Rust is **already supported**. Here's the full picture:\n\n**What's already in place (`internal/chunk/chunk.go`):**\n\n- **Import**: `\"github.com/smacker/go-tree-sitter/rust\"` — line 29\n- **`languages` map entry** — lines 121–124:\n  ```go\n  \".rs\": {rust.GetLanguage(), set(\n      \"function_item\", \"struct_item\", \"enum_item\", \"impl_item\",\n      \"trait_item\", \"mod_item\",\n  )},\n  ```\n- **`containerMethods` entries** — lines 172–175: `impl_item` and `trait_item` both map to `\"function_item\"`, so nested functions inside `impl`/`trait` blocks get their own indexed chunks with the parent name stamped.\n\n**If you were adding a genuinely new language (e.g. one not in `go-tree-sitter`):**\n\n1. **`go.mod`/`go.sum`** — add the tree-sitter grammar package dependency.\n2. **`internal/chunk/chunk.go` imports** — add the grammar import (line 20–31 block).\n3. **`languages` map** (line 110) — add an entry mapping file extension(s) → `langConfig{lang, kinds}`.\n4. **`containerMethods` map** (line 159) — add entries for any container kinds (class/impl/trait equivalents) mapping to their method-level child kinds, so nested methods get individual chunks.\n5. **`internal/chunk/chunk_test.go`** — add a structural test (following the pattern of `TestPythonStructural`).\n\nNo other packages are involved — the chunker is fully self-contained in `internal/chunk/`.",
+    "stop_reason": "end_turn",
+    "session_id": "4f60b7c9-9340-4a8d-b0f6-1d92f81f051d",
+    "total_cost_usd": 0.0856345,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 16062,
+      "cache_read_input_tokens": 48610,
+      "output_tokens": 684,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 16062,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 422,
+          "cache_read_input_tokens": 18292,
+          "cache_creation_input_tokens": 10631,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 10631
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 464,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000544,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 684,
+        "cacheReadInputTokens": 48610,
+        "cacheCreationInputTokens": 16062,
+        "webSearchRequests": 0,
+        "costUSD": 0.0850905,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "6dbe2572-4825-4011-abe7-536884b3581a"
+  }
+}

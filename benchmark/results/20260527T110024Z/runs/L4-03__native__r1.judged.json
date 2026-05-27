@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The agent correctly identifies PruneUnseen's strict-less-than cutoff mechanism and that nanoseconds prevent timestamp collisions, but describes the wrong failure mode: it says 'nothing would be pruned' (stale rows survive), whereas the ground truth says freshly-upserted rows are wrongly deleted. The agent also says 'milliseconds' where the ground truth specifies 'seconds'."
+}

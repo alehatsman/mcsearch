@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the same function `Resolve` in `internal/proj/proj.go` with the exact same signature, and accurately describes its behavior; the line number difference (23 vs 26) is minor and points to the same symbol."
+}

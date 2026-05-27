@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer identifies the correct function `RunStdio` and its role as the stdio transport entry point, but points to `cmd/dex/main.go:1961` (the CLI command that calls it) rather than the canonical entry point at `internal/mcp/server.go:851` where `RunStdio` is defined."
+}

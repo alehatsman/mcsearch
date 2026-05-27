@@ -1,0 +1,225 @@
+# dex benchmark question set
+#
+# Each question has:
+#   id            stable identifier
+#   band          L1..L5 (symbol / package / cross-package / architectural / refactor-scope)
+#   question      what the agent is asked
+#   ground_truth  the canonical answer (markdown). Used by the judge.
+#   must_mention  list of substrings the answer MUST contain to score >= 1. Cheap pre-filter.
+#
+# Ground truth is hand-curated against the dex repo at HEAD. If the repo
+# drifts, regenerate truth before re-running the benchmark.
+
+questions:
+
+# ---------- L1: symbol lookup (5) ----------
+- id: L1-01
+  band: L1
+  question: "Where is `Store.UpsertMany` defined? Give the file and line."
+  ground_truth: |
+    `internal/store/store.go:546` — `func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Time) error`.
+  must_mention: ["internal/store/store.go", "UpsertMany"]
+
+- id: L1-02
+  band: L1
+  question: "Where is the `RunStdio` function (the one that runs the MCP server over stdio) defined? Give the file and line of the function definition."
+  ground_truth: |
+    `internal/mcp/server.go:851` — `func (s *Server) RunStdio(ctx context.Context) error`.
+  must_mention: ["internal/mcp/server.go", "RunStdio"]
+
+- id: L1-03
+  band: L1
+  question: "Where does the hybrid search live (cosine + BM25 fused)? File, function, and the RRF constant value used."
+  ground_truth: |
+    `internal/store/store.go:928` — `func (s *Store) Search(...)`. Fusion is reciprocal-rank with constant `rrfK = 60` (defined at `internal/store/store.go:924`).
+  must_mention: ["internal/store/store.go", "Search", "60"]
+
+- id: L1-04
+  band: L1
+  question: "Which function resolves a project root path to its cache directory? File and signature."
+  ground_truth: |
+    `internal/proj/proj.go:26` — `func Resolve(path, baseCacheDir string) (*Project, error)`. Companion: `(*Project).EnsureCacheDir` at `internal/proj/proj.go:58`.
+  must_mention: ["internal/proj/proj.go", "Resolve"]
+
+- id: L1-05
+  band: L1
+  question: "Which package and function acquires the per-cache-dir lock? Name the syscall used."
+  ground_truth: |
+    Package `internal/lock`. `lock.go:60` calls `syscall.Flock(fd, LOCK_EX|LOCK_NB)`. POSIX flock(2), non-blocking exclusive.
+  must_mention: ["internal/lock", "flock"]
+
+# ---------- L2: single-package summary (5) ----------
+- id: L2-01
+  band: L2
+  question: "What is the responsibility of `internal/chunk`? Two sentences."
+  ground_truth: |
+    Splits source files into bounded code chunks using tree-sitter grammars (one per supported language). Produces the `PendingChunk` records that the indexer later embeds and persists.
+  must_mention: ["tree-sitter", "chunk"]
+
+- id: L2-02
+  band: L2
+  question: "What is the role of `internal/guide`? What does it produce and from what inputs?"
+  ground_truth: |
+    Renders `LLM_GUIDE.md` from data already in the store: repo summary, per-package summaries, and Go graph sections (exported API, PageRank entry points, depends-on / used-by). Entry point is `guide.Render` in `internal/guide/render.go`. The CLI command `dex guide` drives it.
+  must_mention: ["LLM_GUIDE.md", "guide"]
+
+- id: L2-03
+  band: L2
+  question: "What is `internal/watch` responsible for? Name the debounce default."
+  ground_truth: |
+    Filesystem watcher: fsnotify events are debounced, then trigger a full re-index (and graph rebuild) pass. Default debounce window is 500ms (`internal/watch/watch.go:70-71`, field `Options.Debounce`).
+  must_mention: ["fsnotify", "500", "debounce"]
+
+- id: L2-04
+  band: L2
+  question: "What is `internal/proj`? List its main concerns."
+  ground_truth: |
+    Project root resolution + cache-dir layout + indexability guard. Computes `CacheDir = baseCacheDir/sha256(realpath(root))`, exposes `DBPath` / `LockPath`, and the guard refuses to index dangerous roots (e.g. `$HOME`, non-git non-allowlisted dirs).
+  must_mention: ["proj", "cache"]
+
+- id: L2-05
+  band: L2
+  question: "What is `internal/ignore` for? Beyond .gitignore, what does it block?"
+  ground_truth: |
+    Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dex-ignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.
+  must_mention: ["gitignore", "secret"]
+
+# ---------- L3: cross-package data flow (5) ----------
+- id: L3-01
+  band: L3
+  question: "What writes to the `chunk_vecs` virtual table? Trace the actual mechanism."
+  ground_truth: |
+    Nothing in Go code writes to `chunk_vecs` directly. It is a `vec0` virtual table populated by SQLite triggers on the base `chunks` table (`internal/store/store.go` around lines 333-358): INSERT on `chunks` fires a trigger that mirrors `chunks.vec` into `chunk_vecs.embedding`; UPDATE/DELETE keep them in sync. Callers only ever upsert into `chunks` via `Store.UpsertMany`.
+  must_mention: ["trigger", "chunks", "chunk_vecs"]
+
+- id: L3-02
+  band: L3
+  question: "How do `chunks_fts` rows get kept in sync with `chunks`?"
+  ground_truth: |
+    Three SQLite triggers on the base `chunks` table (`internal/store/store.go:159-176`): INSERT mirrors content/path/kind into `chunks_fts`; UPDATE issues a `chunks_fts` delete+insert; DELETE removes the row. There is also a one-time backfill (`chunks_fts(rebuild)`) for databases that pre-date the FTS5 migration (~line 254-261).
+  must_mention: ["trigger", "chunks_fts"]
+
+- id: L3-03
+  band: L3
+  question: "When `dex watch` sees a change, what runs and in what order?"
+  ground_truth: |
+    `internal/watch` debounces fsnotify events (default 500ms), then on the timer flush it runs the indexer pass first (walk → chunk → embed → upsert into store) and then the graph rebuild (`internal/graph` via `go/packages` + YAML extractor + PageRank). Summaries are produced asynchronously if configured.
+  must_mention: ["debounce", "index", "graph"]
+
+- id: L3-04
+  band: L3
+  question: "Which retrieval signals does `Store.Search` combine, and how are they fused?"
+  ground_truth: |
+    Two signals run in parallel: cosine KNN via the `sqlite-vec` `chunk_vecs` virtual table, and BM25 via the FTS5 `chunks_fts` table. They are fused with Reciprocal Rank Fusion (`rrfK=60`, Cormack 2009): `score(id) = Σ 1/(60+rank)` over both lists. An optional cross-encoder rerank pass can then reorder the fused pool.
+  must_mention: ["cosine", "BM25", "RRF"]
+
+- id: L3-05
+  band: L3
+  question: "How does the agent's `mcp__dex__ask` tool relate to the lower-level MCP tools (search, find_symbol, graph_*)?"
+  ground_truth: |
+    `ask` is the primary, composite MCP tool. The other tools (`search_semantic`, `search_symbol`, `graph_callers`/`callees`/`deps`/`neighbors`, `view_summarize`) are the legs `ask` composes — it plans a retrieval, calls those legs internally, and returns a synthesised answer. Defined in `internal/mcp`.
+  must_mention: ["ask", "compose"]
+
+# ---------- L4: architectural trace (5) ----------
+- id: L4-01
+  band: L4
+  question: "Trace the path of a single saved file from filesystem change to becoming searchable. Name every stage and the package responsible."
+  ground_truth: |
+    1. `internal/watch` (fsnotify) sees the write, debounces 500ms.
+    2. On flush, `internal/index` walks the project (respecting `internal/ignore`), chunks each eligible file with `internal/chunk` (tree-sitter).
+    3. Chunks are embedded via `internal/embed` (HTTP to OpenAI-shape /v1/embeddings).
+    4. `internal/store.UpsertMany` writes rows into `chunks`; triggers populate `chunks_fts` (FTS5) and `chunk_vecs` (sqlite-vec).
+    5. `internal/graph` rebuilds the Go static graph and PageRank.
+    6. Optional summary passes (chunk/file/package/repo) via `internal/chat`.
+    7. `internal/store.PruneUnseen` removes rows from the previous indexing generation.
+    After step 4 the file is searchable via `Store.Search`.
+  must_mention: ["watch", "chunk", "embed", "store", "graph"]
+
+- id: L4-02
+  band: L4
+  question: "Where does the dimension of the embedding vector get locked in, and what happens if the embedding model changes?"
+  ground_truth: |
+    Dim is fixed at index creation time — the `chunk_vecs` `vec0` virtual table is declared with a specific embedding dim, and the `chunks.vec` blobs are sized to match. Changing `DEX_EMBED_MODEL` to a model with a different output dim requires a full `dex reindex` (cannot be hot-swapped). This is enforced by the schema, not by application checks.
+  must_mention: ["dim", "reindex"]
+
+- id: L4-03
+  band: L4
+  question: "Why are timestamps stored as Unix nanoseconds rather than seconds? What goes wrong otherwise?"
+  ground_truth: |
+    `PruneUnseen` uses a strict-less-than cutoff on `last_seen`. With second-resolution timestamps, the index pass and the prune call can both happen in the same wall-clock second, so freshly-upserted rows can have `last_seen == cutoff` and be wrongly deleted. Nanoseconds make the collision astronomically unlikely. See `internal/store/store.go` (UpsertMany / PruneUnseen) — timestamps are `time.Time.UnixNano()`.
+  must_mention: ["nanosecond", "PruneUnseen"]
+
+- id: L4-04
+  band: L4
+  question: "Why does dex use SQLite triggers to populate `chunks_fts` and `chunk_vecs` instead of writing those tables directly from Go?"
+  ground_truth: |
+    Both are SQLite virtual tables (FTS5 + sqlite-vec `vec0`). Writing to them must go through specific INSERT/DELETE shapes — getting that wrong corrupts the index. Centralising the mirror logic in triggers means there is exactly one place that maintains the invariant `chunks ↔ chunks_fts` and `chunks ↔ chunk_vecs`, regardless of which Go path (UpsertMany, PruneUnseen, backfill) touched the base table. Callers never need to know about the virtual tables.
+  must_mention: ["trigger", "virtual table", "invariant"]
+
+- id: L4-05
+  band: L4
+  question: "What is the concurrency model for an index running concurrently with a watch on the same project?"
+  ground_truth: |
+    `internal/lock` provides a POSIX flock-based advisory lock at `<CacheDir>/index.lock` (`internal/lock/lock.go:60`, `syscall.Flock(LOCK_EX|LOCK_NB)`). The lock package's doc-comment claims it protects `dex index`, `dex index summarize`, `dex reindex`, and `dex watch`.
+
+    However, **only `cmdIndex` (`cmd/dex/main.go:672`), `cmdIndexSummarize` (`:1461`), and the reindex path (`:1637`) actually call `acquireProjectLock`**. `cmdWatch` (`:1768`) does NOT — there is no `acquireProjectLock` call in its body. So two concurrent `dex watch` invocations, or `dex watch` running alongside `dex index`, are serialized only by SQLite's writer lock at the database layer, not by the flock.
+
+    Within a single `dex watch` process, `internal/watch.Watcher` uses a `sync.Mutex` + a `running` boolean to ensure at most one indexer pass runs at a time; events that arrive during a flush set a `dirty` flag and the same goroutine loops to drain them.
+
+    The kernel releases the flock when the holding process exits (even on SIGKILL), so a crashed `dex index` never leaves a stuck lock.
+
+    NOTE: the lock-doc / cmdWatch mismatch is a real implementation gap, not the intended design — a complete answer should either describe what the code actually does (cmdWatch unlocked) or flag the mismatch.
+  must_mention: ["flock", "lock"]
+
+# ---------- L5: refactor blast-radius (5) ----------
+- id: L5-01
+  band: L5
+  question: "If I rename `Store.Search` to `Store.Query`, which files need to change? List them."
+  ground_truth: |
+    - `internal/store/store.go` (definition + comments referencing `Search`)
+    - `internal/store/store_test.go` (`TestUpsertAndSearch`, RRF tests)
+    - `internal/store/bench_test.go` (`BenchmarkSearch_*`, `benchSearch`)
+    - `internal/mcp/server.go` (`(*Server).Search` wraps it; also any internal calls)
+    - `internal/mcp/context.go` and `internal/mcp/context_test.go` (router uses `Store.Search`)
+    - `internal/mcp/enrich.go` / `enrich_test.go` (uses signature strings — only the comments mention `Search`, but verify)
+    - Any other call sites: grep `store.Search\|st.Search\|s.Search` across the repo.
+    Tests must be updated too; the `dex ask` flow calls `Search` transitively.
+  must_mention: ["internal/store", "internal/mcp"]
+
+- id: L5-02
+  band: L5
+  question: "What breaks if I change the `rrfK` constant from 60 to 30?"
+  ground_truth: |
+    Functionally: rank fusion gets sharper (lower `k` weights top ranks more heavily). Tests that assert specific ordering or `RRFScore` thresholds in `internal/store/store_test.go` (around the `validateToken` test and the BM25/RRF tests at lines ~383-488) may flip — particularly the assertions about `RRFScore > 0` and the order of needle-vs-distractor rows. No other package reads `rrfK`. Comment at `store.go:922` should be updated to match.
+  must_mention: ["store_test.go", "RRFScore"]
+
+- id: L5-03
+  band: L5
+  question: "If I want to add a new MCP tool (say `mcp__dex__find_imports`), what files do I edit?"
+  ground_truth: |
+    - `internal/mcp/server.go` — add the handler method, register it in the tool list assembled by `RunStdio` / server initialisation.
+    - `internal/mcp/<tool>.go` if you split it out, plus a `_test.go`.
+    - The store layer if a new query is needed (e.g. `internal/store/store.go` with a corresponding `Store.FindImports`).
+    - `README.md` MCP tool table.
+    - `LLM_GUIDE.md` is regenerated, do not hand-edit.
+    No changes to `internal/index`, `internal/watch`, `internal/embed` etc.
+  must_mention: ["internal/mcp/server.go", "README"]
+
+- id: L5-04
+  band: L5
+  question: "What changes if I make the watcher debounce default 2 seconds instead of 500ms?"
+  ground_truth: |
+    Code: `internal/watch/watch.go:70-71` (the default initialiser). Tests: `internal/watch/watch_test.go:84` passes a 50ms debounce explicitly and is unaffected; any test that relies on the default would need updating (grep `Debounce` in tests). User-visible: `dex watch` reacts slower; bursts of saves coalesce more aggressively (good for editors that save-on-every-keystroke). README mentions "default 500ms" in PIPELINE.md — that comment needs updating.
+  must_mention: ["internal/watch/watch.go", "500"]
+
+- id: L5-05
+  band: L5
+  question: "If I want to add support for a new language (say Rust) to the chunker, what packages and code areas are involved?"
+  ground_truth: |
+    - `internal/chunk` — register the tree-sitter Rust grammar, add a language detector branch (by extension), and a chunking strategy (which node kinds become chunk boundaries — `fn`, `impl`, etc.).
+    - `go.mod` — add the tree-sitter Rust grammar Go binding.
+    - `internal/ignore` — confirm Rust-specific build dirs (`target/`) are excluded.
+    - `internal/graph` is Go-only via `go/packages`; Rust would not get graph nodes unless a separate extractor is added (out of scope for chunker-only support).
+    - Tests: `internal/chunk/*_test.go` add fixtures for a `.rs` file.
+    Embedding/store/search are language-agnostic — no changes there.
+  must_mention: ["internal/chunk", "tree-sitter"]

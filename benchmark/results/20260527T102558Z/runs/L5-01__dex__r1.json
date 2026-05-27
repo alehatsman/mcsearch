@@ -1,0 +1,81 @@
+{
+  "qid": "L5-01",
+  "mode": "dex",
+  "rep": 1,
+  "question": "If I rename `Store.Search` to `Store.Query`, which files need to change? List them.",
+  "ground_truth": "- `internal/store/store.go` (definition + comments referencing `Search`)\n- `internal/store/store_test.go` (`TestUpsertAndSearch`, RRF tests)\n- `internal/store/bench_test.go` (`BenchmarkSearch_*`, `benchSearch`)\n- `internal/mcp/server.go` (`(*Server).Search` wraps it; also any internal calls)\n- `internal/mcp/context.go` and `internal/mcp/context_test.go` (router uses `Store.Search`)\n- `internal/mcp/enrich.go` / `enrich_test.go` (uses signature strings — only the comments mention `Search`, but verify)\n- Any other call sites: grep `store.Search\\|st.Search\\|s.Search` across the repo.\nTests must be updated too; the `dex ask` flow calls `Search` transitively.",
+  "started": 1779878464,
+  "finished": 1779878493,
+  "wall_seconds": 29,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 30483,
+    "duration_api_ms": 31757,
+    "ttft_ms": 3057,
+    "num_turns": 6,
+    "result": "These are all the files that need to change:\n\n| File | Role |\n|---|---|\n| `internal/store/store.go` | definition of `(*Store).Search` |\n| `internal/mcp/context.go` | calls `st.Search` in `runSemanticLane` |\n| `internal/mcp/server.go` | calls `st.Search` inside `(*Server).search` |\n| `cmd/dex/main.go` | calls `st.Search` in `cmdSearchSemantic` and `cmdGenerate` |\n| `internal/store/store_test.go` | ~20 call sites |\n| `internal/store/bench_test.go` | 1 call site |\n| `internal/index/index_test.go` | 2 call sites |\n\n7 files total. Note that `(*Server).Search` in `internal/mcp/server.go` is a separate method on a different type — renaming `Store.Search` doesn't force its rename, but the internal call at line 331 does need updating.",
+    "stop_reason": "end_turn",
+    "session_id": "91b10ce8-31b1-4f25-b7a5-314e2d93d979",
+    "total_cost_usd": 0.0915058,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 10716,
+      "cache_read_input_tokens": 93566,
+      "output_tokens": 1512,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 10716,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 254,
+          "cache_read_input_tokens": 22524,
+          "cache_creation_input_tokens": 1053,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1053
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 459,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000544,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 1512,
+        "cacheReadInputTokens": 93566,
+        "cacheCreationInputTokens": 10716,
+        "webSearchRequests": 0,
+        "costUSD": 0.09096180000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "bb742ac5-7e27-4edc-b989-e76839ef720d"
+  }
+}

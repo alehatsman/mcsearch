@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the flock-based lock for cmdIndex, the absence of acquireProjectLock in cmdWatch (flagging the doc/implementation mismatch), SQLite writer-lock as the only cross-process serialization between index and watch, and the sync.Mutex + running boolean pattern within the watcher — all matching the ground truth with accurate file references."
+}

@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The answer correctly identifies the functional effect (sharper rank amplification) and mentions the comment at store.go:922, but explicitly states 'No tests will fail' — directly contradicting the ground truth, which identifies specific test assertions in store_test.go (BM25/RRF tests ~lines 383-488) that may flip due to changed RRFScore values and ordering."
+}

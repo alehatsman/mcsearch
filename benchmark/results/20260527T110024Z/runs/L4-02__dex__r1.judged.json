@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the chunk_vecs vec0 virtual table as where the dim is baked into the schema, that a model change with a different dim requires dex reindex, and provides accurate file:line references and code snippets; the additional detail about application-level checks in UpsertMany goes beyond the ground truth but does not contradict it."
+}

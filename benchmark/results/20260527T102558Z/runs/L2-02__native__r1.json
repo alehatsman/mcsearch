@@ -1,0 +1,81 @@
+{
+  "qid": "L2-02",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is the role of `internal/guide`? What does it produce and from what inputs?",
+  "ground_truth": "Renders `LLM_GUIDE.md` from data already in the store: repo summary, per-package summaries, and Go graph sections (exported API, PageRank entry points, depends-on / used-by). Entry point is `guide.Render` in `internal/guide/render.go`. The CLI command `dex guide` drives it.",
+  "started": 1779877738,
+  "finished": 1779877754,
+  "wall_seconds": 16,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 17025,
+    "duration_api_ms": 18169,
+    "ttft_ms": 3032,
+    "num_turns": 5,
+    "result": "`internal/guide` renders `LLM_GUIDE.md` (or a configured alternative) from data already in the SQLite store. No LLM calls.\n\n**Inputs:**\n- `chunk.KindRepoSummary` and `chunk.KindPackageSummary` chunks from the store — LLM-generated prose produced by a prior `dex index --summarize` run\n- Graph data from the store (`graph_nodes`/`graph_edges`): exported symbols, PageRank/in-degree centrality, package imports, used-by relationships\n- Optional `.dex/guide.toml` to override the output path\n- `.dex/llm_guide.manifest.json` to detect whether any summary has changed since the last render (incremental mode)\n\n**Output:**\nA single markdown file (`LLM_GUIDE.md` by default) with:\n1. **Overview** — the repo-level summary prose\n2. **Contents** TOC\n3. Per-package **Module** sections, each with: LLM-generated narrative + mechanically-generated `### Exported API`, `### Key entry points`, `### Depends on`, `### Used by` subsections sourced from graph data\n\nThe manifest at `.dex/llm_guide.manifest.json` is also written/updated to track `last_summary_seen_at` so subsequent calls skip re-rendering when nothing's changed.",
+    "stop_reason": "end_turn",
+    "session_id": "0ed50aab-f5fd-4001-ad57-60f037f1e77e",
+    "total_cost_usd": 0.0729056,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 13072,
+      "cache_read_input_tokens": 48382,
+      "output_tokens": 588,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 13072,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 326,
+          "cache_read_input_tokens": 17827,
+          "cache_creation_input_tokens": 8106,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 8106
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 456,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000536,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 588,
+        "cacheReadInputTokens": 48382,
+        "cacheCreationInputTokens": 13072,
+        "webSearchRequests": 0,
+        "costUSD": 0.07236959999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "2b587e15-4088-4b47-b4d6-22bcf2805d6a"
+  }
+}

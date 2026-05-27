@@ -1,0 +1,81 @@
+{
+  "qid": "L4-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Why are timestamps stored as Unix nanoseconds rather than seconds? What goes wrong otherwise?",
+  "ground_truth": "`PruneUnseen` uses a strict-less-than cutoff on `last_seen`. With second-resolution timestamps, the index pass and the prune call can both happen in the same wall-clock second, so freshly-upserted rows can have `last_seen == cutoff` and be wrongly deleted. Nanoseconds make the collision astronomically unlikely. See `internal/store/store.go` (UpsertMany / PruneUnseen) — timestamps are `time.Time.UnixNano()`.",
+  "started": 1779878267,
+  "finished": 1779878296,
+  "wall_seconds": 29,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 29212,
+    "duration_api_ms": 30091,
+    "ttft_ms": 2033,
+    "num_turns": 6,
+    "result": "The answer is in the interplay between `UpsertMany` and `PruneUnseen` in `internal/store/store.go`.\n\n**The problem with second-resolution timestamps:**\n\n`PruneUnseen` deletes every chunk where `last_seen_at < cutoff` (`store.go:661`). The cutoff is the timestamp captured *before* the index pass begins; `UpsertMany` stamps every upserted row with `now.UnixNano()` (`store.go:597`).\n\nIf timestamps had only second resolution, both the cutoff capture and the upserts could land on the same wall-clock second, making `last_seen_at == cutoff` for freshly-written rows. The `<` (strict less-than) predicate would spare them — but only by accident and only for that second's boundary. Any rows written in the same second as the cutoff but *before* the cutoff capture would be wrongly equal to the cutoff and survive when they should be pruned.\n\nMore critically in the other direction: if the index pass completes fast enough that `UpsertMany`'s `now` equals the cutoff (same second), the prune sees `last_seen_at == cutoff` and keeps the rows correctly — but that's a coincidence. A scheduler hiccup that bumps the clock *just* as the upsert runs could produce `last_seen_at < cutoff`, deleting rows that were just written.\n\n**Why nanoseconds fix it:**\n\n`time.Time.UnixNano()` makes the collision between the pre-pass cutoff and the upsert timestamp astronomically unlikely. The cutoff is always strictly less than any `last_seen_at` written during the subsequent index pass, so the `<` predicate reliably deletes only genuinely stale rows and never touches fresh ones.",
+    "stop_reason": "end_turn",
+    "session_id": "bd7ecacd-8a33-4a91-b895-acc085db0115",
+    "total_cost_usd": 0.09026285,
+    "usage": {
+      "input_tokens": 11,
+      "cache_creation_input_tokens": 11553,
+      "cache_read_input_tokens": 94557,
+      "output_tokens": 1200,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 11553,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 423,
+          "cache_read_input_tokens": 22739,
+          "cache_creation_input_tokens": 1675,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 1675
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 454,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000539,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 11,
+        "outputTokens": 1200,
+        "cacheReadInputTokens": 94557,
+        "cacheCreationInputTokens": 11553,
+        "webSearchRequests": 0,
+        "costUSD": 0.08972385,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "056e51ea-90c6-489d-b51f-600f3e1432d8"
+  }
+}

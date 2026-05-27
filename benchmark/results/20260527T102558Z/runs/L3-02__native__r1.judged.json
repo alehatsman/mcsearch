@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all three triggers (chunks_ai, chunks_au, chunks_ad), their behavior (insert mirrors, update does delete+insert, delete removes), the external-content FTS5 table design, and the one-time rebuild backfill at store.go:261, matching the ground truth in all key details."
+}

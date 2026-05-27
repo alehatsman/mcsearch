@@ -1,0 +1,9 @@
+{
+  "model": "sonnet",
+  "replicates": 1,
+  "started": "2026-05-27T10:59:46Z",
+  "git_sha": "045b8719391d3d549b69095e3b6e77e2402441c4",
+  "claude_version": "2.1.152",
+  "dex_root": "/home/aleh/projects/dex",
+  "native_root": "/tmp/dex-bench-native"
+}

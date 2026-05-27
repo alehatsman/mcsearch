@@ -1,0 +1,81 @@
+{
+  "qid": "L3-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "What writes to the `chunk_vecs` virtual table? Trace the actual mechanism.",
+  "ground_truth": "Nothing in Go code writes to `chunk_vecs` directly. It is a `vec0` virtual table populated by SQLite triggers on the base `chunks` table (`internal/store/store.go` around lines 333-358): INSERT on `chunks` fires a trigger that mirrors `chunks.vec` into `chunk_vecs.embedding`; UPDATE/DELETE keep them in sync. Callers only ever upsert into `chunks` via `Store.UpsertMany`.",
+  "started": 1779877889,
+  "finished": 1779877905,
+  "wall_seconds": 16,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 16386,
+    "duration_api_ms": 17506,
+    "ttft_ms": 2443,
+    "num_turns": 4,
+    "result": "The mechanism is entirely **SQLite triggers**, defined in `internal/store/store.go:339-348`:\n\nThree triggers on the `chunks` table mirror into `chunk_vecs` automatically:\n\n| Trigger | Event | Action |\n|---|---|---|\n| `chunks_vec_ai` | `AFTER INSERT ON chunks` | `INSERT INTO chunk_vecs(rowid, embedding) VALUES (new.id, new.vec)` |\n| `chunks_vec_au` | `AFTER UPDATE OF vec ON chunks` | DELETE old rowid, re-INSERT new vec |\n| `chunks_vec_ad` | `AFTER DELETE ON chunks` | `DELETE FROM chunk_vecs WHERE rowid = old.id` |\n\n**Nothing writes to `chunk_vecs` directly.** You write to `chunks`; the triggers do the rest.\n\n**How it gets bootstrapped:** `ensureVecTable` (`store.go:324`) creates the virtual table and installs the triggers on the first `UpsertMany` that establishes the embedding dimension. If `chunk_vecs` is empty but `chunks` is not (pre-vec0 index), it does a one-shot backfill: `INSERT INTO chunk_vecs(rowid, embedding) SELECT id, vec FROM chunks` (`store.go:368`).\n\n**Call chain to the triggers:**\n1. `internal/index` calls `store.UpsertMany` after embedding\n2. `UpsertMany` (`store.go:~555`) calls `ensureVecTable` on first write, then does `INSERT OR REPLACE INTO chunks(..., vec, ...)` \n3. That INSERT fires `chunks_vec_ai` (or `chunks_vec_au` on conflict-replace), which pushes the vector blob into `chunk_vecs`",
+    "stop_reason": "end_turn",
+    "session_id": "eca70374-f9ef-4345-989b-2f7cb894dfdb",
+    "total_cost_usd": 0.0614763,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 9110,
+      "cache_read_input_tokens": 49246,
+      "output_tokens": 799,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 9110,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 416,
+          "cache_read_input_tokens": 18692,
+          "cache_creation_input_tokens": 3279,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3279
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00054,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 799,
+        "cacheReadInputTokens": 49246,
+        "cacheCreationInputTokens": 9110,
+        "webSearchRequests": 0,
+        "costUSD": 0.0609363,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "cad4e901-9dd9-480d-840b-229a1d567aa8"
+  }
+}

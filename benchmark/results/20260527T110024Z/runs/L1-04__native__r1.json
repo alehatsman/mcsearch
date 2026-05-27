@@ -1,0 +1,81 @@
+{
+  "qid": "L1-04",
+  "mode": "native",
+  "rep": 1,
+  "question": "Which function resolves a project root path to its cache directory? File and signature.",
+  "ground_truth": "`internal/proj/proj.go:26` — `func Resolve(path, baseCacheDir string) (*Project, error)`. Companion: `(*Project).EnsureCacheDir` at `internal/proj/proj.go:58`.",
+  "started": 1779879735,
+  "finished": 1779879743,
+  "wall_seconds": 8,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 8772,
+    "duration_api_ms": 9722,
+    "ttft_ms": 2802,
+    "num_turns": 3,
+    "result": "`internal/proj/proj.go:26`\n\n```go\nfunc Resolve(path, baseCacheDir string) (*Project, error)\n```\n\nCanonicalizes `path` (resolves symlinks, makes absolute), then derives a cache directory as `baseCacheDir/<sha256(canonicalRoot)>`. Returns a `*Project` with `Root`, `CacheDir`, `DBPath`, and `LockPath` populated.",
+    "stop_reason": "end_turn",
+    "session_id": "f7d28e86-7bc1-478d-aa4f-595e030c21a0",
+    "total_cost_usd": 0.04183245,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 5757,
+      "cache_read_input_tokens": 48119,
+      "output_tokens": 351,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 5757,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 102,
+          "cache_read_input_tokens": 17812,
+          "cache_creation_input_tokens": 806,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 806
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 453,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000528,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 351,
+        "cacheReadInputTokens": 48119,
+        "cacheCreationInputTokens": 5757,
+        "webSearchRequests": 0,
+        "costUSD": 0.04130445,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "0db08666-7da2-49c8-b640-5ada4c5a17e9"
+  }
+}

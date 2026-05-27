@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the core reasons: FTS5 external-content tables require the tombstone-insert protocol (not self-maintaining), triggers centralize sync logic across multiple mutators so no single Go write path needs to replicate it, and chunk_vecs is a derived index whose canonical data lives in chunks.vec — all matching the ground truth's key points about virtual table write constraints and single-point invariant maintenance."
+}

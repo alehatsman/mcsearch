@@ -1,0 +1,81 @@
+{
+  "qid": "L2-01",
+  "mode": "dex",
+  "rep": 1,
+  "question": "What is the responsibility of `internal/chunk`? Two sentences.",
+  "ground_truth": "Splits source files into bounded code chunks using tree-sitter grammars (one per supported language). Produces the `PendingChunk` records that the indexer later embeds and persists.",
+  "started": 1779877669,
+  "finished": 1779877693,
+  "wall_seconds": 24,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 24208,
+    "duration_api_ms": 13058,
+    "ttft_ms": 1934,
+    "num_turns": 5,
+    "result": "`internal/chunk` is responsible for splitting source code files into semantically meaningful text segments (\"chunks\") using Tree-sitter parse trees, with associated metadata (path, kind, name, parent). It also prepares each chunk's `EmbedText` — a formatted string combining metadata and code content — ready for downstream embedding and vector indexing.",
+    "stop_reason": "end_turn",
+    "session_id": "18565dd7-6bb2-4fe1-980a-376d93d612dc",
+    "total_cost_usd": 0.05754505,
+    "usage": {
+      "input_tokens": 9,
+      "cache_creation_input_tokens": 6513,
+      "cache_read_input_tokens": 86481,
+      "output_tokens": 442,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 6513,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 76,
+          "cache_read_input_tokens": 18670,
+          "cache_creation_input_tokens": 704,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 704
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 450,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.00052,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 9,
+        "outputTokens": 442,
+        "cacheReadInputTokens": 86481,
+        "cacheCreationInputTokens": 6513,
+        "webSearchRequests": 0,
+        "costUSD": 0.05702505000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "6ac04c43-35bb-49a0-9807-c423c5c7669d"
+  }
+}

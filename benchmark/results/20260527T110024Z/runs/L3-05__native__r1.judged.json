@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies `ask` as a composite tool that internally calls the same underlying primitives (store search, find_symbol, graph data) that the lower-level tools wrap, explains the multi-lane design (symbol, semantic, graph enrichment), and correctly notes the other tools are escape hatches — all consistent with the ground truth that `ask` plans retrieval, calls those legs internally, and returns a synthesized answer."
+}

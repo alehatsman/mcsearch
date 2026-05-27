@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The agent correctly identifies the file (internal/store/store.go) and the function UpsertMany; the line number difference (542 vs 546) is minor and likely due to minor code changes — the location is substantively correct."
+}

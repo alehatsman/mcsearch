@@ -1,0 +1,81 @@
+{
+  "qid": "L5-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "If I want to add a new MCP tool (say `mcp__dex__find_imports`), what files do I edit?",
+  "ground_truth": "- `internal/mcp/server.go` — add the handler method, register it in the tool list assembled by `RunStdio` / server initialisation.\n- `internal/mcp/<tool>.go` if you split it out, plus a `_test.go`.\n- The store layer if a new query is needed (e.g. `internal/store/store.go` with a corresponding `Store.FindImports`).\n- `README.md` MCP tool table.\n- `LLM_GUIDE.md` is regenerated, do not hand-edit.\nNo changes to `internal/index`, `internal/watch`, `internal/embed` etc.",
+  "started": 1779878647,
+  "finished": 1779878668,
+  "wall_seconds": 21,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 21220,
+    "duration_api_ms": 22338,
+    "ttft_ms": 1870,
+    "num_turns": 5,
+    "result": "The pattern is clear. To add `mcp__dex__find_imports`, you edit **two files**:\n\n---\n\n### 1. `internal/mcp/server_graph.go` — implement the handler\n\nAdd your `Input`/`Output` types and the handler method following the existing pattern:\n\n```go\ntype FindImportsInput struct {\n    Path        string `json:\"path\" jsonschema:\"...\"`\n    ProjectRoot string `json:\"project_root,omitempty\" jsonschema:\"...\"`\n}\n\ntype FindImportsOutput struct {\n    Status  string   `json:\"status\"`\n    Hint    string   `json:\"hint,omitempty\"`\n    Project string   `json:\"project,omitempty\"`\n    Imports []string `json:\"imports,omitempty\"`\n}\n\nfunc (s *Server) findImports(ctx context.Context, _ *sdk.CallToolRequest, in FindImportsInput) (*sdk.CallToolResult, FindImportsOutput, error) {\n    // ... implementation\n}\n```\n\nAlso add the exported wrapper alongside `GraphDeps`/`GraphCallers`/`GraphCallees` (lines 27–40):\n\n```go\nfunc (s *Server) FindImports(ctx context.Context, in FindImportsInput) (FindImportsOutput, error) {\n    _, out, err := s.findImports(ctx, nil, in)\n    return out, err\n}\n```\n\n---\n\n### 2. `internal/mcp/server.go` — register the tool in `RunStdio`\n\nInside `RunStdio` (around line 860), add an `sdk.AddTool` call alongside the others:\n\n```go\nsdk.AddTool(srv, &sdk.Tool{\n    Name:        \"find_imports\",\n    Description: \"...\",\n}, s.findImports)\n```\n\nThe MCP tool name `find_imports` becomes `mcp__dex__find_imports` from the client's perspective (the `mcp__dex__` prefix is the server name declared at line 855–858).\n\nThat's it — no routing table, no registry, no codegen. The SDK reflects the handler's `Input` type to produce the JSON schema automatically.",
+    "stop_reason": "end_turn",
+    "session_id": "dbc0f74a-2f37-4bfc-8241-4f0c0e9764bf",
+    "total_cost_usd": 0.12123334999999999,
+    "usage": {
+      "input_tokens": 6052,
+      "cache_creation_input_tokens": 19823,
+      "cache_read_input_tokens": 49167,
+      "output_tokens": 897,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 19823,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 6048,
+          "output_tokens": 520,
+          "cache_read_input_tokens": 18602,
+          "cache_creation_input_tokens": 14082,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 14082
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 466,
+        "outputTokens": 14,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000536,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6052,
+        "outputTokens": 897,
+        "cacheReadInputTokens": 49167,
+        "cacheCreationInputTokens": 19823,
+        "webSearchRequests": 0,
+        "costUSD": 0.12069735,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "da04a53b-143b-49b3-8606-98dbca0ccc54"
+  }
+}

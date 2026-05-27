@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the package (internal/lock), the function (Acquire), the file (lock.go), the exact line (60), and the syscall (syscall.Flock with LOCK_EX|LOCK_NB), matching the ground truth in all substantive details."
+}

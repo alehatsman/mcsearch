@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the filesystem watcher role (fsnotify, debounced re-index) and names the correct default debounce of 500ms with the correct field name Options.Debounce."
+}

@@ -1,0 +1,81 @@
+{
+  "qid": "L4-02",
+  "mode": "native",
+  "rep": 1,
+  "question": "Where does the dimension of the embedding vector get locked in, and what happens if the embedding model changes?",
+  "ground_truth": "Dim is fixed at index creation time — the `chunk_vecs` `vec0` virtual table is declared with a specific embedding dim, and the `chunks.vec` blobs are sized to match. Changing `DEX_EMBED_MODEL` to a model with a different output dim requires a full `dex reindex` (cannot be hot-swapped). This is enforced by the schema, not by application checks.",
+  "started": 1779879587,
+  "finished": 1779879614,
+  "wall_seconds": 27,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 28168,
+    "duration_api_ms": 32445,
+    "ttft_ms": 2270,
+    "num_turns": 5,
+    "result": "**The dimension locks in at first write, persisted in the SQLite `meta` table.**\n\n### Lock-in path\n\n1. **First `UpsertMany` call** (`store.go:550-563`): when `s.dim == 0`, it snapshots the length of the first incoming vector and writes it to `meta.dim`:\n   ```go\n   s.dim.Store(int64(len(rows[0].Vec)))\n   INSERT INTO meta(key,value) VALUES('dim', ?)\n   ```\n\n2. **`ensureVecTable`** (`store.go:333-336`) then bakes that number into the sqlite-vec virtual table's DDL — which is **immutable** after `CREATE`:\n   ```sql\n   CREATE VIRTUAL TABLE IF NOT EXISTS chunk_vecs USING vec0(\n       embedding FLOAT[<dim>] distance_metric=cosine\n   )\n   ```\n\n3. **On re-open** (`store.go:109-119`): `meta.dim` is read back and restored into `s.dim` before any writes happen.\n\n### What breaks if the model changes\n\n**At write time** — `UpsertMany` enforces the recorded dim on every chunk in the batch (`store.go:586-589`):\n```go\nif int64(len(r.Vec)) != s.dim.Load() {\n    return fmt.Errorf(\"vector dim mismatch: index has dim=%d, got %d (did the embedding model change?)\", ...)\n}\n```\nThe entire batch is rolled back and this error is returned.\n\n**At search time** — `scoreSemantic` also guards the query vector (`store.go:1141-1143`):\n```go\nif d := s.dim.Load(); d != 0 && int64(len(queryVec)) != d {\n    return nil, fmt.Errorf(\"query dim %d != index dim %d\", len(queryVec), d)\n}\n```\n\n**No migration path exists.** There is no code to re-embed existing chunks or drop and recreate `chunk_vecs`. If you change to a model with a different output dimension, you must delete the SQLite file and run a full reindex.",
+    "stop_reason": "end_turn",
+    "session_id": "fd4f24a6-ed40-44fe-b2e5-1adb8e522cd1",
+    "total_cost_usd": 0.1442455,
+    "usage": {
+      "input_tokens": 2285,
+      "cache_creation_input_tokens": 27524,
+      "cache_read_input_tokens": 48995,
+      "output_tokens": 1263,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 27524,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 2281,
+          "output_tokens": 927,
+          "cache_read_input_tokens": 18684,
+          "cache_creation_input_tokens": 21701,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 21701
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-sonnet-4-6": {
+        "inputTokens": 2285,
+        "outputTokens": 1263,
+        "cacheReadInputTokens": 48995,
+        "cacheCreationInputTokens": 27524,
+        "webSearchRequests": 0,
+        "costUSD": 0.1437135,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 457,
+        "outputTokens": 15,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000532,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "71354af2-202e-4f70-8da4-1efe869aaa7e"
+  }
+}

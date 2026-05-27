@@ -1,0 +1,81 @@
+{
+  "qid": "L1-03",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Where does the hybrid search live (cosine + BM25 fused)? File, function, and the RRF constant value used.",
+  "ground_truth": "`internal/store/store.go:928` — `func (s *Store) Search(...)`. Fusion is reciprocal-rank with constant `rrfK = 60` (defined at `internal/store/store.go:924`).",
+  "started": 1779877601,
+  "finished": 1779877618,
+  "wall_seconds": 17,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 16102,
+    "duration_api_ms": 16984,
+    "ttft_ms": 1686,
+    "num_turns": 5,
+    "result": "**`internal/store/store.go`**\n\n- **Public entry point:** `(*Store).Search` — `store.go:928`\n- **Fusion implementation:** `(*Store).searchRaw` — `store.go:951`; calls `scoreSemantic` and `scoreBM25`, then fuses via RRF: `score(id) = Σ 1/(rrfK + rank)`\n- **RRF constant:** `rrfK = 60` — `store.go:924`",
+    "stop_reason": "end_turn",
+    "session_id": "7ac52f6f-b70d-48f9-a695-548b83eb0275",
+    "total_cost_usd": 0.08424635,
+    "usage": {
+      "input_tokens": 8,
+      "cache_creation_input_tokens": 14189,
+      "cache_read_input_tokens": 76222,
+      "output_tokens": 506,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 14189,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 125,
+          "cache_read_input_tokens": 26837,
+          "cache_creation_input_tokens": 213,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 213
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 467,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000557,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 8,
+        "outputTokens": 506,
+        "cacheReadInputTokens": 76222,
+        "cacheCreationInputTokens": 14189,
+        "webSearchRequests": 0,
+        "costUSD": 0.08368935,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "30b4d2d0-6a30-4370-8ed1-1fde850fd658"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "qid": "L4-01",
+  "mode": "native",
+  "rep": 1,
+  "question": "Trace the path of a single saved file from filesystem change to becoming searchable. Name every stage and the package responsible.",
+  "ground_truth": "1. `internal/watch` (fsnotify) sees the write, debounces 500ms.\n2. On flush, `internal/index` walks the project (respecting `internal/ignore`), chunks each eligible file with `internal/chunk` (tree-sitter).\n3. Chunks are embedded via `internal/embed` (HTTP to OpenAI-shape /v1/embeddings).\n4. `internal/store.UpsertMany` writes rows into `chunks`; triggers populate `chunks_fts` (FTS5) and `chunk_vecs` (sqlite-vec).\n5. `internal/graph` rebuilds the Go static graph and PageRank.\n6. Optional summary passes (chunk/file/package/repo) via `internal/chat`.\n7. `internal/store.PruneUnseen` removes rows from the previous indexing generation.\nAfter step 4 the file is searchable via `Store.Search`.",
+  "started": 1779878159,
+  "finished": 1779878212,
+  "wall_seconds": 53,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 55601,
+    "duration_api_ms": 56305,
+    "ttft_ms": 2133,
+    "num_turns": 15,
+    "result": "Here is the complete trace, stage by stage:\n\n---\n\n## File → Searchable: Full Pipeline\n\n**Stage 1 — FS event** (`internal/watch`, `github.com/fsnotify/fsnotify`)\n\n`Watcher.Run` (`watch.go:81`) receives a `fsnotify.Event` (Write/Create/Rename/Remove). `handle()` (`watch.go:117`) filters it through `ignore.Matcher` and `ignore.IndexableExt`. A passing event calls `markDirty()`, which resets a debounce timer (default 500 ms).\n\n---\n\n**Stage 2 — Debounce flush** (`internal/watch`)\n\nAfter the quiet window, `time.AfterFunc` fires `flush()` (`watch.go:169`), which calls `w.indexer.Run(ctx)`. If events arrive during a run, `dirty=true` causes a re-run in the same goroutine — no concurrent indexers.\n\n---\n\n**Stage 3 — Filesystem walk** (`internal/index`)\n\n`Indexer.Run` (`index.go:137`) calls `filepath.WalkDir` on the project root. Each file is filtered by `ignore.Matcher`, extension (`ignore.IndexableExt`), size, and symlink checks. Changed files (mtime > `lastIndexed`) are sent as `pathTask` to a worker pool via `pathCh`.\n\n---\n\n**Stage 4 — Read + Parse into chunks** (`internal/index` workers + `internal/chunk`)\n\nWorker goroutines read the file bytes, reject binaries and secrets (`ignore.LooksBinary`, `ignore.LooksLikeSecret`), then call `chunk.Chunks()` (`chunk.go:232`). For known languages, tree-sitter extracts structural declarations (functions, methods, types) plus orphan windows. Unknown languages get a fixed sliding-window fallback. Results flow back via `resultCh` into `slowFiles`.\n\n---\n\n**Stage 5 — SHA dedup** (`internal/index` + `internal/store`)\n\nPass 2 calls `Store.ExistingSHAsBatch()` — one batch query — to learn which `(path, content_sha1)` pairs are already in SQLite. Pass 3a walks `slowFiles`: unchanged chunks get `TouchSeen()` (bumps `last_seen_at`); new/changed chunks are enqueued in `toEmbed`.\n\n---\n\n**Stage 6 — Embedding** (`internal/embed`)\n\n`Embed.Embed()` (`embed/client.go`) POSTs batches of `Chunk.EmbedText()` strings (path + kind + name headers prepended to source) to the configured `/v1/embeddings` endpoint (vLLM/Ollama/TEI). Returns `[][]float32` vectors.\n\n---\n\n**Stage 7 — Upsert to SQLite** (`internal/store`)\n\n`Store.UpsertMany()` (`store.go:546`) writes each chunk — content, metadata, and float32 vector BLOB — into the `chunks` table via `INSERT … ON CONFLICT DO UPDATE`. A trigger keeps the `chunk_vecs` (`vec0` virtual table) in sync. The row is now committed and the transaction is flushed.\n\n---\n\n**Stage 8 — Searchable** (`internal/store`)\n\n`Store.Search()` (`store.go:928`) accepts a query vector + text. It runs KNN on `chunk_vecs` (cosine similarity via `sqlite-vec`) and optionally FTS5/BM25 on `chunks_fts`, fuses the two ranked lists via Reciprocal Rank Fusion, applies optional reranking and per-file diversity, and returns `[]Hit`. The freshly upserted chunk is visible to this query immediately after the `UpsertMany` commit.\n\n---\n\n**Summary table:**\n\n| Stage | Package | Key call |\n|---|---|---|\n| FS event | `internal/watch` + `fsnotify` | `Watcher.handle()` |\n| Debounce → flush | `internal/watch` | `Watcher.flush()` |\n| Directory walk | `internal/index` | `filepath.WalkDir` in `Indexer.Run` |\n| Read + chunk | workers in `internal/index` + `internal/chunk` | `chunk.Chunks()` |\n| SHA dedup | `internal/index` + `internal/store` | `Store.ExistingSHAsBatch`, `TouchSeen` |\n| Embed | `internal/embed` | `embed.Client.Embed()` |\n| Upsert | `internal/store` | `Store.UpsertMany()` |\n| Search | `internal/store` | `Store.Search()` |",
+    "stop_reason": "end_turn",
+    "session_id": "027ffd8d-860f-4c70-8c7b-ec564ebdb546",
+    "total_cost_usd": 0.2649104,
+    "usage": {
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 39616,
+      "cache_read_input_tokens": 262348,
+      "output_tokens": 2471,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 39616,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 1126,
+          "cache_read_input_tokens": 51892,
+          "cache_creation_input_tokens": 585,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 585
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 461,
+        "outputTokens": 18,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000551,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 10,
+        "outputTokens": 2471,
+        "cacheReadInputTokens": 262348,
+        "cacheCreationInputTokens": 39616,
+        "webSearchRequests": 0,
+        "costUSD": 0.26435939999999997,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "4648dab7-40ab-46db-8485-6685123a8594"
+  }
+}

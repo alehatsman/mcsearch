@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies that the dimension is baked into the sqlite-vec virtual table DDL at `chunk_vecs` creation time, is persisted in a meta table, and that dimension mismatches are hard errors requiring a full reindex — all matching the ground truth's key points about schema enforcement and the need for reindexing when the model changes."
+}

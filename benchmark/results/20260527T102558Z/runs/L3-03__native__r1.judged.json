@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the full sequence: fsnotify events → debounce (500ms) → indexer pass (walk/chunk/embed/upsert) → graph rebuild → async summaries on idle, matching the ground truth in all key details with additional correct specifics about the implementation."
+}

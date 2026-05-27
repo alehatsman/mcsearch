@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the ground truth entry point (internal/mcp/server.go:851, RunStdio) and adds correct supplementary context about the CLI wiring — no hallucinations, no contradictions."
+}

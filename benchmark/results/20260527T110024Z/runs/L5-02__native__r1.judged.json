@@ -1,0 +1,4 @@
+{
+  "score": 1,
+  "reason": "The agent correctly describes the mathematical effect and the stale comment, but incorrectly concludes tests survive unchanged — the ground truth says the BM25/RRF tests at ~383-488 may flip on ordering and RRFScore > 0 assertions, which is the main practical 'breakage' the question is asking about."
+}

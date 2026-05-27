@@ -1,0 +1,81 @@
+{
+  "qid": "L1-02",
+  "mode": "native",
+  "rep": 1,
+  "question": "Where is the `RunStdio` function (the one that runs the MCP server over stdio) defined? Give the file and line of the function definition.",
+  "ground_truth": "`internal/mcp/server.go:851` — `func (s *Server) RunStdio(ctx context.Context) error`.",
+  "started": 1779881732,
+  "finished": 1779881738,
+  "wall_seconds": 6,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 6157,
+    "duration_api_ms": 7169,
+    "ttft_ms": 1745,
+    "num_turns": 3,
+    "result": "`internal/mcp/server.go:851`",
+    "stop_reason": "end_turn",
+    "session_id": "1e97a2fe-4641-4e6d-a9fb-56fda33142da",
+    "total_cost_usd": 0.03730765,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 5173,
+      "cache_read_input_tokens": 47913,
+      "output_tokens": 198,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 5173,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 15,
+          "cache_read_input_tokens": 17589,
+          "cache_creation_input_tokens": 445,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 445
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 470,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005499999999999999,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 198,
+        "cacheReadInputTokens": 47913,
+        "cacheCreationInputTokens": 5173,
+        "webSearchRequests": 0,
+        "costUSD": 0.03675765,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "6f49fda5-073e-41c3-ae1d-2e00b54c61ba"
+  }
+}

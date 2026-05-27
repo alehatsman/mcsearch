@@ -1,0 +1,81 @@
+{
+  "qid": "L4-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Why does dex use SQLite triggers to populate `chunks_fts` and `chunk_vecs` instead of writing those tables directly from Go?",
+  "ground_truth": "Both are SQLite virtual tables (FTS5 + sqlite-vec `vec0`). Writing to them must go through specific INSERT/DELETE shapes — getting that wrong corrupts the index. Centralising the mirror logic in triggers means there is exactly one place that maintains the invariant `chunks ↔ chunks_fts` and `chunks ↔ chunk_vecs`, regardless of which Go path (UpsertMany, PruneUnseen, backfill) touched the base table. Callers never need to know about the virtual tables.",
+  "started": 1779878326,
+  "finished": 1779878356,
+  "wall_seconds": 30,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 31105,
+    "duration_api_ms": 31771,
+    "ttft_ms": 2210,
+    "num_turns": 5,
+    "result": "Three reasons, each load-bearing:\n\n**1. External-content FTS5 requires it.**\n`chunks_fts` is declared as `content='chunks', content_rowid='id'` — an FTS5 external-content table. It stores only tokenizer state, not the text itself (no duplicate text on disk). FTS5 external-content tables don't self-maintain; they must be driven by explicit `INSERT … (delete)` tombstone commands. Triggers are the canonical mechanism for this. Without them, every write site would have to issue the FTS5 tombstone protocol manually. (`STORAGE.md:15`)\n\n**2. Single write surface across many mutators.**\n`chunks` is mutated by six different code paths: `UpsertMany`, `TouchSeen`, `TouchPath`, `PruneUnseen`, `DeletePath`, `DeletePathPrefix`. If Go code were responsible for keeping `chunks_fts` and `chunk_vecs` in sync, all six would need to replicate that logic. Triggers make `chunks` the only thing callers touch — the virtual tables follow automatically, atomically, within the same transaction. (`STORAGE.md:52`)\n\n**3. `chunks.vec` is the canonical source of truth; `chunk_vecs` is a derived index.**\nThe embedding BLOB lives in `chunks.vec`. `chunk_vecs` is rebuildable from it at any time (the lazy-backfill path does exactly this: `INSERT INTO chunk_vecs SELECT id, vec FROM chunks`). Expressing the sync as a trigger reinforces that `chunk_vecs` is a secondary index, not an independent store. It also means `vec_distance_cosine()` can score BM25-only hits cheaply from the BLOB without treating `chunk_vecs` as authoritative. (`STORAGE.md:39,43-46`)",
+    "stop_reason": "end_turn",
+    "session_id": "0b353fb4-7d38-421d-859d-26bd1ca6141c",
+    "total_cost_usd": 0.08979935,
+    "usage": {
+      "input_tokens": 10,
+      "cache_creation_input_tokens": 12381,
+      "cache_read_input_tokens": 71792,
+      "output_tokens": 1417,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 12381,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 3,
+          "output_tokens": 919,
+          "cache_read_input_tokens": 22028,
+          "cache_creation_input_tokens": 3214,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3214
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 468,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000548,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 10,
+        "outputTokens": 1417,
+        "cacheReadInputTokens": 71792,
+        "cacheCreationInputTokens": 12381,
+        "webSearchRequests": 0,
+        "costUSD": 0.08925135000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "7515a929-eb93-4696-8877-1721c46f0ac6"
+  }
+}

@@ -1,0 +1,81 @@
+{
+  "qid": "L3-05",
+  "mode": "native",
+  "rep": 1,
+  "question": "How does the agent's `mcp__dex__ask` tool relate to the lower-level MCP tools (search, find_symbol, graph_*)?",
+  "ground_truth": "`ask` is the primary, composite MCP tool. The other tools (`search_semantic`, `search_symbol`, `graph_callers`/`callees`/`deps`/`neighbors`, `view_summarize`) are the legs `ask` composes — it plans a retrieval, calls those legs internally, and returns a synthesised answer. Defined in `internal/mcp`.",
+  "started": 1779878091,
+  "finished": 1779878124,
+  "wall_seconds": 33,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 33301,
+    "duration_api_ms": 34288,
+    "ttft_ms": 1727,
+    "num_turns": 6,
+    "result": "Here's the relationship:\n\n## `ask` is an orchestrating query planner over the lower-level tools\n\n`ask` (`contextRouter`, `context.go:257`) doesn't call the other MCP tool handlers — it calls the **same underlying store/embed primitives directly** and fuses them into one response. The lower-level tools are thin wrappers around those same primitives registered as separate MCP endpoints.\n\n### What `ask` does internally (`contextRouter`):\n\n1. **Intent classification** (`resolveIntent`, `context.go:410`): Classifies the question into one of 7 intents (`behavior_search`, `symbol_lookup`, `callers`, `callees`, `architecture`, `package_topology`, `editing_context`) using keyword regexes and identifier pattern extraction.\n\n2. **Symbol lane** (`runSymbolLane`, `context.go:539`): Calls `st.FindSymbol()` — the same primitive `search_symbol` uses (`server.go:404`). Runs whenever identifiers are detected in the question, regardless of intent.\n\n3. **Semantic lane** (`runSemanticLane`, `context.go:643`): Calls `em.Embed()` + `st.Search()` — the same path `search_semantic` takes (`server.go:303,331`). Always runs for recall even when the symbol lane has exact hits.\n\n4. **Summary lane** (`runSummaryLane`, `context.go:598`): Calls `st.SearchSummaries()` — exclusive to `architecture`/`package_topology` intents to surface prose overviews.\n\n5. **Graph expansion** (`enrichGraph`, wired at `context.go:368`): Reads the static graph view (same data as `graph_deps`/`graph_callers`/`graph_callees`) for callers/callees/architecture intents. For Go, populates `graph.edges` from `calls` edges; non-Go falls back to a ripgrep reference scan.\n\n6. **Inline content** (`inlineContent`, `context.go:1185`): Reads file slices from disk into `suggested_reads`, `symbols.body`, and `semantic_hits` from a shared per-intent byte budget — so the agent gets contents without follow-up `Read` calls.\n\n7. **Next action + avoid** prose: Synthesized from all the above.\n\n### The key distinction from descriptions in `RunStdio` (`server.go:860-937`):\n\nThe tool descriptions for `search_semantic`, `search_symbol`, `graph_neighbors`, `graph_deps`, `graph_callers`, `graph_callees` all say **\"Prefer `ask`\"**. They're designed as escape hatches for when you already have an exact path/line or identifier and want only a single raw result, not the full fused bundle.\n\nIn summary: `ask` is a **query planner and context bundler** — it runs the symbol, semantic, and graph lanes in concert, applies intent-specific ranking and inline-content logic, and delivers a self-contained answer. The lower-level tools are single-lane primitives for when you need precise, unmediated access to one retrieval mechanism.",
+    "stop_reason": "end_turn",
+    "session_id": "683dd4a3-d5fe-4513-a82d-61e2957c7eb8",
+    "total_cost_usd": 0.2236762,
+    "usage": {
+      "input_tokens": 6,
+      "cache_creation_input_tokens": 47554,
+      "cache_read_input_tokens": 87899,
+      "output_tokens": 1227,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 47554,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 778,
+          "cache_read_input_tokens": 38729,
+          "cache_creation_input_tokens": 21686,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 21686
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 471,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005560000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 6,
+        "outputTokens": 1227,
+        "cacheReadInputTokens": 87899,
+        "cacheCreationInputTokens": 47554,
+        "webSearchRequests": 0,
+        "costUSD": 0.2231202,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "2707f2e1-e15f-44b2-b1ac-caa18f2ff563"
+  }
+}

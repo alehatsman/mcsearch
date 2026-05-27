@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the filesystem watcher role, fsnotify usage, re-indexing behavior, and states the exact debounce default of 500ms at the correct file location."
+}

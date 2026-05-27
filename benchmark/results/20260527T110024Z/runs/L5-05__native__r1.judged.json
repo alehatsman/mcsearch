@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all the key areas: internal/chunk (languages map, containerMethods, imports), go.mod, and tests in internal/chunk/*_test.go. It also correctly notes the chunker is self-contained and doesn't require changes to embedding/store/search. The answer adds bonus value by noting Rust is already implemented, while still explaining what adding a new language would require. The only minor omission is internal/ignore for excluding build dirs (e.g. target/), but this is a secondary concern not central to chunker support."
+}

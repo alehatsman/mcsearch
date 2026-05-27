@@ -1,0 +1,81 @@
+{
+  "qid": "L3-04",
+  "mode": "dex",
+  "rep": 1,
+  "question": "Which retrieval signals does `Store.Search` combine, and how are they fused?",
+  "ground_truth": "Two signals run in parallel: cosine KNN via the `sqlite-vec` `chunk_vecs` virtual table, and BM25 via the FTS5 `chunks_fts` table. They are fused with Reciprocal Rank Fusion (`rrfK=60`, Cormack 2009): `score(id) = Σ 1/(60+rank)` over both lists. An optional cross-encoder rerank pass can then reorder the fused pool.",
+  "started": 1779878017,
+  "finished": 1779878037,
+  "wall_seconds": 20,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 19156,
+    "duration_api_ms": 20187,
+    "ttft_ms": 1877,
+    "num_turns": 3,
+    "result": "`Store.Search` combines two signals run in parallel, then optionally applies a third reranking pass:\n\n**Signals**\n\n| Signal | Mechanism |\n|--------|-----------|\n| **Cosine similarity** | `sqlite-vec` KNN — `SELECT rowid, distance FROM chunk_vecs WHERE embedding MATCH :blob AND k=:pool ORDER BY distance`. The query text is embedded via `/v1/embeddings`; score = `1 − distance`. |\n| **BM25** | FTS5 — `bm25(chunks_fts)` over `buildFTSQuery(queryText)`. On FTS5 parse errors, falls back to semantic-only silently. |\n\n**Fusion — Reciprocal Rank Fusion (RRF)**\n\n```\nrrf[id] = Σ 1 / (rrfK + rank_in_list)    rrfK = 60   (Cormack 2009)\n```\n\nBoth ranked lists contribute independently; scores are accumulated into a `map[int64]float32` keyed by chunk ID, then sorted descending. BM25-only hits that missed the cosine list get their cosine score backfilled via `scoreSemanticForIDs` so every `Hit.Score` is populated.\n\n**Optional third pass — cross-encoder rerank**\n\nIf a `Reranker` is wired (`DEX_RERANK_URL`), the fused pool (capped at `Options.RerankPool`) is reordered by the cross-encoder; on `rerank.ErrUnreachable` it silently falls through to the RRF ordering.\n\n**Escape hatch**: `Options.DisableBM25` (or empty `queryText`) skips BM25 and RRF entirely → pure cosine path.\n\nKey locations: `internal/store/store.go:924` (`rrfK = 60`), `:928` (`Search`), `:951` (`searchRaw`).",
+    "stop_reason": "end_turn",
+    "session_id": "3d956ccf-b683-4a46-a52f-6ea9b22fb0e3",
+    "total_cost_usd": 0.08511355000000001,
+    "usage": {
+      "input_tokens": 7,
+      "cache_creation_input_tokens": 15675,
+      "cache_read_input_tokens": 49921,
+      "output_tokens": 720,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 15675,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 470,
+          "cache_read_input_tokens": 19133,
+          "cache_creation_input_tokens": 9403,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 9403
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 455,
+        "outputTokens": 16,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.000535,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 7,
+        "outputTokens": 720,
+        "cacheReadInputTokens": 49921,
+        "cacheCreationInputTokens": 15675,
+        "webSearchRequests": 0,
+        "costUSD": 0.08457855,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "07bdcc0b-36f2-43a6-9a56-067e5cabd3bc"
+  }
+}

@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all three main concerns: project root resolution, cache-dir layout (CacheDir = baseCacheDir/sha256(realpath), DBPath, LockPath), and the indexability guard that blocks dangerous roots like $HOME and non-git/non-allowlisted dirs."
+}

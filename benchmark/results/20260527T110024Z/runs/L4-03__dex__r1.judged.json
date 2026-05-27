@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies the strict less-than cutoff in PruneUnseen, the same-tick collision problem with lower-resolution timestamps, and that UnixNano makes it astronomically unlikely — matching the ground truth exactly, with additional correct detail about the regression test."
+}

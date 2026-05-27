@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "The answer correctly identifies all four areas from the ground truth (internal/chunk, go.mod, internal/ignore, tests) with accurate detail about node kinds, langConfig structure, and containerMethods, plus correctly notes that graph/store/embed are unaffected — fully consistent with the canonical answer."
+}

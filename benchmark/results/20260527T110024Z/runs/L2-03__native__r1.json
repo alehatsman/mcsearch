@@ -1,0 +1,81 @@
+{
+  "qid": "L2-03",
+  "mode": "native",
+  "rep": 1,
+  "question": "What is `internal/watch` responsible for? Name the debounce default.",
+  "ground_truth": "Filesystem watcher: fsnotify events are debounced, then trigger a full re-index (and graph rebuild) pass. Default debounce window is 500ms (`internal/watch/watch.go:70-71`, field `Options.Debounce`).",
+  "started": 1779879864,
+  "finished": 1779879874,
+  "wall_seconds": 10,
+  "rc": 0,
+  "claude": {
+    "type": "result",
+    "subtype": "success",
+    "is_error": false,
+    "api_error_status": null,
+    "duration_ms": 8758,
+    "duration_api_ms": 9682,
+    "ttft_ms": 2270,
+    "num_turns": 3,
+    "result": "`internal/watch` watches the filesystem for file-change events and keeps the project's chunk index fresh by triggering a full `index.Indexer.Run` pass after a quiet burst window. It uses `fsnotify` for non-recursive watching (maintaining coverage by walking new subdirectories on `Create` events), serializes concurrent indexer runs, and supports optional post-index (`AfterIndex`) and idle (`OnIdle`) hooks.\n\n**Debounce default: 500 ms** (`watch.go:71`).",
+    "stop_reason": "end_turn",
+    "session_id": "f9b4cb98-fdd8-4239-a8c1-24874de4fa00",
+    "total_cost_usd": 0.050081799999999996,
+    "usage": {
+      "input_tokens": 5,
+      "cache_creation_input_tokens": 8274,
+      "cache_read_input_tokens": 47871,
+      "output_tokens": 276,
+      "server_tool_use": {
+        "web_search_requests": 0,
+        "web_fetch_requests": 0
+      },
+      "service_tier": "standard",
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 8274,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "inference_geo": "not_available",
+      "iterations": [
+        {
+          "input_tokens": 1,
+          "output_tokens": 120,
+          "cache_read_input_tokens": 17564,
+          "cache_creation_input_tokens": 3571,
+          "cache_creation": {
+            "ephemeral_5m_input_tokens": 0,
+            "ephemeral_1h_input_tokens": 3571
+          },
+          "type": "message"
+        }
+      ],
+      "speed": "standard"
+    },
+    "modelUsage": {
+      "claude-haiku-4-5-20251001": {
+        "inputTokens": 453,
+        "outputTokens": 17,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0,
+        "webSearchRequests": 0,
+        "costUSD": 0.0005380000000000001,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      },
+      "claude-sonnet-4-6": {
+        "inputTokens": 5,
+        "outputTokens": 276,
+        "cacheReadInputTokens": 47871,
+        "cacheCreationInputTokens": 8274,
+        "webSearchRequests": 0,
+        "costUSD": 0.0495438,
+        "contextWindow": 200000,
+        "maxOutputTokens": 32000
+      }
+    },
+    "permission_denials": [],
+    "terminal_reason": "completed",
+    "fast_mode_state": "off",
+    "uuid": "fe936151-0c1f-4f8e-b854-6653c25118fb"
+  }
+}

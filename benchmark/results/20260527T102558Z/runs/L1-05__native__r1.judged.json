@@ -1,0 +1,4 @@
+{
+  "score": 2,
+  "reason": "Correctly identifies package internal/lock, the Acquire function, and the exact syscall (syscall.Flock with LOCK_EX|LOCK_NB), which matches the ground truth at the same location (line 55 vs 60 is a minor discrepancy but points to the same symbol)."
+}
