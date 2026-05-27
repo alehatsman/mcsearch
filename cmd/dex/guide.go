@@ -15,7 +15,7 @@ func cmdGuide(ctx context.Context, args []string) error {
 	setHelp(fs,
 		"Render LLM_GUIDE.md from existing repo + package summaries in the index.",
 		"dex guide [<path>] [--full] [--check] [--dry-run]")
-	full := fs.Bool("full", false, "ignore manifest and re-render unconditionally")
+	full := fs.Bool("full", false, "ignore manifest and re-render unconditionally (also bumps the manifest watermark)")
 	check := fs.Bool("check", false, "exit non-zero if the guide is out of date; no write")
 	dryRun := fs.Bool("dry-run", false, "report what would change without writing files")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
