@@ -118,6 +118,19 @@ func buildMarkdown(ctx context.Context, st *store.Store, root string, repo, pkgs
 	}
 
 	haveOverview := len(repo) > 0
+
+	// Table of contents. Skips the root package_summary when it would
+	// be hidden anyway (see #2 below), so the TOC matches the rendered
+	// module sections exactly.
+	tocEntries := tocFromPackages(pkgs, haveOverview)
+	if len(tocEntries) > 0 {
+		b.WriteString("## Contents\n\n")
+		for _, e := range tocEntries {
+			fmt.Fprintf(&b, "- [%s](#%s)\n", e.label, e.anchor)
+		}
+		b.WriteString("\n")
+	}
+
 	for _, p := range pkgs {
 		// The root package_summary is redundant with the Overview
 		// (same content, same scope). Skip it so the guide has one
@@ -306,6 +319,66 @@ func readModulePath(root string) string {
 		}
 	}
 	return ""
+}
+
+// tocEntry pairs a display label with its GitHub-flavored anchor slug.
+type tocEntry struct {
+	label  string
+	anchor string
+}
+
+// tocFromPackages builds the Contents list. When haveOverview is true,
+// the root package_summary is skipped (Overview already covers root) —
+// matching the suppression rule in the module loop, so TOC entries and
+// rendered sections stay in sync.
+func tocFromPackages(pkgs []store.SummaryRow, haveOverview bool) []tocEntry {
+	out := make([]tocEntry, 0, len(pkgs))
+	for _, p := range pkgs {
+		if (p.Path == "." || p.Path == "") && haveOverview {
+			continue
+		}
+		label := p.Path
+		if label == "." || label == "" {
+			label = "(root)"
+		}
+		out = append(out, tocEntry{label: label, anchor: moduleAnchor(label)})
+	}
+	return out
+}
+
+// moduleAnchor returns the GitHub-flavored anchor slug for a
+// "## Module: <label>" heading. GitHub's slugger lowercases the
+// heading text, replaces spaces with "-", and strips characters that
+// aren't [a-z0-9_-]. Slashes vanish; parentheses vanish.
+//
+// For "## Module: internal/watch" → "module-internalwatch".
+// For "## Module: (root)"          → "module-root".
+func moduleAnchor(label string) string {
+	return slugifyHeading("Module: " + label)
+}
+
+// slugifyHeading converts a markdown heading text to a GitHub anchor
+// slug. Approximates github-slugger: lowercase; spaces → "-"; drop
+// anything outside [a-z0-9-_]; collapse runs of "-".
+func slugifyHeading(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	lastDash := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+			lastDash = false
+		case r == ' ', r == '-':
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		default:
+			// drop punctuation (`/`, `:`, `(`, `)`, …)
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // selectTopExported sorts symbols by PageRank DESC, InDegree DESC, Name

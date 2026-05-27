@@ -91,6 +91,54 @@ func TestTrimModulePrefix(t *testing.T) {
 	}
 }
 
+func TestSlugifyHeading(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Module: internal/watch", "module-internalwatch"},
+		{"Module: cmd/dex", "module-cmddex"},
+		{"Module: (root)", "module-root"},
+		{"Module: internal/graph/testdata", "module-internalgraphtestdata"},
+		{"Overview", "overview"},
+		{"  Spaces  Around  ", "spaces-around"},
+		{"Already-Dashed", "already-dashed"},
+		{"Multi -- Dash", "multi-dash"},
+		{"AlphaNumeric_123", "alphanumeric_123"},
+	}
+	for _, tc := range cases {
+		if got := slugifyHeading(tc.in); got != tc.want {
+			t.Errorf("slugifyHeading(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTocFromPackages(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "."},
+		{Path: "cmd/dex"},
+		{Path: "internal/watch"},
+	}
+	t.Run("with overview drops root", func(t *testing.T) {
+		toc := tocFromPackages(pkgs, true)
+		if len(toc) != 2 {
+			t.Fatalf("got %d entries, want 2: %+v", len(toc), toc)
+		}
+		if toc[0].label != "cmd/dex" || toc[0].anchor != "module-cmddex" {
+			t.Errorf("entry 0 = %+v", toc[0])
+		}
+		if toc[1].label != "internal/watch" || toc[1].anchor != "module-internalwatch" {
+			t.Errorf("entry 1 = %+v", toc[1])
+		}
+	})
+	t.Run("without overview keeps (root)", func(t *testing.T) {
+		toc := tocFromPackages(pkgs, false)
+		if len(toc) != 3 {
+			t.Fatalf("got %d entries, want 3", len(toc))
+		}
+		if toc[0].label != "(root)" || toc[0].anchor != "module-root" {
+			t.Errorf("root entry = %+v", toc[0])
+		}
+	})
+}
+
 func TestSelectTopExported(t *testing.T) {
 	// 12 symbols with varied PageRank/InDegree/Name. Top 5 by PageRank
 	// must be A, B, C, D, E (ties broken by InDegree then Name).
