@@ -239,6 +239,13 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		go func() {
 			defer workers.Done()
 			for task := range pathCh {
+				// Honour cancellation between files: a long index over a
+				// 10k-file repo would otherwise drain pathCh fully even
+				// after Ctrl-C — workers keep reading queued tasks until
+				// the channel closes.
+				if ctx.Err() != nil {
+					return
+				}
 				data, err := os.ReadFile(task.path)
 				if err != nil {
 					continue
@@ -680,6 +687,12 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			"batch_size", batchSize)
 		embedStart := time.Now()
 		for start := 0; start < len(toEmbed); start += batchSize {
+			// Bail between batches so Ctrl-C during a long embed pass
+			// returns within one batch's wall-clock instead of waiting
+			// for the http client's per-call timeout to fire.
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			end := start + batchSize
 			if end > len(toEmbed) {
 				end = len(toEmbed)

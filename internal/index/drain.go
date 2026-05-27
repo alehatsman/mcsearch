@@ -131,6 +131,12 @@ func (ix *Indexer) DrainPendingSummariesBatch(ctx context.Context, max int) (gen
 			"batches", totalBatches,
 			"batch_size", batchSize)
 		for start := 0; start < len(successful); start += batchSize {
+			// Honour cancellation between batches: the watcher's idle hook
+			// can interrupt long drains; without this check we'd still
+			// embed + upsert one full batch wave after ctx.Done.
+			if err := ctx.Err(); err != nil {
+				return generated, 0, err
+			}
 			end := start + batchSize
 			if end > len(successful) {
 				end = len(successful)
