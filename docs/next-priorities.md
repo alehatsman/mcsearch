@@ -112,9 +112,10 @@ the rerank network call.
 ## 5. Pending-summaries backpressure + visible queue health
 
 `index_status` already surfaces `pending_summaries` count
-(`internal/mcp/server.go:698`). Today's snapshot of this very project
-shows the worktree at **362 pending** — proof that the queue can fall
-arbitrarily behind without anyone noticing.
+(`internal/mcp/server.go:698`). Today's snapshot shows the `feat+index-lock` worktree under this repo
+at **362 pending** — proof that the queue can fall arbitrarily behind
+without anyone noticing, especially on a stale worktree that the active
+session no longer touches.
 
 Fix:
 - Add `pending_summaries_oldest_age_s` to `Stats` — single SQL
