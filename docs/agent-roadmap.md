@@ -4,10 +4,10 @@ Handoff document for future agents. Each item is sized to be picked up
 cold by a fresh session: title → motivation → entry points → success
 criteria. Ranked by impact × tractability.
 
-This list is **broader-scope companion** to
-[`guide-improvements.md`](./guide-improvements.md) — that doc is
-tactical guide-renderer polish; this one covers cross-cutting system
-quality and coherence. Items here don't duplicate items there.
+This list covers cross-cutting system quality and coherence. The
+guide-renderer polish that used to live in `guide-improvements.md`
+all shipped in late May 2026 (see commit `e7ed8ea`) — that doc was
+dropped, and items here don't duplicate it.
 
 ---
 
@@ -93,6 +93,12 @@ prose paragraph mentioning identifiers absent from the package's
 
 ## 4. Multi-language graph extraction (Python / TS / Rust)
 
+**Status.** Tracked in `docs/vision.md` scope cut #2 with the
+tree-sitter-based implementation sketch — per-language queries in
+`internal/graph/sitter_calls.go`, edges tagged `provenance: "sitter"`
+so the MCP layer distinguishes them from Go's type-resolved edges.
+This entry is the broader extractor framing.
+
 **Why.** Today's static graph is Go-only (`go/packages` + `go/types` in
 `internal/graph`). Non-Go projects get a guide with empty "Depends on"
 / "Used by" sections — the most useful grounding signal disappears.
@@ -102,8 +108,8 @@ non-Go repo.
 **Entry points.**
 - `internal/graph/graph.go` — split the extractor interface so per-language
   backends plug in.
-- Start with Python: `ast` module via a subprocess to a tiny helper
-  script (or pure Go libraries like `go-python/...`).
+- Per-language tree-sitter queries (see vision scope cut #2). Same
+  approach the chunker uses; no per-language subprocess needed.
 - Schema reuse: same `graph_nodes` / `graph_edges` tables. `kind`
   enum covers function / method / class / import already.
 
@@ -139,23 +145,13 @@ unexpectedly missing" message.
 
 ---
 
-## 6. Fix `TestExtractGoNoModule` flake
+## 6. ✅ Fix `TestExtractGoNoModule` flake
 
-**Why.** Observed during the prune-fix smoke: `go list ./...` fails
-when invoked from a non-module worktree path (
-`pattern ./...: directory prefix . does not contain main module`).
-The test classifies as `pre-existing` + `environment`-sensitive, but
-it's flaky and erodes confidence — CI runs that hit a transient
-GOMODCACHE state will fail spuriously.
-
-**Entry points.**
-- `internal/graph/yaml_test.go:65` — the failing assertion.
-- Either (a) make the test isolate GOPATH/GOMODCACHE properly, or
-  (b) tolerate the "no module" warning explicitly rather than failing
-  on `packages > 0` when the underlying message is benign.
-
-**Done when.** Test passes on a fresh checkout in any working
-directory, including the worktree path patterns used by `EnterWorktree`.
+**Shipped** (pre-priorities sweep, no-op confirmation in this round).
+`ExtractGo` now short-circuits at `internal/graph/go.go:62` via
+`hasGoModule(projectRoot)` — non-Go trees return an empty
+`ExtractResult` without invoking `go/packages`, so the driver warning
+that used to leak into the test result is gone.
 
 ---
 
@@ -207,9 +203,9 @@ listening; check `docker ps`" message.
 
 ## 9. CONTRIBUTING.md + repo navigation guide for agents
 
-**Why.** This roadmap, `guide-improvements.md`, `PIPELINE.md`,
-`STORAGE.md`, `architecture.md`, `internals.md`, `vision.md`,
-`how-dex-guide-works.md`, `tuning.md` — already nine sources of
+**Why.** This roadmap, `PIPELINE.md`, `STORAGE.md`,
+`architecture.md`, `internals.md`, `vision.md`,
+`how-dex-guide-works.md`, `tuning.md` — already eight sources of
 truth. A new agent (or human contributor) walks in cold and doesn't
 know which to read first or how they relate. Coherence here is meta:
 **a tool that helps agents understand code should be exemplary at
