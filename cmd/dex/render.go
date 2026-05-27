@@ -221,18 +221,34 @@ func printSearchHitResult(status, hint, project string, hits []mcp.SearchHit) {
 
 // printContextText emits a human-readable rendering of a ContextOutput.
 // Mirrors the layout cmdQuery uses for hits so the two surfaces feel
-// like the same tool.
+// like the same tool. The per-section helpers below take the relevant
+// slice/map directly so each one is independently testable.
 func printContextText(out mcp.ContextOutput) {
 	if out.Status != "ok" {
-		fmt.Fprintf(os.Stderr, "status: %s\n", out.Status)
-		if out.Hint != "" {
-			fmt.Fprintf(os.Stderr, "hint:   %s\n", out.Hint)
-		}
-		if out.Endpoint != "" {
-			fmt.Fprintf(os.Stderr, "endpoint: %s\n", out.Endpoint)
-		}
+		printContextError(out)
 		return
 	}
+	printContextHeader(out)
+	printSuggestedReads(out.SuggestedReads)
+	printSymbols(out.Symbols)
+	printReferences(out.References)
+	printAnnotations(out.Annotations)
+	printSemanticHits(out.SemanticHits)
+	printGraph(out.Graph)
+	printNextActionAndAvoid(out)
+}
+
+func printContextError(out mcp.ContextOutput) {
+	fmt.Fprintf(os.Stderr, "status: %s\n", out.Status)
+	if out.Hint != "" {
+		fmt.Fprintf(os.Stderr, "hint:   %s\n", out.Hint)
+	}
+	if out.Endpoint != "" {
+		fmt.Fprintf(os.Stderr, "endpoint: %s\n", out.Endpoint)
+	}
+}
+
+func printContextHeader(out mcp.ContextOutput) {
 	fmt.Printf("intent: %s  project: %s\n", out.Intent, out.Project)
 	if out.Stale {
 		fmt.Println("⚠ index is stale — refresh recommended")
@@ -241,113 +257,133 @@ func printContextText(out mcp.ContextOutput) {
 		fmt.Printf("hint: %s\n", out.Hint)
 	}
 	fmt.Println()
+}
 
-	if len(out.SuggestedReads) > 0 {
-		fmt.Println("Suggested reads:")
-		for i, r := range out.SuggestedReads {
-			loc := r.Path
-			if r.StartLine > 0 || r.EndLine > 0 {
-				loc = fmt.Sprintf("%s:%d-%d", r.Path, r.StartLine, r.EndLine)
+func printSuggestedReads(reads []mcp.SuggestedRead) {
+	if len(reads) == 0 {
+		return
+	}
+	fmt.Println("Suggested reads:")
+	for i, r := range reads {
+		loc := r.Path
+		if r.StartLine > 0 || r.EndLine > 0 {
+			loc = fmt.Sprintf("%s:%d-%d", r.Path, r.StartLine, r.EndLine)
+		}
+		fmt.Printf("  %d. %s\n     reason: %s\n", i+1, loc, r.Reason)
+		if r.Content != "" {
+			for line := range strings.SplitSeq(strings.TrimRight(r.Content, "\n"), "\n") {
+				fmt.Printf("     │ %s\n", line)
 			}
-			fmt.Printf("  %d. %s\n     reason: %s\n", i+1, loc, r.Reason)
-			if r.Content != "" {
-				for line := range strings.SplitSeq(strings.TrimRight(r.Content, "\n"), "\n") {
-					fmt.Printf("     │ %s\n", line)
-				}
-				if r.Truncated {
-					fmt.Println("     │ … (truncated; Read the file for the rest)")
-				}
+			if r.Truncated {
+				fmt.Println("     │ … (truncated; Read the file for the rest)")
 			}
+		}
+	}
+	fmt.Println()
+}
+
+func printSymbols(symbols []mcp.SymbolHit) {
+	if len(symbols) == 0 {
+		return
+	}
+	fmt.Println("Relevant symbols:")
+	for _, sym := range symbols {
+		loc := sym.Path
+		if sym.StartLine > 0 {
+			loc = fmt.Sprintf("%s:%d", sym.Path, sym.StartLine)
+		}
+		fmt.Printf("  - %s  (%s)  %s\n", sym.QualifiedName, sym.Kind, loc)
+		if sym.Signature != "" {
+			fmt.Printf("      sig: %s\n", sym.Signature)
+		}
+		if sym.Doc != "" {
+			for line := range strings.SplitSeq(sym.Doc, "\n") {
+				fmt.Printf("      doc: %s\n", line)
+			}
+		}
+	}
+	fmt.Println()
+}
+
+func printReferences(refs []mcp.RefHit) {
+	if len(refs) == 0 {
+		return
+	}
+	fmt.Println("References:")
+	for _, r := range refs {
+		fmt.Printf("  - %s:%d  %s\n", r.Path, r.Line, r.Snippet)
+	}
+	fmt.Println()
+}
+
+func printAnnotations(anns map[string]mcp.PathMeta) {
+	if len(anns) == 0 {
+		return
+	}
+	fmt.Println("Annotations:")
+	for path, meta := range anns {
+		fmt.Printf("  %s\n", path)
+		if meta.LastCommit != "" {
+			fmt.Printf("    last:    %s  %s\n", meta.LastCommit, meta.LastAuthor)
+		}
+		if len(meta.Owners) > 0 {
+			fmt.Printf("    owners:  %s\n", strings.Join(meta.Owners, " "))
+		}
+		if meta.NearestDoc != "" {
+			fmt.Printf("    doc:     %s\n", meta.NearestDoc)
+		}
+		if len(meta.Tests) > 0 {
+			fmt.Printf("    tests:   %s\n", strings.Join(meta.Tests, " "))
+		}
+		if meta.BuildTags != "" {
+			fmt.Printf("    build:   %s\n", meta.BuildTags)
+		}
+		if meta.Package != "" {
+			fmt.Printf("    package: %s\n", meta.Package)
+		}
+	}
+	fmt.Println()
+}
+
+func printSemanticHits(hits []mcp.SemHit) {
+	if len(hits) == 0 {
+		return
+	}
+	fmt.Println("Semantic hits:")
+	for i, h := range hits {
+		loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
+		fmt.Printf("  %d. %s  (%s)  score=%.4f", i+1, loc, h.Kind, h.Score)
+		if h.Reason != "" {
+			fmt.Printf("  (%s)", h.Reason)
 		}
 		fmt.Println()
-	}
-
-	if len(out.Symbols) > 0 {
-		fmt.Println("Relevant symbols:")
-		for _, sym := range out.Symbols {
-			loc := sym.Path
-			if sym.StartLine > 0 {
-				loc = fmt.Sprintf("%s:%d", sym.Path, sym.StartLine)
-			}
-			fmt.Printf("  - %s  (%s)  %s\n", sym.QualifiedName, sym.Kind, loc)
-			if sym.Signature != "" {
-				fmt.Printf("      sig: %s\n", sym.Signature)
-			}
-			if sym.Doc != "" {
-				for line := range strings.SplitSeq(sym.Doc, "\n") {
-					fmt.Printf("      doc: %s\n", line)
-				}
+		// Summary-kind hits carry synthesized prose in Content; the
+		// line range points at source that wouldn't match if re-read,
+		// so inline the body here.
+		if strings.HasSuffix(h.Kind, "_summary") && h.Content != "" {
+			for line := range strings.SplitSeq(strings.TrimRight(h.Content, "\n"), "\n") {
+				fmt.Printf("     │ %s\n", line)
 			}
 		}
-		fmt.Println()
 	}
+	fmt.Println()
+}
 
-	if len(out.References) > 0 {
-		fmt.Println("References:")
-		for _, r := range out.References {
-			fmt.Printf("  - %s:%d  %s\n", r.Path, r.Line, r.Snippet)
-		}
-		fmt.Println()
+func printGraph(gr *mcp.GraphResult) {
+	if gr == nil || (len(gr.Nodes) == 0 && len(gr.Edges) == 0) {
+		return
 	}
-
-	if len(out.Annotations) > 0 {
-		fmt.Println("Annotations:")
-		for path, meta := range out.Annotations {
-			fmt.Printf("  %s\n", path)
-			if meta.LastCommit != "" {
-				fmt.Printf("    last:    %s  %s\n", meta.LastCommit, meta.LastAuthor)
-			}
-			if len(meta.Owners) > 0 {
-				fmt.Printf("    owners:  %s\n", strings.Join(meta.Owners, " "))
-			}
-			if meta.NearestDoc != "" {
-				fmt.Printf("    doc:     %s\n", meta.NearestDoc)
-			}
-			if len(meta.Tests) > 0 {
-				fmt.Printf("    tests:   %s\n", strings.Join(meta.Tests, " "))
-			}
-			if meta.BuildTags != "" {
-				fmt.Printf("    build:   %s\n", meta.BuildTags)
-			}
-			if meta.Package != "" {
-				fmt.Printf("    package: %s\n", meta.Package)
-			}
-		}
-		fmt.Println()
+	fmt.Println("Graph:")
+	for _, n := range gr.Nodes {
+		fmt.Printf("  node  %-12s  %s\n", n.Kind, n.ID)
 	}
-
-	if len(out.SemanticHits) > 0 {
-		fmt.Println("Semantic hits:")
-		for i, h := range out.SemanticHits {
-			loc := fmt.Sprintf("%s:%d-%d", h.Path, h.StartLine, h.EndLine)
-			fmt.Printf("  %d. %s  (%s)  score=%.4f", i+1, loc, h.Kind, h.Score)
-			if h.Reason != "" {
-				fmt.Printf("  (%s)", h.Reason)
-			}
-			fmt.Println()
-			// Summary-kind hits carry synthesized prose in Content;
-			// the line range points at source that wouldn't match if
-			// re-read, so inline the body here.
-			if strings.HasSuffix(h.Kind, "_summary") && h.Content != "" {
-				for line := range strings.SplitSeq(strings.TrimRight(h.Content, "\n"), "\n") {
-					fmt.Printf("     │ %s\n", line)
-				}
-			}
-		}
-		fmt.Println()
+	for _, e := range gr.Edges {
+		fmt.Printf("  edge  %-12s  %s → %s\n", e.Kind, e.From, e.To)
 	}
+	fmt.Println()
+}
 
-	if out.Graph != nil && (len(out.Graph.Nodes) > 0 || len(out.Graph.Edges) > 0) {
-		fmt.Println("Graph:")
-		for _, n := range out.Graph.Nodes {
-			fmt.Printf("  node  %-12s  %s\n", n.Kind, n.ID)
-		}
-		for _, e := range out.Graph.Edges {
-			fmt.Printf("  edge  %-12s  %s → %s\n", e.Kind, e.From, e.To)
-		}
-		fmt.Println()
-	}
-
+func printNextActionAndAvoid(out mcp.ContextOutput) {
 	if out.NextAction != "" {
 		fmt.Printf("Next action:\n  %s\n\n", out.NextAction)
 	}

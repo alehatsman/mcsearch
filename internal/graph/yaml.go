@@ -162,7 +162,7 @@ func scanYAMLRefs(path string) ([]yamlRef, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []yamlRef
 	s := bufio.NewScanner(f)
 	s.Buffer(make([]byte, 64*1024), 1024*1024)

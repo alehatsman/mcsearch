@@ -79,7 +79,7 @@ func (s *Server) graphDeps(ctx context.Context, _ *sdk.CallToolRequest, in Graph
 	if err != nil {
 		return nil, GraphDepsOutput{Status: "error", Hint: fmt.Sprintf("open index: %v", err)}, nil
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	view, err := loadGraphView(ctx, st)
 	if err != nil {
@@ -193,11 +193,11 @@ type CallEdgeOutput struct {
 	Hits    []CallSite    `json:"hits,omitempty"`
 }
 
-func (s *Server) graphCallers(ctx context.Context, req *sdk.CallToolRequest, in CallEdgeInput) (*sdk.CallToolResult, CallEdgeOutput, error) {
+func (s *Server) graphCallers(ctx context.Context, _ *sdk.CallToolRequest, in CallEdgeInput) (*sdk.CallToolResult, CallEdgeOutput, error) {
 	return s.callEdges(ctx, in, true)
 }
 
-func (s *Server) graphCallees(ctx context.Context, req *sdk.CallToolRequest, in CallEdgeInput) (*sdk.CallToolResult, CallEdgeOutput, error) {
+func (s *Server) graphCallees(ctx context.Context, _ *sdk.CallToolRequest, in CallEdgeInput) (*sdk.CallToolResult, CallEdgeOutput, error) {
 	return s.callEdges(ctx, in, false)
 }
 
@@ -219,7 +219,7 @@ func (s *Server) callEdges(ctx context.Context, in CallEdgeInput, callers bool) 
 	if err != nil {
 		return nil, CallEdgeOutput{Status: "error", Hint: fmt.Sprintf("open index: %v", err)}, nil
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	view, err := loadGraphView(ctx, st)
 	if err != nil {

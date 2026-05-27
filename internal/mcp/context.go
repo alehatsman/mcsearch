@@ -1090,73 +1090,102 @@ func inlineCapsFor(intent string) inlineCaps {
 // leave Content/Body empty and the caller still has Path/StartLine
 // /EndLine to fall back on a manual Read.
 func inlineContent(projectRoot, intent string, reads []SuggestedRead, syms []SymbolHit, sem []SemHit) {
-	caps := inlineCapsFor(intent)
-	budget := caps.totalBytesCap
-
-	type key struct {
-		path           string
-		start, end     int
-		maxLines, maxB int
+	in := &inliner{
+		projectRoot: projectRoot,
+		intent:      intent,
+		caps:        inlineCapsFor(intent),
+		cache:       map[inlineKey]inlineCached{},
 	}
-	type cached struct {
-		content   string
-		truncated bool
+	in.budget = in.caps.totalBytesCap
+	in.fillReads(reads)
+	in.fillImports(reads)
+	if intent == IntentSymbolLookup {
+		in.fillSymbolBodies(syms)
 	}
-	cache := map[key]cached{}
+	in.fillSemanticHits(sem)
+}
 
-	fetch := func(path string, start, end int) (string, bool, bool) {
-		// Returns (content, truncated, charged) where charged=true
-		// means we drew from the budget on this call (cache miss).
-		perBytes := min(caps.maxBytesPerRead, budget)
-		k := key{path, start, end, caps.maxLinesPerRead, perBytes}
-		if c, ok := cache[k]; ok {
-			return c.content, c.truncated, false
-		}
-		if budget <= 0 {
-			return "", false, false
-		}
-		abs := path
-		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(projectRoot, abs)
-		}
-		content, truncated, err := readLineRange(abs, start, end, caps.maxLinesPerRead, perBytes)
-		if err != nil {
-			return "", false, false
-		}
-		cache[k] = cached{content, truncated}
-		return content, truncated, true
+// inliner carries the shared budget + read cache across inlineContent's
+// four passes (suggested_reads bodies, imports, symbol bodies, semantic
+// hits). Splitting the passes off the entrypoint keeps each one small
+// enough to read without paging — the entrypoint itself is now a thin
+// orchestrator.
+type inliner struct {
+	projectRoot string
+	intent      string
+	caps        inlineCaps
+	budget      int
+	cache       map[inlineKey]inlineCached
+}
+
+type inlineKey struct {
+	path           string
+	start, end     int
+	maxLines, maxB int
+}
+
+type inlineCached struct {
+	content   string
+	truncated bool
+}
+
+// fetch returns (content, truncated, charged). charged=true means the
+// call drew from the budget (cache miss); the caller must decrement.
+func (in *inliner) fetch(path string, start, end int) (string, bool, bool) {
+	perBytes := min(in.caps.maxBytesPerRead, in.budget)
+	k := inlineKey{path, start, end, in.caps.maxLinesPerRead, perBytes}
+	if c, ok := in.cache[k]; ok {
+		return c.content, c.truncated, false
 	}
+	if in.budget <= 0 {
+		return "", false, false
+	}
+	abs := path
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(in.projectRoot, abs)
+	}
+	content, truncated, err := readLineRange(abs, start, end, in.caps.maxLinesPerRead, perBytes)
+	if err != nil {
+		return "", false, false
+	}
+	in.cache[k] = inlineCached{content, truncated}
+	return content, truncated, true
+}
 
+// fillReads populates Content/Truncated on every SuggestedRead.
+// Entries that already carry Content (summary kinds) skip disk I/O
+// but still charge the budget so the total response size stays bounded.
+func (in *inliner) fillReads(reads []SuggestedRead) {
 	for i := range reads {
-		if budget <= 0 {
+		if in.budget <= 0 {
 			return
 		}
-		// Entries with pre-populated Content (summary kinds carrying
-		// synthesized prose) skip disk I/O but still charge the byte
-		// budget so the total response size stays bounded.
 		if reads[i].Content != "" {
-			budget -= len(reads[i].Content)
+			in.budget -= len(reads[i].Content)
 			continue
 		}
-		content, truncated, charged := fetch(reads[i].Path, reads[i].StartLine, reads[i].EndLine)
+		content, truncated, charged := in.fetch(reads[i].Path, reads[i].StartLine, reads[i].EndLine)
 		if content == "" && !truncated {
 			continue
 		}
 		reads[i].Content = content
 		reads[i].Truncated = truncated
 		if charged {
-			budget -= len(content)
+			in.budget -= len(content)
 		}
 	}
-	// Imports — one extraction per unique file path in reads, populated
-	// on the first SuggestedRead pointing at that file. Skip when the
-	// read already starts near the top (its content already covers the
-	// import block) and when the language isn't recognised. Cheap on a
-	// per-byte basis (typically <500 B) but high agent value: surfaces
-	// what each suggested file depends on without a separate Read.
+}
+
+// fillImports adds the import block to the first SuggestedRead per
+// file. Skips reads starting near the top (already covered by their
+// own Content) and files with no recognised extractor. Cheap per byte
+// (<500 B typical), high agent value: surfaces dependencies without a
+// follow-up Read.
+func (in *inliner) fillImports(reads []SuggestedRead) {
+	const maxImportsBytes = 1536
 	importsDone := make(map[string]bool, len(reads))
 	for i := range reads {
-		if budget <= 0 {
+		if in.budget <= 0 {
 			return
 		}
 		p := reads[i].Path
@@ -1165,97 +1194,85 @@ func inlineContent(projectRoot, intent string, reads []SuggestedRead, syms []Sym
 		}
 		importsDone[p] = true
 		if reads[i].StartLine > 0 && reads[i].StartLine <= 5 {
-			// Reads from the top of the file already include the
-			// import block — don't duplicate.
-			continue
+			continue // top-of-file read already includes the imports
 		}
 		abs := p
 		if !filepath.IsAbs(abs) {
-			abs = filepath.Join(projectRoot, abs)
+			abs = filepath.Join(in.projectRoot, abs)
 		}
 		imps := extractImports(abs)
 		if imps == "" {
 			continue
 		}
-		// Conservative per-file cap: 1.5 KB of imports is plenty even
-		// for big Go files. Clip with a marker if exceeded.
-		const maxImportsBytes = 1536
 		if len(imps) > maxImportsBytes {
 			imps = imps[:maxImportsBytes] + "\n// … imports truncated"
 		}
 		reads[i].Imports = imps
-		budget -= len(imps)
+		in.budget -= len(imps)
 	}
-	// Symbol bodies — only for symbol_lookup intent. "What does X do" is
-	// the canonical case where the agent reads the body next, so inlining
-	// it here eliminates an otherwise certain follow-up Read. Cache often
-	// hits because the same (path, start, end) is already in suggested_reads
-	// (pickSuggestedReads pulls from out.Symbols).
-	if intent == IntentSymbolLookup {
-		for i := range syms {
-			if budget <= 0 {
-				return
-			}
-			s := &syms[i]
-			if s.Path == "" || s.StartLine <= 0 || s.EndLine < s.StartLine {
-				continue
-			}
-			content, truncated, charged := fetch(s.Path, s.StartLine, s.EndLine)
-			if content == "" && !truncated {
-				continue
-			}
-			s.Body = content
-			s.Truncated = truncated
-			if charged {
-				budget -= len(content)
-			}
+}
+
+// fillSymbolBodies fills Body on every matched symbol. Only invoked
+// for IntentSymbolLookup: "what does X do" is the canonical case
+// where the agent reads the body next, so inlining eliminates an
+// otherwise certain follow-up Read.
+func (in *inliner) fillSymbolBodies(syms []SymbolHit) {
+	for i := range syms {
+		if in.budget <= 0 {
+			return
+		}
+		s := &syms[i]
+		if s.Path == "" || s.StartLine <= 0 || s.EndLine < s.StartLine {
+			continue
+		}
+		content, truncated, charged := in.fetch(s.Path, s.StartLine, s.EndLine)
+		if content == "" && !truncated {
+			continue
+		}
+		s.Body = content
+		s.Truncated = truncated
+		if charged {
+			in.budget -= len(content)
 		}
 	}
-	// On a no-signal query (top semantic score below the confidence
-	// threshold) the whole pool is likely noise. Skip inlining hits
-	// whose individual score is also below the noise floor — the agent
-	// keeps the path/range pointer but we don't burn bytes on a Content
-	// blob that won't pay off.
+}
+
+// fillSemanticHits fills Content on each semantic hit. Skips three
+// classes that would burn budget for no agent value:
+//   - low-score hits when the top score is below the confidence
+//     threshold (whole pool is likely noise)
+//   - raw test source for non-editing intents (displaces real code
+//     from the shared pool at ~4 KB per hit)
+//   - hits with pre-populated Content (summary kinds); charges the
+//     budget but skips refetch.
+func (in *inliner) fillSemanticHits(sem []SemHit) {
 	var topScore float32
 	if len(sem) > 0 {
 		topScore = sem[0].Score
 	}
 	suppressLowScore := topScore > 0 && topScore < lowConfidenceScore
 	for i := range sem {
-		if budget <= 0 {
+		if in.budget <= 0 {
 			return
 		}
 		if sem[i].Content != "" {
-			// Summary chunks (file_summary / package_summary / repo_summary)
-			// arrive with synthesized prose already in Content via
-			// runSemanticLane — useful even for test files, since the
-			// summary distils signal rather than fixture boilerplate.
-			// Charge the budget but don't refetch.
-			budget -= len(sem[i].Content)
+			in.budget -= len(sem[i].Content)
 			continue
 		}
 		if suppressLowScore && sem[i].Score < noiseFloorScore {
 			continue
 		}
-		// Skip inlining raw test source for non-editing intents. A
-		// test_test.go function body is rarely the answer to "how does
-		// X work" / "callers of Y" / architecture — but at ~4 KB per
-		// hit, it displaces implementation chunks from the shared byte
-		// pool. The Path / StartLine / EndLine pointer stays so the
-		// agent can Read the test on its own if it turns out to be
-		// relevant. editing_context is the exception: when you're about
-		// to modify a file, the sibling test is real context.
-		if intent != IntentEditingContext && isTestPath(sem[i].Path) {
+		if in.intent != IntentEditingContext && isTestPath(sem[i].Path) {
 			continue
 		}
-		content, truncated, charged := fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)
+		content, truncated, charged := in.fetch(sem[i].Path, sem[i].StartLine, sem[i].EndLine)
 		if content == "" && !truncated {
 			continue
 		}
 		sem[i].Content = content
 		sem[i].Truncated = truncated
 		if charged {
-			budget -= len(content)
+			in.budget -= len(content)
 		}
 	}
 }

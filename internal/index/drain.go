@@ -455,6 +455,15 @@ type drainResult struct {
 // repo_summary chunks based on the current file_summary / package_summary
 // state of the chunks table. Mirrors Run()'s Pass 5 and Pass 6, but
 // reads its inputs from the store instead of from in-flight pkgFiles.
+// pkgJob is one directory whose package_summary needs (re)generation.
+// Hoisted from cascadePackageAndRepo so the planner and executor can
+// pass them around as proper values.
+type pkgJob struct {
+	dir       string
+	filePaths []string
+	pkgSHA    string
+}
+
 func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Time) (int, error) {
 	if ctx.Err() != nil {
 		return 0, ctx.Err()
@@ -466,32 +475,54 @@ func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Tim
 	if len(allSHAs) == 0 {
 		return 0, nil
 	}
-
-	type pkgFileEntry struct {
-		path string
-		sha  string
+	dirs, pkgFiles := groupSummariesByDir(allSHAs)
+	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, dirs)
+	if err != nil {
+		return 0, fmt.Errorf("existing SHAs: %w", err)
 	}
+	jobs, err := ix.planPackageJobs(ctx, startTime, pkgFiles, existingBatch)
+	if err != nil {
+		return 0, err
+	}
+	generated, err := ix.runPackageJobs(ctx, startTime, jobs)
+	if err != nil {
+		return generated, err
+	}
+	repoGen, err := ix.cascadeRepoSummary(ctx, startTime, existingBatch)
+	return generated + repoGen, err
+}
+
+// groupSummariesByDir bins each (path, sha) by its directory and
+// returns the dir list (including "." for the repo summary) plus the
+// per-dir entries.
+func groupSummariesByDir(allSHAs map[string]string) ([]string, map[string][]pkgFileEntry) {
 	pkgFiles := make(map[string][]pkgFileEntry)
 	for path, sha := range allSHAs {
 		dir := filepath.Dir(path)
 		pkgFiles[dir] = append(pkgFiles[dir], pkgFileEntry{path, sha})
 	}
-
 	dirs := make([]string, 0, len(pkgFiles)+1)
 	for d := range pkgFiles {
 		dirs = append(dirs, d)
 	}
 	dirs = append(dirs, ".")
-	existingBatch, err := ix.Store.ExistingSHAsBatch(ctx, dirs)
-	if err != nil {
-		return 0, fmt.Errorf("existing SHAs: %w", err)
-	}
+	return dirs, pkgFiles
+}
 
-	type pkgJob struct {
-		dir       string
-		filePaths []string
-		pkgSHA    string
-	}
+type pkgFileEntry struct {
+	path string
+	sha  string
+}
+
+// planPackageJobs computes the per-dir pkgSHA and either touches the
+// existing package_summary row (cache hit) or queues a regeneration
+// job (cache miss).
+func (ix *Indexer) planPackageJobs(
+	ctx context.Context,
+	startTime time.Time,
+	pkgFiles map[string][]pkgFileEntry,
+	existingBatch map[string]map[string]bool,
+) ([]pkgJob, error) {
 	var jobs []pkgJob
 	for dir, entries := range pkgFiles {
 		if ctx.Err() != nil {
@@ -507,112 +538,124 @@ func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Tim
 		pkgSHA := chunkSHA(strings.Join(shas, ":"))
 		if existingBatch[dir][pkgSHA] {
 			if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", 0, 0, startTime); err != nil {
-				return 0, err
+				return nil, err
 			}
 			continue
 		}
 		jobs = append(jobs, pkgJob{dir: dir, filePaths: filePaths, pkgSHA: pkgSHA})
 	}
+	return jobs, nil
+}
 
-	generated := 0
-	if len(jobs) > 0 {
-		conc := ix.Options.SummaryConcurrency
-		if conc < 1 {
-			conc = 1
-		}
-		results := make([]*pending, len(jobs))
-		eg, egctx := errgroup.WithContext(ctx)
-		eg.SetLimit(conc)
-		for i := range jobs {
-			j := jobs[i]
-			eg.Go(func() error {
-				fileSummaries, err := ix.Store.FileSummariesForPaths(egctx, j.filePaths)
-				if err != nil || len(fileSummaries) == 0 {
-					return nil
-				}
-				summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
-				if err != nil {
-					ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
-					return nil
-				}
-				if strings.TrimSpace(summary) == "" {
-					return nil
-				}
-				results[i] = &pending{
-					rel: j.dir,
-					chunk: chunk.Chunk{
-						Path:    j.dir,
-						Kind:    chunk.KindPackageSummary,
-						Content: summary,
-					},
-					sha: j.pkgSHA,
-				}
+// runPackageJobs fans out chat summarization across SummaryConcurrency
+// workers, then embeds and upserts the produced package_summary chunks
+// in one batch.
+func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs []pkgJob) (int, error) {
+	if len(jobs) == 0 {
+		return 0, nil
+	}
+	conc := ix.Options.SummaryConcurrency
+	if conc < 1 {
+		conc = 1
+	}
+	results := make([]*pending, len(jobs))
+	eg, egctx := errgroup.WithContext(ctx)
+	eg.SetLimit(conc)
+	for i := range jobs {
+		j := jobs[i]
+		eg.Go(func() error {
+			fileSummaries, err := ix.Store.FileSummariesForPaths(egctx, j.filePaths)
+			if err != nil || len(fileSummaries) == 0 {
 				return nil
-			})
-		}
-		if err := eg.Wait(); err != nil {
-			return generated, err
-		}
-		var pkgEmbed []pending
-		for _, p := range results {
-			if p != nil {
-				pkgEmbed = append(pkgEmbed, *p)
 			}
-		}
-		if len(pkgEmbed) > 0 {
-			texts := make([]string, len(pkgEmbed))
-			for i, p := range pkgEmbed {
-				texts[i] = p.chunk.EmbedText()
-			}
-			vecs, err := ix.Embed.Embed(ctx, texts)
+			summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
 			if err != nil {
-				return generated, fmt.Errorf("package embed: %w", err)
+				ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
+				return nil
 			}
-			rows := make([]store.PendingChunk, len(pkgEmbed))
-			for i, p := range pkgEmbed {
-				rows[i] = store.PendingChunk{
-					Path:       p.rel,
-					Kind:       p.chunk.Kind,
-					ContentSHA: p.sha,
-					Content:    p.chunk.Content,
-					Vec:        vecs[i],
-				}
+			if strings.TrimSpace(summary) == "" {
+				return nil
 			}
-			if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
-				return generated, err
+			results[i] = &pending{
+				rel: j.dir,
+				chunk: chunk.Chunk{
+					Path:    j.dir,
+					Kind:    chunk.KindPackageSummary,
+					Content: summary,
+				},
+				sha: j.pkgSHA,
 			}
-			generated += len(pkgEmbed)
+			return nil
+		})
+	}
+	if err := eg.Wait(); err != nil {
+		return 0, err
+	}
+	var pkgEmbed []pending
+	for _, p := range results {
+		if p != nil {
+			pkgEmbed = append(pkgEmbed, *p)
 		}
 	}
+	if len(pkgEmbed) == 0 {
+		return 0, nil
+	}
+	texts := make([]string, len(pkgEmbed))
+	for i, p := range pkgEmbed {
+		texts[i] = p.chunk.EmbedText()
+	}
+	vecs, err := ix.Embed.Embed(ctx, texts)
+	if err != nil {
+		return 0, fmt.Errorf("package embed: %w", err)
+	}
+	rows := make([]store.PendingChunk, len(pkgEmbed))
+	for i, p := range pkgEmbed {
+		rows[i] = store.PendingChunk{
+			Path:       p.rel,
+			Kind:       p.chunk.Kind,
+			ContentSHA: p.sha,
+			Content:    p.chunk.Content,
+			Vec:        vecs[i],
+		}
+	}
+	if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
+		return 0, err
+	}
+	return len(pkgEmbed), nil
+}
 
-	// Repo summary: one per project, derived from current package_summary
-	// chunks. Stored under path=".".
+// cascadeRepoSummary regenerates the repo_summary chunk from the
+// current package_summary state, or touches an existing one on cache
+// hit. Returns (0, nil) when the repo summary couldn't be produced
+// (no package summaries yet, summarize call failed, etc.) so callers
+// don't surface a hard error on what is best-effort enrichment.
+func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, existingBatch map[string]map[string]bool) (int, error) {
 	if ctx.Err() != nil {
-		return generated, nil
+		return 0, nil
 	}
 	pkgSummaries, err := ix.Store.AllSummariesByKind(ctx, chunk.KindPackageSummary)
 	if err != nil || len(pkgSummaries) == 0 {
-		return generated, nil
+		return 0, nil
 	}
 	repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
 	if existingBatch["."][repoSHA] {
 		if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", 0, 0, startTime); err != nil {
-			return generated, err
+			return 0, err
 		}
-		return generated, nil
+		return 0, nil
 	}
 	summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries)
 	if err != nil {
 		ix.Options.Logger.Warn("repo summarize failed", "err", err)
-		return generated, nil
+		return 0, nil
 	}
 	if strings.TrimSpace(summary) == "" {
-		return generated, nil
+		return 0, nil
 	}
 	vecs, err := ix.Embed.Embed(ctx, []string{chunk.KindRepoSummary + "\n" + summary})
 	if err != nil {
 		ix.Options.Logger.Warn("repo summary embed failed", "err", err)
-		return generated, nil
+		return 0, nil
 	}
 	rows := []store.PendingChunk{{
 		Path:       ".",
@@ -622,8 +665,7 @@ func (ix *Indexer) cascadePackageAndRepo(ctx context.Context, startTime time.Tim
 		Vec:        vecs[0],
 	}}
 	if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
-		return generated, err
+		return 0, err
 	}
-	generated++
-	return generated, nil
+	return 1, nil
 }

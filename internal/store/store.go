@@ -714,10 +714,7 @@ func (s *Store) UpsertMany(ctx context.Context, rows []PendingChunk, now time.Ti
 			return err
 		}
 	}
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	return nil
+	return tx.Commit()
 }
 
 // TouchSeen bumps last_seen_at for an already-present (path, sha) pair and

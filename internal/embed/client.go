@@ -57,7 +57,17 @@ func NewWithConcurrency(baseURL, model string, batch, concurrency int, timeout t
 	// throttles parallel dispatch to the same embedding server. Size
 	// the pool to the configured concurrency so workers don't dial a
 	// fresh TCP/TLS connection on every batch.
-	tr := http.DefaultTransport.(*http.Transport).Clone()
+	//
+	// http.DefaultTransport is documented to be *http.Transport; the
+	// comma-ok form satisfies errcheck and degrades to a fresh-default
+	// Transport on the off chance a future stdlib change broke that.
+	base, ok := http.DefaultTransport.(*http.Transport)
+	var tr *http.Transport
+	if ok {
+		tr = base.Clone()
+	} else {
+		tr = &http.Transport{}
+	}
 	tr.MaxIdleConns = concurrency * 2
 	tr.MaxIdleConnsPerHost = concurrency * 2
 	tr.MaxConnsPerHost = concurrency * 2

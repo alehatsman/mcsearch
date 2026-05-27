@@ -676,7 +676,7 @@ func cmdIndex(ctx context.Context, args []string) error {
 	if lk == nil {
 		return nil // another indexer is running; message already printed
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
@@ -1465,7 +1465,7 @@ func cmdIndexSummarize(ctx context.Context, args []string) error {
 	if lk == nil {
 		return nil // another indexer is running; message already printed
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
@@ -1641,7 +1641,7 @@ func reindexOne(ctx context.Context, root, base string, verbose, force, waitLock
 	if lk == nil {
 		return nil // another indexer is running; message already printed
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 	if err := clearCacheKeepLock(p); err != nil {
 		return err
 	}
@@ -1803,7 +1803,7 @@ func cmdWatch(ctx context.Context, args []string) error {
 	if lk == nil {
 		return nil // another indexer is running; message already printed
 	}
-	defer lk.Release()
+	defer func() { _ = lk.Release() }()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err

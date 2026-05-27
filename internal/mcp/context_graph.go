@@ -212,209 +212,221 @@ func enrichGraph(out *ContextOutput, intent string, view *graphView, semHits []S
 	if view == nil {
 		return false
 	}
-	gr := &GraphResult{Nodes: []GraphNode{}, Edges: []GraphEdge{}}
-	seenNode := map[string]bool{}
-	seenEdge := map[string]bool{}
-	addNode := func(n graphNode) {
-		// Import nodes are emitted per-file in layer 1, so the same
-		// dependency (e.g. `fmt`) shows up as N distinct node IDs.
-		// Dedup on QualifiedName for imports so the agent sees one
-		// entry per dependency, not one per importing file.
-		key := n.ID
-		if n.Kind == graph.NodeImport && n.QualifiedName != "" {
-			key = "import:" + n.QualifiedName
-		}
-		if seenNode[key] || len(gr.Nodes) >= maxGraphNodes {
-			return
-		}
-		seenNode[key] = true
-		// For imports the compactID already encodes the import path, so
-		// QualifiedName is redundant — drop it on the wire.
-		qname := n.QualifiedName
-		if n.Kind == graph.NodeImport {
-			qname = ""
-		}
-		gr.Nodes = append(gr.Nodes, GraphNode{
-			ID:            compactID(n),
-			QualifiedName: qname,
-			Kind:          string(n.Kind),
-		})
+	e := &graphEnricher{
+		view:     view,
+		semHits:  semHits,
+		symbols:  symbols,
+		gr:       &GraphResult{Nodes: []GraphNode{}, Edges: []GraphEdge{}},
+		seenNode: map[string]bool{},
+		seenEdge: map[string]bool{},
 	}
-	addEdge := func(e graphEdge) {
-		from, to := e.SrcID, e.DstID
-		if n, ok := view.nodesByID[e.SrcID]; ok {
-			from = compactID(n)
-		}
-		if n, ok := view.nodesByID[e.DstID]; ok {
-			to = compactID(n)
-		}
-		// Dedup on the compact (from,kind,to) triple — the raw IDs
-		// can differ for per-file import nodes that collapse to the
-		// same dependency on the wire (see addNode), so a raw-ID
-		// dedup leaks duplicates like `src -> fmt` × N.
-		key := from + "|" + string(e.Kind) + "|" + to
-		if seenEdge[key] || len(gr.Edges) >= maxGraphEdges {
-			return
-		}
-		seenEdge[key] = true
-		gr.Edges = append(gr.Edges, GraphEdge{
-			From: from,
-			To:   to,
-			Kind: string(e.Kind),
-		})
-	}
-
-	// graphSymbolNeighborhood and graphPackageRollup are the two
-	// reusable expansions; they were inlined in the symbol_lookup /
-	// architecture cases and are now used by the default branch too
-	// so every intent yields populated nodes/edges when a graph is
-	// indexed.
-	symbolNeighborhood := func() {
-		for _, sym := range symbols {
-			lookup := view.nodesByName[sym.QualifiedName]
-			if len(lookup) == 0 {
-				// Some MCP symbol hits use the bare method name even
-				// when the graph stored a qualified form like (*T).M.
-				lookup = view.nodesByQualified[sym.QualifiedName]
-			}
-			for _, n := range lookup {
-				addNode(n)
-				for _, parentEdge := range view.edgesByDst[n.ID] {
-					if parentEdge.Kind != graph.EdgeHasMethod && parentEdge.Kind != graph.EdgeHasField {
-						continue
-					}
-					parent, ok := view.nodesByID[parentEdge.SrcID]
-					if !ok {
-						continue
-					}
-					addNode(parent)
-					addEdge(parentEdge)
-					for _, sibling := range view.edgesBySrc[parent.ID] {
-						if sibling.Kind != graph.EdgeHasMethod && sibling.Kind != graph.EdgeHasField && sibling.Kind != graph.EdgeEmbeds {
-							continue
-						}
-						addEdge(sibling)
-						if dst, ok := view.nodesByID[sibling.DstID]; ok {
-							addNode(dst)
-						}
-					}
-				}
-			}
-		}
-	}
-	packageRollup := func() {
-		pkgs := packagesFromPaths(view, semHits)
-		for pkg := range pkgs {
-			for _, n := range view.nodesByPackage[pkg] {
-				switch n.Kind {
-				case graph.NodePackage, graph.NodeType, graph.NodeStruct, graph.NodeInterface, graph.NodeFunction:
-					addNode(n)
-				}
-			}
-		}
-	}
-
-	// callsExpansion walks the calls-edges in or out of the matched
-	// symbols. Direction picks which side the symbol is on:
-	// `dst` = callers (edges arriving at the symbol), `src` = callees.
-	callsExpansion := func(direction string) {
-		for _, sym := range symbols {
-			lookup := view.nodesByQualified[sym.QualifiedName]
-			if len(lookup) == 0 {
-				lookup = view.nodesByName[sym.QualifiedName]
-			}
-			for _, n := range lookup {
-				addNode(n)
-				var edges []graphEdge
-				if direction == "dst" {
-					edges = view.edgesByDst[n.ID]
-				} else {
-					edges = view.edgesBySrc[n.ID]
-				}
-				for _, e := range edges {
-					if e.Kind != graph.EdgeCalls {
-						continue
-					}
-					peerID := e.SrcID
-					if direction == "src" {
-						peerID = e.DstID
-					}
-					if peer, ok := view.nodesByID[peerID]; ok {
-						addNode(peer)
-						addEdge(e)
-					}
-				}
-			}
-		}
-	}
-
-	switch intent {
-	case IntentSymbolLookup, IntentEditingContext:
-		// For each matched symbol, surface its container (parent type
-		// for methods/fields) and its siblings (other methods/fields
-		// on the same type, embedded types).
-		symbolNeighborhood()
-
-	case IntentCallers:
-		// Incoming calls edges. Falls back to neighborhood when no
-		// calls edges resolve (e.g. a non-Go file matched the symbol).
-		callsExpansion("dst")
-		if len(gr.Nodes) == 0 {
-			symbolNeighborhood()
-		}
-
-	case IntentCallees:
-		callsExpansion("src")
-		if len(gr.Nodes) == 0 {
-			symbolNeighborhood()
-		}
-
-	case IntentArchitecture:
-		// Package + top-level type/function rollup for packages
-		// surfaced by the semantic lane.
-		packageRollup()
-
-	case IntentPackageTopology:
-		// Imports between packages in the semantic neighborhood.
-		pkgs := packagesFromPaths(view, semHits)
-		// Always include the package nodes themselves so the topology
-		// has anchors.
-		for pkg := range pkgs {
-			for _, n := range view.nodesByPackage[pkg] {
-				if n.Kind == graph.NodePackage {
-					addNode(n)
-				}
-			}
-		}
-		for _, e := range view.edgesByKind[graph.EdgeImports] {
-			srcN, srcOK := view.nodesByID[e.SrcID]
-			if !srcOK {
-				continue
-			}
-			if _, in := pkgs[srcN.PackagePath]; !in {
-				continue
-			}
-			addNode(srcN)
-			if dst, ok := view.nodesByID[e.DstID]; ok {
-				addNode(dst)
-			}
-			addEdge(e)
-		}
-
-	default:
-		// behavior_search / unrecognized — fall back to the union of
-		// symbol-neighborhood + package rollup so the caller always
-		// sees structural context when a graph exists. Cheap: the
-		// view is already in memory.
-		symbolNeighborhood()
-		packageRollup()
-	}
-
-	if len(gr.Nodes) == 0 && len(gr.Edges) == 0 {
+	e.runForIntent(intent)
+	if len(e.gr.Nodes) == 0 && len(e.gr.Edges) == 0 {
 		return false
 	}
-	out.Graph = gr
+	out.Graph = e.gr
 	return true
+}
+
+// graphEnricher carries the working state for one enrichGraph call.
+// Hoisting the closures off enrichGraph into methods keeps the dispatch
+// switch short and the helpers individually testable.
+type graphEnricher struct {
+	view     *graphView
+	semHits  []SemHit
+	symbols  []SymbolHit
+	gr       *GraphResult
+	seenNode map[string]bool
+	seenEdge map[string]bool
+}
+
+func (e *graphEnricher) addNode(n graphNode) {
+	// Import nodes are emitted per-file in layer 1, so the same
+	// dependency (e.g. `fmt`) shows up as N distinct node IDs.
+	// Dedup on QualifiedName for imports so the agent sees one
+	// entry per dependency, not one per importing file.
+	key := n.ID
+	if n.Kind == graph.NodeImport && n.QualifiedName != "" {
+		key = "import:" + n.QualifiedName
+	}
+	if e.seenNode[key] || len(e.gr.Nodes) >= maxGraphNodes {
+		return
+	}
+	e.seenNode[key] = true
+	// For imports the compactID already encodes the import path, so
+	// QualifiedName is redundant — drop it on the wire.
+	qname := n.QualifiedName
+	if n.Kind == graph.NodeImport {
+		qname = ""
+	}
+	e.gr.Nodes = append(e.gr.Nodes, GraphNode{
+		ID:            compactID(n),
+		QualifiedName: qname,
+		Kind:          string(n.Kind),
+	})
+}
+
+func (e *graphEnricher) addEdge(ge graphEdge) {
+	from, to := ge.SrcID, ge.DstID
+	if n, ok := e.view.nodesByID[ge.SrcID]; ok {
+		from = compactID(n)
+	}
+	if n, ok := e.view.nodesByID[ge.DstID]; ok {
+		to = compactID(n)
+	}
+	// Dedup on the compact (from,kind,to) triple — the raw IDs
+	// can differ for per-file import nodes that collapse to the
+	// same dependency on the wire (see addNode), so a raw-ID
+	// dedup leaks duplicates like `src -> fmt` × N.
+	key := from + "|" + string(ge.Kind) + "|" + to
+	if e.seenEdge[key] || len(e.gr.Edges) >= maxGraphEdges {
+		return
+	}
+	e.seenEdge[key] = true
+	e.gr.Edges = append(e.gr.Edges, GraphEdge{
+		From: from,
+		To:   to,
+		Kind: string(ge.Kind),
+	})
+}
+
+// symbolNeighborhood surfaces each matched symbol's container (parent
+// type for methods/fields) and its siblings (other methods/fields on
+// the same type, embedded types).
+func (e *graphEnricher) symbolNeighborhood() {
+	for _, sym := range e.symbols {
+		lookup := e.view.nodesByName[sym.QualifiedName]
+		if len(lookup) == 0 {
+			// Some MCP symbol hits use the bare method name even
+			// when the graph stored a qualified form like (*T).M.
+			lookup = e.view.nodesByQualified[sym.QualifiedName]
+		}
+		for _, n := range lookup {
+			e.addNode(n)
+			for _, parentEdge := range e.view.edgesByDst[n.ID] {
+				if parentEdge.Kind != graph.EdgeHasMethod && parentEdge.Kind != graph.EdgeHasField {
+					continue
+				}
+				parent, ok := e.view.nodesByID[parentEdge.SrcID]
+				if !ok {
+					continue
+				}
+				e.addNode(parent)
+				e.addEdge(parentEdge)
+				for _, sibling := range e.view.edgesBySrc[parent.ID] {
+					if sibling.Kind != graph.EdgeHasMethod && sibling.Kind != graph.EdgeHasField && sibling.Kind != graph.EdgeEmbeds {
+						continue
+					}
+					e.addEdge(sibling)
+					if dst, ok := e.view.nodesByID[sibling.DstID]; ok {
+						e.addNode(dst)
+					}
+				}
+			}
+		}
+	}
+}
+
+// packageRollup adds package + top-level type/function nodes for every
+// package surfaced by the semantic lane.
+func (e *graphEnricher) packageRollup() {
+	pkgs := packagesFromPaths(e.view, e.semHits)
+	for pkg := range pkgs {
+		for _, n := range e.view.nodesByPackage[pkg] {
+			switch n.Kind {
+			case graph.NodePackage, graph.NodeType, graph.NodeStruct, graph.NodeInterface, graph.NodeFunction:
+				e.addNode(n)
+			}
+		}
+	}
+}
+
+// callsExpansion walks the calls-edges in or out of the matched
+// symbols. Direction picks which side the symbol is on:
+// `dst` = callers (edges arriving at the symbol), `src` = callees.
+func (e *graphEnricher) callsExpansion(direction string) {
+	for _, sym := range e.symbols {
+		lookup := e.view.nodesByQualified[sym.QualifiedName]
+		if len(lookup) == 0 {
+			lookup = e.view.nodesByName[sym.QualifiedName]
+		}
+		for _, n := range lookup {
+			e.addNode(n)
+			edges := e.view.edgesBySrc[n.ID]
+			if direction == "dst" {
+				edges = e.view.edgesByDst[n.ID]
+			}
+			for _, ge := range edges {
+				if ge.Kind != graph.EdgeCalls {
+					continue
+				}
+				peerID := ge.SrcID
+				if direction == "src" {
+					peerID = ge.DstID
+				}
+				if peer, ok := e.view.nodesByID[peerID]; ok {
+					e.addNode(peer)
+					e.addEdge(ge)
+				}
+			}
+		}
+	}
+}
+
+// packageTopology surfaces imports between packages in the semantic
+// neighborhood. Always seeds package nodes themselves so the topology
+// has anchors even when no import edges resolve.
+func (e *graphEnricher) packageTopology() {
+	pkgs := packagesFromPaths(e.view, e.semHits)
+	for pkg := range pkgs {
+		for _, n := range e.view.nodesByPackage[pkg] {
+			if n.Kind == graph.NodePackage {
+				e.addNode(n)
+			}
+		}
+	}
+	for _, ge := range e.view.edgesByKind[graph.EdgeImports] {
+		srcN, srcOK := e.view.nodesByID[ge.SrcID]
+		if !srcOK {
+			continue
+		}
+		if _, in := pkgs[srcN.PackagePath]; !in {
+			continue
+		}
+		e.addNode(srcN)
+		if dst, ok := e.view.nodesByID[ge.DstID]; ok {
+			e.addNode(dst)
+		}
+		e.addEdge(ge)
+	}
+}
+
+// runForIntent dispatches to the right expansion mix for the intent.
+// Default branch (behavior_search / unrecognized) unions
+// symbol-neighborhood + package rollup so the caller always sees
+// structural context when a graph exists.
+func (e *graphEnricher) runForIntent(intent string) {
+	switch intent {
+	case IntentSymbolLookup, IntentEditingContext:
+		e.symbolNeighborhood()
+	case IntentCallers:
+		e.callsExpansion("dst")
+		if len(e.gr.Nodes) == 0 {
+			e.symbolNeighborhood()
+		}
+	case IntentCallees:
+		e.callsExpansion("src")
+		if len(e.gr.Nodes) == 0 {
+			e.symbolNeighborhood()
+		}
+	case IntentArchitecture:
+		e.packageRollup()
+	case IntentPackageTopology:
+		e.packageTopology()
+	default:
+		e.symbolNeighborhood()
+		e.packageRollup()
+	}
 }
 
 // packagesFromPaths collects the set of package paths that contain at
