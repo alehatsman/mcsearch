@@ -98,6 +98,51 @@ func TestPruneUnseen(t *testing.T) {
 	}
 }
 
+// TestPruneUnseenPreservesSummaries verifies that package_summary and
+// repo_summary rows survive PruneUnseen even when they're older than
+// the cutoff. Without this protection, defer-mode index passes (used
+// by `dex watch` and the MCP auto-watcher) would destroy good
+// summaries every fire — they skip Pass 5/6 so they never bump
+// last_seen_at on these rows.
+func TestPruneUnseenPreservesSummaries(t *testing.T) {
+	st, ctx := newStore(t)
+	t0 := time.Now()
+	_ = st.UpsertMany(ctx, []PendingChunk{
+		{Path: "stale.go", Kind: "function_declaration", ContentSHA: "h1", Content: "stale fn", Vec: []float32{1, 0}},
+		{Path: "cmd/dex", Kind: "package_summary", ContentSHA: "p1", Content: "pkg summary", Vec: []float32{0, 1}},
+		{Path: ".", Kind: "repo_summary", ContentSHA: "r1", Content: "repo summary", Vec: []float32{1, 1}},
+	}, t0)
+
+	// Don't touch anything; advance the clock and prune. The function
+	// chunk should die, the two summary rows should survive.
+	t1 := t0.Add(time.Millisecond)
+	n, err := st.PruneUnseen(ctx, t1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("pruned %d rows, want 1 (only function_declaration)", n)
+	}
+
+	survivors := make(map[string]bool)
+	rows, err := st.db.QueryContext(ctx, `SELECT kind FROM chunks`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind string
+		_ = rows.Scan(&kind)
+		survivors[kind] = true
+	}
+	if !survivors["package_summary"] || !survivors["repo_summary"] {
+		t.Errorf("summaries pruned: survivors=%v", survivors)
+	}
+	if survivors["function_declaration"] {
+		t.Errorf("function_declaration should have been pruned")
+	}
+}
+
 func TestTouchPath(t *testing.T) {
 	st, ctx := newStore(t)
 	t0 := time.Now()
