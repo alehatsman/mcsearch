@@ -58,10 +58,25 @@ func cmdGuide(ctx context.Context, args []string) error {
 		return err
 	}
 
+	// Print truncation warnings regardless of mode — these signal an
+	// older summary in the index that the guard now rejects but that
+	// still feeds the guide. Surface them so the user knows to
+	// re-summarize.
+	for _, w := range res.Warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	if len(res.Warnings) > 0 {
+		fmt.Fprintln(os.Stderr, "  → re-run `dex index <path> --summarize` to refresh truncated summaries")
+	}
+
 	switch {
 	case *check:
 		if res.Dirty {
 			fmt.Fprintf(os.Stderr, "guide out of date: %s\n", res.OutputPath)
+			os.Exit(1)
+		}
+		if len(res.Warnings) > 0 {
+			fmt.Fprintf(os.Stderr, "guide has %d malformed summary chunk(s): %s\n", len(res.Warnings), res.OutputPath)
 			os.Exit(1)
 		}
 		fmt.Printf("✓ guide up to date: %s\n", res.OutputPath)

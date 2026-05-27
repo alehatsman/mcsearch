@@ -21,6 +21,11 @@ type Result struct {
 	OutputPath       string
 	ModuleCount      int
 	MaxSummarySeenAt int64
+	// Warnings lists summaries that look malformed (truncated mid-bullet,
+	// unbalanced backticks, etc.). Populated by Render so callers can
+	// surface them and so `--check` can fail when the index still
+	// contains pre-existing truncations from older runs.
+	Warnings []string
 }
 
 // Options drives a single render.
@@ -66,6 +71,7 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 
 	res.ModuleCount = len(pkgRows)
 	res.MaxSummarySeenAt = maxSeen(pkgRows, repoRows)
+	res.Warnings = scanForTruncation(repoRows, pkgRows)
 
 	if len(pkgRows) == 0 && len(repoRows) == 0 {
 		return res, fmt.Errorf("no summaries in index — run `dex index <path> --summarize` first")
@@ -317,6 +323,65 @@ func readModulePath(root string) string {
 		if rest, ok := strings.CutPrefix(line, "module "); ok {
 			return strings.TrimSpace(rest)
 		}
+	}
+	return ""
+}
+
+// scanForTruncation walks every summary row and returns one warning
+// per row that looks malformed. Callers (CLI / --check) treat a
+// non-empty slice as "the index still holds truncations from an older
+// run — re-summarize before trusting the guide."
+//
+// Newer indexes can't produce truncations: the indexer treats
+// FinishReason=length as an error and rejects the partial summary.
+// This scan exists to catch summaries written before that guard
+// landed, or by an out-of-tree binary.
+func scanForTruncation(repo, pkgs []store.SummaryRow) []string {
+	var out []string
+	for _, r := range repo {
+		if reason := summaryLooksTruncated(r.Content); reason != "" {
+			out = append(out, fmt.Sprintf("repo_summary: %s", reason))
+		}
+	}
+	for _, p := range pkgs {
+		if reason := summaryLooksTruncated(p.Content); reason != "" {
+			label := p.Path
+			if label == "" {
+				label = "."
+			}
+			out = append(out, fmt.Sprintf("package_summary[%s]: %s", label, reason))
+		}
+	}
+	return out
+}
+
+// summaryLooksTruncated returns a short reason string when content
+// appears cut off mid-token. Empty string means "looks complete".
+//
+// Heuristics — order matters, most diagnostic first:
+//   - odd number of backticks → an inline code span never closed
+//   - odd number of `**` pairs → a bold run never closed
+//   - trailing `- **` (or similar) at end of input → a bullet started
+//     a bold span on the last token and the model stopped mid-emit
+func summaryLooksTruncated(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	// Trailing bullet stub: "- **" with nothing after — the LLM
+	// started a new bullet's bold span and stopped.
+	if strings.HasSuffix(trimmed, "- **") || strings.HasSuffix(trimmed, "- *") {
+		return "ends with an unclosed bullet marker"
+	}
+	// Unbalanced backticks. Count single backticks; markdown fences
+	// `` ``` `` always come in matched triples so an overall odd count
+	// is the symptom of an unterminated inline span.
+	if strings.Count(trimmed, "`")%2 != 0 {
+		return "unbalanced backticks (unterminated code span)"
+	}
+	// Unbalanced bold markers. Count `**` occurrences — should be even.
+	if strings.Count(trimmed, "**")%2 != 0 {
+		return "unbalanced **bold** markers"
 	}
 	return ""
 }

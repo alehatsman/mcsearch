@@ -91,6 +91,94 @@ func TestTrimModulePrefix(t *testing.T) {
 	}
 }
 
+func TestSummaryLooksTruncated(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		wantHit  bool
+		wantWord string // substring expected in the reason
+	}{
+		{
+			name:    "clean prose passes",
+			content: "Package x does y. Public entry point Run().",
+			wantHit: false,
+		},
+		{
+			name:    "empty passes",
+			content: "",
+			wantHit: false,
+		},
+		{
+			name:    "trailing - **",
+			content: "- foo\n- bar\n- **",
+			wantHit: true, wantWord: "bullet",
+		},
+		{
+			name:    "trailing - *",
+			content: "items:\n- a\n- *",
+			wantHit: true, wantWord: "bullet",
+		},
+		{
+			name:    "unterminated inline backtick",
+			content: "Package exports `Run.",
+			wantHit: true, wantWord: "backtick",
+		},
+		{
+			name:    "mid-word truncation like LLM_GUIDE:29",
+			content: "- **`internal",
+			wantHit: true, wantWord: "backtick",
+		},
+		{
+			name:    "balanced backticks pass",
+			content: "Call `Run()` then `Close()`.",
+			wantHit: false,
+		},
+		{
+			name:    "unclosed bold",
+			content: "**Important note: do this.",
+			wantHit: true, wantWord: "bold",
+		},
+		{
+			name:    "balanced bold passes",
+			content: "**Bold** and **more bold**.",
+			wantHit: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summaryLooksTruncated(tc.content)
+			if tc.wantHit && got == "" {
+				t.Errorf("expected a reason, got empty for %q", tc.content)
+			}
+			if !tc.wantHit && got != "" {
+				t.Errorf("expected no warning, got %q for %q", got, tc.content)
+			}
+			if tc.wantHit && tc.wantWord != "" && !strings.Contains(got, tc.wantWord) {
+				t.Errorf("reason %q missing %q", got, tc.wantWord)
+			}
+		})
+	}
+}
+
+func TestScanForTruncation(t *testing.T) {
+	repo := []store.SummaryRow{{Path: ".", Content: "Overview text."}}
+	pkgs := []store.SummaryRow{
+		{Path: "cmd/dex", Content: "Clean package summary."},
+		{Path: "internal/watch", Content: "- **`internal"}, // truncated
+		{Path: "internal/store", Content: "Has unclosed `code."},
+	}
+	got := scanForTruncation(repo, pkgs)
+	if len(got) != 2 {
+		t.Fatalf("got %d warnings, want 2: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "internal/watch") {
+		t.Errorf("warning 0 missing package label: %q", got[0])
+	}
+	if !strings.Contains(got[1], "internal/store") {
+		t.Errorf("warning 1 missing package label: %q", got[1])
+	}
+}
+
 func TestSlugifyHeading(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"Module: internal/watch", "module-internalwatch"},
