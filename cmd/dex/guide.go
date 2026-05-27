@@ -14,16 +14,20 @@ func cmdGuide(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("guide", flag.ContinueOnError)
 	setHelp(fs,
 		"Render LLM_GUIDE.md from existing repo + package summaries in the index.",
-		"dex guide [<path>] [--full] [--check] [--dry-run] [--stdout]")
+		"dex guide [<path>] [--full] [--check] [--dry-run] [--stdout] [--module <dir>]")
 	full := fs.Bool("full", false, "ignore manifest and re-render unconditionally (also bumps the manifest watermark)")
 	check := fs.Bool("check", false, "exit non-zero if the guide is out of date; no write")
 	dryRun := fs.Bool("dry-run", false, "report what would change without writing files")
 	stdout := fs.Bool("stdout", false, "print the rendered guide to stdout; do not write the file or bump the manifest")
+	module := fs.String("module", "", "render only this module's section (stdout, no file write). Use \".\" for root.")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
 	if *stdout && (*check || *dryRun) {
 		return fmt.Errorf("--stdout cannot be combined with --check or --dry-run")
+	}
+	if *module != "" && (*check || *dryRun) {
+		return fmt.Errorf("--module cannot be combined with --check or --dry-run")
 	}
 	path, rest := splitProjectArg(fs.Args())
 	if len(rest) != 0 {
@@ -56,7 +60,12 @@ func cmdGuide(ctx context.Context, args []string) error {
 		return err
 	}
 
-	opts := guide.Options{Force: *full, DryRun: *check || *dryRun, Stdout: *stdout}
+	opts := guide.Options{
+		Force:  *full,
+		DryRun: *check || *dryRun,
+		Stdout: *stdout,
+		Module: *module,
+	}
 	res, err := guide.Render(ctx, st, p.Root, cfg, opts)
 	if err != nil {
 		return err
@@ -74,7 +83,7 @@ func cmdGuide(ctx context.Context, args []string) error {
 	}
 
 	switch {
-	case *stdout:
+	case *stdout, *module != "":
 		_, err := os.Stdout.WriteString(res.Body)
 		return err
 	case *check:

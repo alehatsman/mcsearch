@@ -43,6 +43,12 @@ type Options struct {
 	// file write and the manifest bump. The caller prints it. Implies
 	// "always build" — there is no "up to date" early return.
 	Stdout bool
+	// Module, if non-empty, renders only that one package's section
+	// (header + LLM prose + graph subsections). Output goes to
+	// Result.Body — no Overview, no TOC, no outer title, no file write.
+	// The path is matched exactly against package_summary paths (use
+	// "." for the root package).
+	Module string
 }
 
 // topCentralLimit caps the "Key entry points" list per module. Five is
@@ -84,6 +90,22 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 
 	if len(pkgRows) == 0 && len(repoRows) == 0 {
 		return res, fmt.Errorf("no summaries in index — run `dex index <path> --summarize` first")
+	}
+
+	// Module mode: render only the requested package's section. Skips
+	// the manifest read entirely — partial renders don't write the file
+	// and don't bump the watermark, so the manifest state is irrelevant.
+	if opts.Module != "" {
+		pkg, ok := findModule(pkgRows, opts.Module)
+		if !ok {
+			return res, fmt.Errorf("no module %q in index (have %d modules — run `dex guide --stdout` to list)", opts.Module, len(pkgRows))
+		}
+		body, err := buildModuleMarkdown(ctx, st, root, pkg)
+		if err != nil {
+			return res, fmt.Errorf("build module markdown: %w", err)
+		}
+		res.Body = body
+		return res, nil
 	}
 
 	mf, err := ReadManifest(root)
@@ -175,6 +197,52 @@ func buildMarkdown(ctx context.Context, st *store.Store, root string, repo, pkgs
 		}
 	}
 	return b.String(), nil
+}
+
+// buildModuleMarkdown renders a single module's section: header, LLM
+// prose, and graph subsections. No outer title, no Overview, no TOC.
+// Intended for `dex guide --module <path>` so the output is a
+// composable chunk a reader can paste into a wider doc or stream
+// directly to another tool.
+func buildModuleMarkdown(ctx context.Context, st *store.Store, root string, pkg store.SummaryRow) (string, error) {
+	modPath := readModulePath(root)
+
+	label := pkg.Path
+	if label == "." || label == "" {
+		label = "(root)"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Module: %s\n\n", label)
+	b.WriteString(strings.TrimSpace(pkg.Content))
+	b.WriteString("\n\n")
+
+	if err := appendGraphSections(ctx, &b, st, pkg.Path, modPath); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// findModule looks up a package_summary row by path. Accepts the
+// stored form ("internal/foo", ".") and a few user-friendly variants:
+// leading "./" and trailing "/" are stripped, and the empty string is
+// treated as ".". Exact match after normalization.
+func findModule(pkgs []store.SummaryRow, want string) (store.SummaryRow, bool) {
+	want = strings.TrimPrefix(want, "./")
+	want = strings.TrimSuffix(want, "/")
+	if want == "" {
+		want = "."
+	}
+	for _, p := range pkgs {
+		stored := p.Path
+		if stored == "" {
+			stored = "."
+		}
+		if stored == want {
+			return p, true
+		}
+	}
+	return store.SummaryRow{}, false
 }
 
 // appendGraphSections augments a module section with ground-truth data

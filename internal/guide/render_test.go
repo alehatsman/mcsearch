@@ -451,6 +451,88 @@ func TestRender_DryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestFindModule(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: ".", Content: "root"},
+		{Path: "internal/store", Content: "store"},
+		{Path: "internal/guide", Content: "guide"},
+	}
+	cases := []struct {
+		in      string
+		wantOK  bool
+		wantSeg string
+	}{
+		{"internal/store", true, "store"},
+		{"./internal/store", true, "store"},
+		{"internal/store/", true, "store"},
+		{".", true, "root"},
+		{"", true, "root"},
+		{"missing", false, ""},
+		{"internal/missing", false, ""},
+	}
+	for _, c := range cases {
+		got, ok := findModule(pkgs, c.in)
+		if ok != c.wantOK {
+			t.Errorf("findModule(%q) ok=%v, want %v", c.in, ok, c.wantOK)
+			continue
+		}
+		if ok && got.Content != c.wantSeg {
+			t.Errorf("findModule(%q) content=%q, want %q", c.in, got.Content, c.wantSeg)
+		}
+	}
+}
+
+func TestRender_ModuleEmitsSingleSection(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{
+		".":              "Overview content.",
+		"internal/foo":   "Foo prose.",
+		"internal/bar":   "Bar prose.",
+	})
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Module: "internal/foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Wrote {
+		t.Errorf("--module should not write the file")
+	}
+	if _, err := os.Stat(res.OutputPath); !os.IsNotExist(err) {
+		t.Errorf("--module created %s", res.OutputPath)
+	}
+	if !strings.Contains(res.Body, "## Module: internal/foo") {
+		t.Errorf("Body missing module header: %q", res.Body)
+	}
+	if !strings.Contains(res.Body, "Foo prose.") {
+		t.Errorf("Body missing module prose: %q", res.Body)
+	}
+	if strings.Contains(res.Body, "# Project Guide") {
+		t.Errorf("Body should not have outer title")
+	}
+	if strings.Contains(res.Body, "## Overview") {
+		t.Errorf("Body should not have Overview")
+	}
+	if strings.Contains(res.Body, "## Contents") {
+		t.Errorf("Body should not have TOC")
+	}
+	if strings.Contains(res.Body, "internal/bar") || strings.Contains(res.Body, "Bar prose.") {
+		t.Errorf("Body leaked sibling module: %q", res.Body)
+	}
+}
+
+func TestRender_ModuleUnknownErrors(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Overview."})
+
+	_, err := Render(ctx, st, root, DefaultConfig(), Options{Module: "internal/nope"})
+	if err == nil {
+		t.Fatal("expected error for unknown module")
+	}
+	if !strings.Contains(err.Error(), "no module") {
+		t.Errorf("error %q should mention missing module", err)
+	}
+}
+
 func TestRender_StdoutReturnsBodyWithoutWriting(t *testing.T) {
 	st, ctx, root := newGuideTestStore(t)
 	seedSummaries(t, st, map[string]string{".": "Stdout overview."})
