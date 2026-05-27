@@ -68,7 +68,7 @@ type Options struct {
 	// shared endpoint (e.g. Ollama) — small fast model for the
 	// hundreds of chunk summaries, larger model for the dozen
 	// package summaries and the one repo summary that compounds into
-	// LLM_GUIDE.txt.
+	// LLM_GUIDE.md.
 	SummaryModels SummaryModels
 	// SummaryConcurrency caps in-flight chat calls for per-chunk
 	// summaries within a single file. <=1 = sequential (preserves

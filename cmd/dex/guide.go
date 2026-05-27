@@ -13,7 +13,7 @@ import (
 func cmdGuide(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("guide", flag.ContinueOnError)
 	setHelp(fs,
-		"Render LLM_GUIDE.txt from existing repo + package summaries in the index.",
+		"Render LLM_GUIDE.md from existing repo + package summaries in the index.",
 		"dex guide [<path>] [--full] [--check] [--dry-run]")
 	full := fs.Bool("full", false, "ignore manifest and re-render unconditionally")
 	check := fs.Bool("check", false, "exit non-zero if the guide is out of date; no write")
