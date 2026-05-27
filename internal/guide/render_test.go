@@ -451,6 +451,44 @@ func TestRender_DryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestRender_StdoutReturnsBodyWithoutWriting(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Stdout overview."})
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Stdout: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Wrote {
+		t.Errorf("--stdout wrote the file")
+	}
+	if _, err := os.Stat(res.OutputPath); !os.IsNotExist(err) {
+		t.Errorf("--stdout created %s", res.OutputPath)
+	}
+	if !strings.Contains(res.Body, "Stdout overview.") {
+		t.Errorf("Body missing overview content: %q", res.Body)
+	}
+}
+
+func TestRender_StdoutOnCleanGuideStillBuilds(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Clean overview."})
+
+	if _, err := Render(ctx, st, root, DefaultConfig(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Stdout: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Dirty {
+		t.Errorf("guide should be clean on second render")
+	}
+	if res.Body == "" {
+		t.Errorf("--stdout on clean guide should still populate Body")
+	}
+}
+
 func TestRender_ForceRerendersClean(t *testing.T) {
 	st, ctx, root := newGuideTestStore(t)
 	seedSummaries(t, st, map[string]string{".": "Overview."})

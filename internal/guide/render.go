@@ -21,6 +21,11 @@ type Result struct {
 	OutputPath       string
 	ModuleCount      int
 	MaxSummarySeenAt int64
+	// Body holds the rendered markdown when the renderer actually built
+	// it (Stdout mode, or dirty + non-check). Populated whenever a build
+	// happens so callers can print it (--stdout) or measure it
+	// (--dry-run size). Empty on clean no-op renders.
+	Body string
 	// Warnings lists summaries that look malformed (truncated mid-bullet,
 	// unbalanced backticks, etc.). Populated by Render so callers can
 	// surface them and so `--check` can fail when the index still
@@ -34,6 +39,10 @@ type Options struct {
 	Force bool
 	// DryRun reports what would happen without writing files.
 	DryRun bool
+	// Stdout returns the rendered body in Result.Body and skips both the
+	// file write and the manifest bump. The caller prints it. Implies
+	// "always build" — there is no "up to date" early return.
+	Stdout bool
 }
 
 // topCentralLimit caps the "Key entry points" list per module. Five is
@@ -85,10 +94,11 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	guideExists := fileExists(res.OutputPath)
 	res.Dirty = opts.Force || !guideExists || res.MaxSummarySeenAt > mf.LastSummarySeenAt
 
-	if !res.Dirty {
-		return res, nil
-	}
-	if opts.DryRun {
+	// Stdout mode always builds (the caller wants the bytes); dirty
+	// builds for normal write or dry-run size reporting; clean no-op
+	// renders skip the build entirely.
+	shouldBuild := res.Dirty || opts.Stdout
+	if !shouldBuild {
 		return res, nil
 	}
 
@@ -96,6 +106,12 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	if err != nil {
 		return res, fmt.Errorf("build markdown: %w", err)
 	}
+	res.Body = body
+
+	if opts.DryRun || opts.Stdout {
+		return res, nil
+	}
+
 	if err := os.WriteFile(res.OutputPath, []byte(body), 0o644); err != nil {
 		return res, fmt.Errorf("write %s: %w", res.OutputPath, err)
 	}
