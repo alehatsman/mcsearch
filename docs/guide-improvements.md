@@ -17,15 +17,11 @@ Scope: `internal/guide/{render,config}.go`, plus one prompt change in `internal/
 
 Note on #10: the original proposal was a three-section schema (`Role` / `Exports` / `Notes`). Shipped a stricter variant — pure prose, no internal structure — because the renderer's `###` sections already carry every structured field. Same end state: uniform module sections, no collision with renderer headers.
 
-## Open — nice-to-haves
+## Shipped on `feat/guide-nice-to-haves`
 
-11. **`--stdout`** — render to stdout without writing files. Trivial in `cmdGuide`.
-12. **`--module <path>`** — render only one module's section. Useful for "what does my touched file expose?" lookups.
-13. **`--dry-run` reports size** — bytes + estimated tokens, so users can decide whether the guide fits an agent's context window.
-14. **Module ordering by PageRank**, not alphabetical — surface architecturally important packages first.
+11. `--stdout` — render the guide to stdout without writing the file or bumping the manifest — `975e42f`.
+12. `--module <dir>` — render only one module's section, stdout-only — `0b05382`.
+13. `--dry-run` reports bytes and estimated tokens — `04b90b8`.
+14. Module ordering by `SUM(pagerank)` per directory; alphabetical fallback for zero-score tail — `67da601`.
 
-## How to evaluate (for 11–14)
-
-- Re-run `dex index . --summarize` then `dex guide .` after each change.
-- Diff `LLM_GUIDE.md` against the prior version — confirm only the intended sections changed.
-- `go test ./internal/guide/...` should pass throughout.
+All 14 handoff items have shipped. Future improvements live in commit messages and code; this doc can be retired.

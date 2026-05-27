@@ -451,6 +451,198 @@ func TestRender_DryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestSortPackagesByCentrality(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "internal/zeta"},
+		{Path: "internal/alpha"},
+		{Path: "internal/heavy"},
+		{Path: "scripts"},
+		{Path: "."},
+	}
+	centrality := map[string]float64{
+		"internal/heavy": 12.5,
+		"internal/alpha": 3.0,
+		"internal/zeta":  3.0, // tie with alpha → alpha wins on path
+		// scripts and "." absent → score 0
+	}
+	sortPackagesByCentrality(pkgs, centrality)
+	want := []string{"internal/heavy", "internal/alpha", "internal/zeta", ".", "scripts"}
+	for i, p := range pkgs {
+		if p.Path != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, p.Path, want[i])
+		}
+	}
+}
+
+func TestSortPackagesByCentrality_EmptyMapStaysAlphabetical(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "internal/zeta"},
+		{Path: "internal/alpha"},
+		{Path: "."},
+	}
+	sortPackagesByCentrality(pkgs, map[string]float64{})
+	want := []string{".", "internal/alpha", "internal/zeta"}
+	for i, p := range pkgs {
+		if p.Path != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, p.Path, want[i])
+		}
+	}
+}
+
+func TestFindModule(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: ".", Content: "root"},
+		{Path: "internal/store", Content: "store"},
+		{Path: "internal/guide", Content: "guide"},
+	}
+	cases := []struct {
+		in      string
+		wantOK  bool
+		wantSeg string
+	}{
+		{"internal/store", true, "store"},
+		{"./internal/store", true, "store"},
+		{"internal/store/", true, "store"},
+		{".", true, "root"},
+		{"", true, "root"},
+		{"missing", false, ""},
+		{"internal/missing", false, ""},
+	}
+	for _, c := range cases {
+		got, ok := findModule(pkgs, c.in)
+		if ok != c.wantOK {
+			t.Errorf("findModule(%q) ok=%v, want %v", c.in, ok, c.wantOK)
+			continue
+		}
+		if ok && got.Content != c.wantSeg {
+			t.Errorf("findModule(%q) content=%q, want %q", c.in, got.Content, c.wantSeg)
+		}
+	}
+}
+
+func TestRender_ModuleEmitsSingleSection(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{
+		".":              "Overview content.",
+		"internal/foo":   "Foo prose.",
+		"internal/bar":   "Bar prose.",
+	})
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Module: "internal/foo"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Wrote {
+		t.Errorf("--module should not write the file")
+	}
+	if _, err := os.Stat(res.OutputPath); !os.IsNotExist(err) {
+		t.Errorf("--module created %s", res.OutputPath)
+	}
+	if !strings.Contains(res.Body, "## Module: internal/foo") {
+		t.Errorf("Body missing module header: %q", res.Body)
+	}
+	if !strings.Contains(res.Body, "Foo prose.") {
+		t.Errorf("Body missing module prose: %q", res.Body)
+	}
+	if strings.Contains(res.Body, "# Project Guide") {
+		t.Errorf("Body should not have outer title")
+	}
+	if strings.Contains(res.Body, "## Overview") {
+		t.Errorf("Body should not have Overview")
+	}
+	if strings.Contains(res.Body, "## Contents") {
+		t.Errorf("Body should not have TOC")
+	}
+	if strings.Contains(res.Body, "internal/bar") || strings.Contains(res.Body, "Bar prose.") {
+		t.Errorf("Body leaked sibling module: %q", res.Body)
+	}
+}
+
+func TestRender_ModuleUnknownErrors(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Overview."})
+
+	_, err := Render(ctx, st, root, DefaultConfig(), Options{Module: "internal/nope"})
+	if err == nil {
+		t.Fatal("expected error for unknown module")
+	}
+	if !strings.Contains(err.Error(), "no module") {
+		t.Errorf("error %q should mention missing module", err)
+	}
+}
+
+func TestRender_ModulesOrderedByPageRank(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.com/proj\n")
+	seedSummaries(t, st, map[string]string{
+		".":             "Overview.",
+		"internal/leaf": "Leaf prose.",
+		"internal/core": "Core prose.",
+		"internal/mid":  "Mid prose.",
+	})
+	// core has highest PageRank (heavily depended on); mid is moderate;
+	// leaf has none. Expected order: core, mid, leaf.
+	seedGraphPackage(t, st, "example.com/proj/internal/core",
+		[]graphNode{{name: "Big", kind: "function", file: "internal/core/x.go", line: 1, pagerank: 9.0}}, nil)
+	seedGraphPackage(t, st, "example.com/proj/internal/mid",
+		[]graphNode{{name: "Med", kind: "function", file: "internal/mid/x.go", line: 1, pagerank: 2.0}}, nil)
+	seedGraphPackage(t, st, "example.com/proj/internal/leaf",
+		[]graphNode{{name: "Small", kind: "function", file: "internal/leaf/x.go", line: 1, pagerank: 0}}, nil)
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustReadFile(t, res.OutputPath)
+	idxCore := strings.Index(body, "## Module: internal/core")
+	idxMid := strings.Index(body, "## Module: internal/mid")
+	idxLeaf := strings.Index(body, "## Module: internal/leaf")
+	if idxCore < 0 || idxMid < 0 || idxLeaf < 0 {
+		t.Fatalf("missing module section: core=%d mid=%d leaf=%d", idxCore, idxMid, idxLeaf)
+	}
+	if !(idxCore < idxMid && idxMid < idxLeaf) {
+		t.Errorf("modules not ordered by PageRank: core=%d mid=%d leaf=%d", idxCore, idxMid, idxLeaf)
+	}
+}
+
+func TestRender_StdoutReturnsBodyWithoutWriting(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Stdout overview."})
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Stdout: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Wrote {
+		t.Errorf("--stdout wrote the file")
+	}
+	if _, err := os.Stat(res.OutputPath); !os.IsNotExist(err) {
+		t.Errorf("--stdout created %s", res.OutputPath)
+	}
+	if !strings.Contains(res.Body, "Stdout overview.") {
+		t.Errorf("Body missing overview content: %q", res.Body)
+	}
+}
+
+func TestRender_StdoutOnCleanGuideStillBuilds(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	seedSummaries(t, st, map[string]string{".": "Clean overview."})
+
+	if _, err := Render(ctx, st, root, DefaultConfig(), Options{}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{Stdout: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Dirty {
+		t.Errorf("guide should be clean on second render")
+	}
+	if res.Body == "" {
+		t.Errorf("--stdout on clean guide should still populate Body")
+	}
+}
+
 func TestRender_ForceRerendersClean(t *testing.T) {
 	st, ctx, root := newGuideTestStore(t)
 	seedSummaries(t, st, map[string]string{".": "Overview."})
@@ -639,6 +831,23 @@ func seedGraphPackage(t *testing.T, st *store.Store, pkgPath string, decls []gra
 	}
 	if err := st.GraphUpsertNodes(context.Background(), rows, now); err != nil {
 		t.Fatal(err)
+	}
+	// Centrality (pagerank, in_degree) lives in a separate column set
+	// that GraphUpsertNodes does not write — production code calls
+	// GraphSetCentrality after a centrality pass. Mirror that here so
+	// the pagerank/inDeg values declared by the test land in the DB.
+	cents := make([]store.GraphCentralityRow, 0, len(decls))
+	for _, d := range decls {
+		cents = append(cents, store.GraphCentralityRow{
+			ID:       pkgPath + "::decl::" + d.name,
+			InDegree: d.inDeg,
+			PageRank: d.pagerank,
+		})
+	}
+	if len(cents) > 0 {
+		if err := st.GraphSetCentrality(context.Background(), cents); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 

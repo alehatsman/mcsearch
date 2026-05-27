@@ -21,6 +21,11 @@ type Result struct {
 	OutputPath       string
 	ModuleCount      int
 	MaxSummarySeenAt int64
+	// Body holds the rendered markdown when the renderer actually built
+	// it (Stdout mode, or dirty + non-check). Populated whenever a build
+	// happens so callers can print it (--stdout) or measure it
+	// (--dry-run size). Empty on clean no-op renders.
+	Body string
 	// Warnings lists summaries that look malformed (truncated mid-bullet,
 	// unbalanced backticks, etc.). Populated by Render so callers can
 	// surface them and so `--check` can fail when the index still
@@ -34,6 +39,16 @@ type Options struct {
 	Force bool
 	// DryRun reports what would happen without writing files.
 	DryRun bool
+	// Stdout returns the rendered body in Result.Body and skips both the
+	// file write and the manifest bump. The caller prints it. Implies
+	// "always build" — there is no "up to date" early return.
+	Stdout bool
+	// Module, if non-empty, renders only that one package's section
+	// (header + LLM prose + graph subsections). Output goes to
+	// Result.Body — no Overview, no TOC, no outer title, no file write.
+	// The path is matched exactly against package_summary paths (use
+	// "." for the root package).
+	Module string
 }
 
 // topCentralLimit caps the "Key entry points" list per module. Five is
@@ -64,6 +79,11 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 		return res, fmt.Errorf("load package summaries: %w", err)
 	}
 	pkgRows = filterFixtureDirs(pkgRows)
+	centrality, err := st.PackageCentrality(ctx)
+	if err != nil {
+		return res, fmt.Errorf("load package centrality: %w", err)
+	}
+	sortPackagesByCentrality(pkgRows, centrality)
 	repoRows, err := st.SummariesByKindWithMeta(ctx, chunk.KindRepoSummary)
 	if err != nil {
 		return res, fmt.Errorf("load repo summary: %w", err)
@@ -77,6 +97,22 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 		return res, fmt.Errorf("no summaries in index — run `dex index <path> --summarize` first")
 	}
 
+	// Module mode: render only the requested package's section. Skips
+	// the manifest read entirely — partial renders don't write the file
+	// and don't bump the watermark, so the manifest state is irrelevant.
+	if opts.Module != "" {
+		pkg, ok := findModule(pkgRows, opts.Module)
+		if !ok {
+			return res, fmt.Errorf("no module %q in index (have %d modules — run `dex guide --stdout` to list)", opts.Module, len(pkgRows))
+		}
+		body, err := buildModuleMarkdown(ctx, st, root, pkg)
+		if err != nil {
+			return res, fmt.Errorf("build module markdown: %w", err)
+		}
+		res.Body = body
+		return res, nil
+	}
+
 	mf, err := ReadManifest(root)
 	if err != nil {
 		return res, fmt.Errorf("read manifest: %w", err)
@@ -85,10 +121,11 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	guideExists := fileExists(res.OutputPath)
 	res.Dirty = opts.Force || !guideExists || res.MaxSummarySeenAt > mf.LastSummarySeenAt
 
-	if !res.Dirty {
-		return res, nil
-	}
-	if opts.DryRun {
+	// Stdout mode always builds (the caller wants the bytes); dirty
+	// builds for normal write or dry-run size reporting; clean no-op
+	// renders skip the build entirely.
+	shouldBuild := res.Dirty || opts.Stdout
+	if !shouldBuild {
 		return res, nil
 	}
 
@@ -96,6 +133,12 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	if err != nil {
 		return res, fmt.Errorf("build markdown: %w", err)
 	}
+	res.Body = body
+
+	if opts.DryRun || opts.Stdout {
+		return res, nil
+	}
+
 	if err := os.WriteFile(res.OutputPath, []byte(body), 0o644); err != nil {
 		return res, fmt.Errorf("write %s: %w", res.OutputPath, err)
 	}
@@ -159,6 +202,52 @@ func buildMarkdown(ctx context.Context, st *store.Store, root string, repo, pkgs
 		}
 	}
 	return b.String(), nil
+}
+
+// buildModuleMarkdown renders a single module's section: header, LLM
+// prose, and graph subsections. No outer title, no Overview, no TOC.
+// Intended for `dex guide --module <path>` so the output is a
+// composable chunk a reader can paste into a wider doc or stream
+// directly to another tool.
+func buildModuleMarkdown(ctx context.Context, st *store.Store, root string, pkg store.SummaryRow) (string, error) {
+	modPath := readModulePath(root)
+
+	label := pkg.Path
+	if label == "." || label == "" {
+		label = "(root)"
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "## Module: %s\n\n", label)
+	b.WriteString(strings.TrimSpace(pkg.Content))
+	b.WriteString("\n\n")
+
+	if err := appendGraphSections(ctx, &b, st, pkg.Path, modPath); err != nil {
+		return "", err
+	}
+	return b.String(), nil
+}
+
+// findModule looks up a package_summary row by path. Accepts the
+// stored form ("internal/foo", ".") and a few user-friendly variants:
+// leading "./" and trailing "/" are stripped, and the empty string is
+// treated as ".". Exact match after normalization.
+func findModule(pkgs []store.SummaryRow, want string) (store.SummaryRow, bool) {
+	want = strings.TrimPrefix(want, "./")
+	want = strings.TrimSuffix(want, "/")
+	if want == "" {
+		want = "."
+	}
+	for _, p := range pkgs {
+		stored := p.Path
+		if stored == "" {
+			stored = "."
+		}
+		if stored == want {
+			return p, true
+		}
+	}
+	return store.SummaryRow{}, false
 }
 
 // appendGraphSections augments a module section with ground-truth data
@@ -470,6 +559,31 @@ func selectTopExported(in []store.GraphSymbol, n int) (shown []store.GraphSymbol
 		out = out[:n]
 	}
 	return out, total
+}
+
+// sortPackagesByCentrality reorders pkgs in place by descending
+// PackageCentrality score, with path ascending as tie-break so the
+// output stays deterministic for packages outside the graph (non-Go
+// dirs all score 0 and fall back to alphabetical, matching the prior
+// default).
+//
+// Mutates the slice — caller owns it. The root entry (".") sorts by
+// its centrality just like any other; the existing buildMarkdown rule
+// (skip "." when haveOverview) still applies after sorting.
+func sortPackagesByCentrality(pkgs []store.SummaryRow, centrality map[string]float64) {
+	score := func(p string) float64 {
+		if p == "" {
+			p = "."
+		}
+		return centrality[p]
+	}
+	sort.SliceStable(pkgs, func(i, j int) bool {
+		si, sj := score(pkgs[i].Path), score(pkgs[j].Path)
+		if si != sj {
+			return si > sj
+		}
+		return pkgs[i].Path < pkgs[j].Path
+	})
 }
 
 // filterFixtureDirs drops package_summary rows whose path lives inside

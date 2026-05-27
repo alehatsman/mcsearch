@@ -14,12 +14,20 @@ func cmdGuide(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("guide", flag.ContinueOnError)
 	setHelp(fs,
 		"Render LLM_GUIDE.md from existing repo + package summaries in the index.",
-		"dex guide [<path>] [--full] [--check] [--dry-run]")
+		"dex guide [<path>] [--full] [--check] [--dry-run] [--stdout] [--module <dir>]")
 	full := fs.Bool("full", false, "ignore manifest and re-render unconditionally (also bumps the manifest watermark)")
 	check := fs.Bool("check", false, "exit non-zero if the guide is out of date; no write")
 	dryRun := fs.Bool("dry-run", false, "report what would change without writing files")
+	stdout := fs.Bool("stdout", false, "print the rendered guide to stdout; do not write the file or bump the manifest")
+	module := fs.String("module", "", "render only this module's section (stdout, no file write). Use \".\" for root.")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
+	}
+	if *stdout && (*check || *dryRun) {
+		return fmt.Errorf("--stdout cannot be combined with --check or --dry-run")
+	}
+	if *module != "" && (*check || *dryRun) {
+		return fmt.Errorf("--module cannot be combined with --check or --dry-run")
 	}
 	path, rest := splitProjectArg(fs.Args())
 	if len(rest) != 0 {
@@ -52,7 +60,12 @@ func cmdGuide(ctx context.Context, args []string) error {
 		return err
 	}
 
-	opts := guide.Options{Force: *full, DryRun: *check || *dryRun}
+	opts := guide.Options{
+		Force:  *full,
+		DryRun: *check || *dryRun,
+		Stdout: *stdout,
+		Module: *module,
+	}
 	res, err := guide.Render(ctx, st, p.Root, cfg, opts)
 	if err != nil {
 		return err
@@ -70,6 +83,9 @@ func cmdGuide(ctx context.Context, args []string) error {
 	}
 
 	switch {
+	case *stdout, *module != "":
+		_, err := os.Stdout.WriteString(res.Body)
+		return err
 	case *check:
 		if res.Dirty {
 			fmt.Fprintf(os.Stderr, "guide out of date: %s\n", res.OutputPath)
@@ -82,7 +98,9 @@ func cmdGuide(ctx context.Context, args []string) error {
 		fmt.Printf("✓ guide up to date: %s\n", res.OutputPath)
 	case *dryRun:
 		if res.Dirty {
-			fmt.Printf("would re-render %s (%d modules)\n", res.OutputPath, res.ModuleCount)
+			bytes := len(res.Body)
+			fmt.Printf("would re-render %s (%d modules, %d bytes, ~%d tokens)\n",
+				res.OutputPath, res.ModuleCount, bytes, estimateTokens(bytes))
 		} else {
 			fmt.Printf("up to date: %s\n", res.OutputPath)
 		}
@@ -92,4 +110,12 @@ func cmdGuide(ctx context.Context, args []string) error {
 		fmt.Printf("up to date: %s\n", res.OutputPath)
 	}
 	return nil
+}
+
+// estimateTokens approximates the token count for a UTF-8 byte buffer.
+// 4 bytes/token is the conventional ballpark across OpenAI/Anthropic
+// English tokenizers and is good enough for "does this guide fit in a
+// 200k-token context window?" gut checks. Cheap; no tokenizer dep.
+func estimateTokens(bytes int) int {
+	return (bytes + 3) / 4
 }
