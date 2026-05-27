@@ -42,7 +42,15 @@ const (
 	metaLastIndexedAt    = "last_indexed_at"
 	metaProjectRoot      = "project_root"
 	metaLastSummarizedAt = "last_summarized_at"
+	metaEmbedModel       = "embed_model"
 )
+
+// ErrEmbedModelMismatch is returned by EnsureEmbedModel when the active
+// embedding model differs from the one previously recorded for the
+// index. Two same-dim models produce vectors in different latent spaces,
+// so silently mixing them would corrupt retrieval — callers must rebuild
+// the index (`dex reindex <path>`) before continuing.
+var ErrEmbedModelMismatch = errors.New("embedding model mismatch")
 
 // Options influence the runtime behaviour of an opened Store.
 // All fields are optional; the zero value matches the default
@@ -72,9 +80,10 @@ type Options struct {
 }
 
 type Store struct {
-	db   *sql.DB
-	dim  atomic.Int64 // vector dimension; set once on first upsert, read concurrently
-	opts Options      // immutable after Open
+	db         *sql.DB
+	dim        atomic.Int64 // vector dimension; set once on first upsert, read concurrently
+	embedModel atomic.Value // string: model identity; "" until set by EnsureEmbedModel or recovered from meta
+	opts       Options      // immutable after Open
 }
 
 // Open opens or creates the SQLite file at path with default
@@ -117,6 +126,20 @@ func OpenWith(ctx context.Context, path string, opts Options) (*Store, error) {
 	default:
 		dim, _ := strconv.ParseInt(v, 10, 64)
 		s.dim.Store(dim)
+	}
+	// Recover the recorded embed model identity. May be missing on
+	// pre-migration indexes (built before this metadata existed) — those
+	// adopt whatever model the first EnsureEmbedModel caller passes.
+	row = db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaEmbedModel+`'`)
+	var em string
+	switch err := row.Scan(&em); {
+	case errors.Is(err, sql.ErrNoRows):
+		s.embedModel.Store("")
+	case err != nil:
+		db.Close()
+		return nil, err
+	default:
+		s.embedModel.Store(em)
 	}
 	// Materialize the vec0 table now if we know the dim — covers both
 	// brand-new opens (no chunks yet, dim known from a prior run) and
@@ -386,11 +409,19 @@ type Stats struct {
 	// successful summary generation (per-chunk, file, package, or
 	// repo). Zero when no summaries have ever been produced.
 	LastSummarized time.Time
+	// EmbedModel is the embedding model identity recorded for this
+	// index. Empty for pre-migration indexes that pre-date the
+	// embed_model meta key — those adopt the next caller's model on
+	// the first EnsureEmbedModel call.
+	EmbedModel string
 }
 
 func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	var st Stats
 	st.Dim = int(s.dim.Load())
+	if v, ok := s.embedModel.Load().(string); ok {
+		st.EmbedModel = v
+	}
 	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*), COUNT(DISTINCT path) FROM chunks`)
 	if err := row.Scan(&st.Chunks, &st.Files); err != nil {
 		return st, err
@@ -439,6 +470,43 @@ func (s *Store) SetLastSummarizedAt(ctx context.Context, t time.Time) error {
 		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`,
 		strconv.FormatInt(t.UnixNano(), 10))
 	return err
+}
+
+// EmbedModel returns the embedding model identity previously recorded
+// for this index, or "" if none has been recorded yet.
+func (s *Store) EmbedModel() string {
+	v, _ := s.embedModel.Load().(string)
+	return v
+}
+
+// EnsureEmbedModel records the active embedding model identity (e.g.
+// "Qwen3-Embedding-4B") and refuses subsequent runs that pass a
+// different identity. Pre-migration indexes (no embed_model row) adopt
+// the first caller's model.
+//
+// Returns ErrEmbedModelMismatch wrapped with the recorded and active
+// names when they disagree — callers should surface the wrapped error
+// to the user with a `dex reindex <path>` hint. Passing an empty name
+// is a no-op (callers without a model identity skip the gate).
+func (s *Store) EnsureEmbedModel(ctx context.Context, name string) error {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil
+	}
+	prev, _ := s.embedModel.Load().(string)
+	if prev == name {
+		return nil
+	}
+	if prev != "" {
+		return fmt.Errorf("%w: index was built with %q, current run uses %q — run `dex reindex` to rebuild", ErrEmbedModelMismatch, prev, name)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta(key,value) VALUES('`+metaEmbedModel+`', ?)
+		 ON CONFLICT(key) DO UPDATE SET value=excluded.value`, name); err != nil {
+		return err
+	}
+	s.embedModel.Store(name)
+	return nil
 }
 
 // SetProjectRoot records the absolute project path this index belongs

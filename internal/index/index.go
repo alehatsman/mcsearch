@@ -137,6 +137,16 @@ type slowFile struct {
 func (ix *Indexer) Run(ctx context.Context) error {
 	startTime := time.Now()
 	ix.Options.Logger.Info("index: starting", "root", ix.Proj.Root)
+
+	// Refuse a silent embed-model swap: two same-dim models produce
+	// vectors in different latent spaces, so mixing them corrupts the
+	// vec table without tripping the dim check. EnsureEmbedModel writes
+	// the model identity on first run and rejects mismatched subsequent
+	// runs with an actionable hint.
+	if err := ix.Store.EnsureEmbedModel(ctx, ix.Embed.ModelName()); err != nil {
+		return err
+	}
+
 	var (
 		toEmbed            []pending
 		seen               int

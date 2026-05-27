@@ -2,9 +2,11 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -56,6 +58,64 @@ func TestUpsertAndSearch(t *testing.T) {
 	}
 	if hits[1].Path != "c.go" {
 		t.Errorf("second hit = %q, want c.go", hits[1].Path)
+	}
+}
+
+func TestEnsureEmbedModel(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	ctx := context.Background()
+
+	st, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Empty name is a no-op (callers without a model identity skip the gate).
+	if err := st.EnsureEmbedModel(ctx, ""); err != nil {
+		t.Errorf("empty name should be no-op, got %v", err)
+	}
+	if got := st.EmbedModel(); got != "" {
+		t.Errorf("EmbedModel after empty Ensure = %q, want \"\"", got)
+	}
+
+	// First non-empty Ensure records the model.
+	if err := st.EnsureEmbedModel(ctx, "Qwen3-Embedding-4B"); err != nil {
+		t.Fatal(err)
+	}
+	if got := st.EmbedModel(); got != "Qwen3-Embedding-4B" {
+		t.Errorf("EmbedModel = %q, want Qwen3-Embedding-4B", got)
+	}
+
+	// Same name on a subsequent call is a no-op.
+	if err := st.EnsureEmbedModel(ctx, "Qwen3-Embedding-4B"); err != nil {
+		t.Errorf("same name should be no-op, got %v", err)
+	}
+
+	// Different name is rejected with ErrEmbedModelMismatch.
+	err = st.EnsureEmbedModel(ctx, "bge-m3")
+	if err == nil {
+		t.Fatal("expected mismatch error")
+	}
+	if !errors.Is(err, ErrEmbedModelMismatch) {
+		t.Errorf("error %v does not wrap ErrEmbedModelMismatch", err)
+	}
+	if !strings.Contains(err.Error(), "Qwen3-Embedding-4B") || !strings.Contains(err.Error(), "bge-m3") {
+		t.Errorf("error message %q should mention both model names", err.Error())
+	}
+
+	// Persistence: reopening the Store recovers the recorded model.
+	_ = st.Close()
+	st2, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	if got := st2.EmbedModel(); got != "Qwen3-Embedding-4B" {
+		t.Errorf("EmbedModel after reopen = %q, want Qwen3-Embedding-4B", got)
+	}
+	stats, _ := st2.Stats(ctx)
+	if stats.EmbedModel != "Qwen3-Embedding-4B" {
+		t.Errorf("Stats.EmbedModel = %q, want Qwen3-Embedding-4B", stats.EmbedModel)
 	}
 }
 

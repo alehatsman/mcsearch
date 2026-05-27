@@ -694,6 +694,7 @@ type ProjectStatus struct {
 	Chunks           int    `json:"chunks"`
 	Files            int    `json:"files"`
 	Dim              int    `json:"dim"`
+	EmbedModel       string `json:"embed_model,omitempty"`
 	LastIndexed      string `json:"last_indexed,omitempty"`
 	PendingSummaries int    `json:"pending_summaries,omitempty"`
 	LastSummarized   string `json:"last_summarized,omitempty"`
@@ -822,6 +823,7 @@ func (s *Server) status(ctx context.Context, _ *sdk.CallToolRequest, _ StatusInp
 					Chunks:           stats.Chunks,
 					Files:            stats.Files,
 					Dim:              stats.Dim,
+					EmbedModel:       stats.EmbedModel,
 					PendingSummaries: stats.PendingSummaries,
 				}
 				if !stats.LastIndex.IsZero() {
