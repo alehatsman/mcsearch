@@ -3,13 +3,14 @@ package store
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"math"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -17,20 +18,26 @@ import (
 	"github.com/alehatsman/dex/internal/rerank"
 )
 
-// Retrieval regression harness. Builds a fixed synthetic corpus under
-// testdata/regression/, runs every queries.jsonl entry through the
-// semantic, BM25, fused, and (stub-driven) rerank legs, and asserts the
-// expected paths land in fused top-k. Per-leg ranks are printed on
-// failure so a regression in any one leg is loud and pinpointed.
-//
-// The mock embedder is deliberately decoupled from chunk content: it
-// maps a `tags` slice to a normalized vector via two-hash projection
-// into a 64-dim space. Chunks store one tag set; queries store another;
-// content (what BM25 sees) is independent. That decoupling lets the
-// fixture exercise cases where one leg succeeds and the other fails
-// without coupling the test to any real embedder's behavior.
+// Retrieval regression harness. Drives a hand-built fixture through the
+// semantic, BM25, fused, and (optionally) rerank legs, asserting that
+// every expected path lands in fused top-k per query. On failure it
+// prints a per-leg rank table so the regressing leg is pinpointed.
+// The mock embedder hashes a tag slice rather than the chunk content,
+// so the same fixture can exercise cases where one leg succeeds and
+// another fails — which is the whole point of a multi-leg harness.
 
-const regressionDim = 64
+const (
+	regressionDim = 64
+	// XOR salt used to derive a second basis axis per tag. Two
+	// independently-signed projections cut single-axis collisions to
+	// roughly zero in a 25-tag vocabulary at dim=64.
+	tagHashSalt = 0xa5a5a5a5a5a5a5a5
+	// regressionKind is the chunks.kind value used for every fixture
+	// row. Must NOT be "window" — scoreBM25 penalizes window-kind
+	// rows at 0.7× weight, which would skew the BM25 leg in ways
+	// unrelated to retrieval logic.
+	regressionKind = "function_declaration"
+)
 
 type regressionCorpusEntry struct {
 	Path    string   `json:"path"`
@@ -46,48 +53,93 @@ type regressionQueryEntry struct {
 	ExpectedPaths []string `json:"expected_paths"`
 }
 
+// embedRegressionTags turns a tag slice into a normalized vector by
+// projecting each tag onto two basis axes and L2-normalizing.
 func embedRegressionTags(tags []string) []float32 {
 	v := make([]float32, regressionDim)
 	for _, t := range tags {
-		h := fnv.New64a()
-		_, _ = h.Write([]byte(strings.ToLower(t)))
-		sum := h.Sum64()
-		// Two-hash projection: each tag contributes to two basis
-		// vectors with independent signs. Cuts single-axis collision
-		// rate roughly to zero in a 25-tag vocabulary at dim=64.
-		idx1 := sum % regressionDim
-		sign1 := float32(1)
-		if (sum>>32)&1 == 1 {
-			sign1 = -1
-		}
-		v[idx1] += sign1
-		sum2 := sum ^ 0xa5a5a5a5a5a5a5a5
-		idx2 := sum2 % regressionDim
-		sign2 := float32(1)
-		if (sum2>>32)&1 == 1 {
-			sign2 = -1
-		}
-		v[idx2] += sign2
+		projectTag(v, t)
 	}
+	if !l2Normalize(v) {
+		// Store rejects all-zero vectors. An empty tag set has nothing
+		// to score against anyway; a sentinel keeps the leg functional
+		// and rank deterministic.
+		v[0] = 1
+	}
+	return v
+}
+
+func projectTag(v []float32, tag string) {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(strings.ToLower(tag)))
+	sum := h.Sum64()
+	addAxis(v, sum)
+	addAxis(v, sum^tagHashSalt)
+}
+
+func addAxis(v []float32, h uint64) {
+	sign := float32(1)
+	if (h>>32)&1 == 1 {
+		sign = -1
+	}
+	v[h%uint64(len(v))] += sign
+}
+
+// l2Normalize divides v by its L2 norm in place. Returns false if v is
+// all-zero (norm computation would divide by zero).
+func l2Normalize(v []float32) bool {
 	var n float32
 	for _, x := range v {
 		n += x * x
 	}
 	if n == 0 {
-		// Store rejects all-zero vectors. Empty-tag queries here would
-		// have nothing to score against anyway; planting a sentinel
-		// keeps the leg functional and rank deterministic.
-		v[0] = 1
-		return v
+		return false
 	}
 	n = float32(math.Sqrt(float64(n)))
 	for i := range v {
 		v[i] /= n
 	}
-	return v
+	return true
 }
 
-func loadJSONL[T any](t *testing.T, path string) []T {
+// legPool mirrors the candidate-pool floor used by searchRaw in
+// store.go. Tests call scoreSemantic / scoreBM25 directly for per-leg
+// visibility and need to ask for the same pool size searchRaw would.
+func legPool(k int) int {
+	pool := k * 5
+	if pool < 30 {
+		pool = 30
+	}
+	return pool
+}
+
+func loadCorpus(t *testing.T, path string) []regressionCorpusEntry {
+	t.Helper()
+	var out []regressionCorpusEntry
+	loadJSONL(t, path, func(line string) {
+		var e regressionCorpusEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parse %s: %v: %s", path, err, line)
+		}
+		out = append(out, e)
+	})
+	return out
+}
+
+func loadQueries(t *testing.T, path string) []regressionQueryEntry {
+	t.Helper()
+	var out []regressionQueryEntry
+	loadJSONL(t, path, func(line string) {
+		var e regressionQueryEntry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("parse %s: %v: %s", path, err, line)
+		}
+		out = append(out, e)
+	})
+	return out
+}
+
+func loadJSONL(t *testing.T, path string, onLine func(string)) {
 	t.Helper()
 	f, err := os.Open(path)
 	if err != nil {
@@ -96,22 +148,16 @@ func loadJSONL[T any](t *testing.T, path string) []T {
 	defer f.Close()
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var out []T
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" {
 			continue
 		}
-		var e T
-		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			t.Fatalf("parse %s: %v: %s", path, err, line)
-		}
-		out = append(out, e)
+		onLine(line)
 	}
 	if err := sc.Err(); err != nil {
 		t.Fatalf("scan %s: %v", path, err)
 	}
-	return out
 }
 
 func indexRegressionCorpus(t *testing.T, st *Store, corpus []regressionCorpusEntry) map[int64]string {
@@ -119,13 +165,14 @@ func indexRegressionCorpus(t *testing.T, st *Store, corpus []regressionCorpusEnt
 	ctx := context.Background()
 	rows := make([]PendingChunk, len(corpus))
 	for i, c := range corpus {
+		sum := sha1.Sum([]byte(c.Content))
 		rows[i] = PendingChunk{
 			Path:       c.Path,
-			Kind:       "function_declaration",
+			Kind:       regressionKind,
 			Name:       strings.TrimSuffix(filepath.Base(c.Path), filepath.Ext(c.Path)),
 			StartLine:  1,
 			EndLine:    1,
-			ContentSHA: fmt.Sprintf("sha-%d", i),
+			ContentSHA: hex.EncodeToString(sum[:]),
 			Content:    c.Content,
 			Vec:        embedRegressionTags(c.Tags),
 		}
@@ -170,45 +217,45 @@ func rankOf(paths []string, path string) int {
 	return 0
 }
 
-func formatLegTable(q regressionQueryEntry, semPaths, bmPaths, fusedPaths, rerankPaths []string) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "query=%q text=%q k=%d expected=%v\n", q.Name, q.Text, q.K, q.ExpectedPaths)
-	fmt.Fprintf(&b, "  %-12s | %s\n", "path", "ranks (semantic / bm25 / fused / rerank)")
-	for _, ep := range q.ExpectedPaths {
-		fmt.Fprintf(&b, "  %-12s | %d / %d / %d / %s\n", ep,
-			rankOf(semPaths, ep), rankOf(bmPaths, ep), rankOf(fusedPaths, ep),
-			optionalRank(rerankPaths, ep))
-	}
-	fmt.Fprintf(&b, "  fused top:    %v\n", truncate(fusedPaths, q.K))
-	fmt.Fprintf(&b, "  semantic top: %v\n", truncate(semPaths, q.K))
-	fmt.Fprintf(&b, "  bm25 top:     %v\n", truncate(bmPaths, q.K))
-	if rerankPaths != nil {
-		fmt.Fprintf(&b, "  rerank top:   %v\n", truncate(rerankPaths, q.K))
-	}
-	return b.String()
-}
-
-func optionalRank(paths []string, p string) string {
-	if paths == nil {
-		return "-"
-	}
-	return fmt.Sprintf("%d", rankOf(paths, p))
-}
-
-func truncate(paths []string, n int) []string {
+func firstN(paths []string, n int) []string {
 	if len(paths) <= n {
 		return paths
 	}
 	return paths[:n]
 }
 
-func runRegressionQuery(t *testing.T, ctx context.Context, st *Store, id2path map[int64]string, q regressionQueryEntry, rerankPaths []string) {
+func formatLegTable(q regressionQueryEntry, semPaths, bmPaths, fusedPaths []string, rerankOn bool) string {
+	var b strings.Builder
+	rerankState := "off"
+	if rerankOn {
+		rerankState = "on (fused == reranked)"
+	}
+	fmt.Fprintf(&b, "query=%q text=%q k=%d expected=%v rerank=%s\n", q.Name, q.Text, q.K, q.ExpectedPaths, rerankState)
+	fmt.Fprintf(&b, "  %-20s | %s\n", "path", "ranks (semantic / bm25 / fused)")
+	for _, ep := range q.ExpectedPaths {
+		fmt.Fprintf(&b, "  %-20s | %d / %d / %d\n", ep,
+			rankOf(semPaths, ep), rankOf(bmPaths, ep), rankOf(fusedPaths, ep))
+	}
+	fmt.Fprintf(&b, "  fused top:    %v\n", firstN(fusedPaths, q.K))
+	fmt.Fprintf(&b, "  semantic top: %v\n", firstN(semPaths, q.K))
+	fmt.Fprintf(&b, "  bm25 top:     %v\n", firstN(bmPaths, q.K))
+	return b.String()
+}
+
+// queryResult captures everything the assertion and failure-formatter
+// need from one query run, so the caller can both check correctness
+// and report rerank observations without redoing the work.
+type queryResult struct {
+	hits       []Hit
+	semPaths   []string
+	bmPaths    []string
+	fusedPaths []string
+}
+
+func runQuery(t *testing.T, ctx context.Context, st *Store, id2path map[int64]string, q regressionQueryEntry) queryResult {
 	t.Helper()
 	qvec := embedRegressionTags(q.Tags)
-	pool := q.K * 5
-	if pool < 30 {
-		pool = 30
-	}
+	pool := legPool(q.K)
 	semScored, err := st.scoreSemantic(ctx, qvec, pool)
 	if err != nil {
 		t.Fatalf("scoreSemantic: %v", err)
@@ -221,43 +268,21 @@ func runRegressionQuery(t *testing.T, ctx context.Context, st *Store, id2path ma
 	if err != nil {
 		t.Fatalf("Search: %v", err)
 	}
-	semPaths := pathsFromScored(semScored, id2path)
-	bmPaths := pathsFromScored(bmScored, id2path)
 	fusedPaths := make([]string, len(hits))
 	for i, h := range hits {
 		fusedPaths[i] = h.Path
 	}
-	missing := make([]string, 0, len(q.ExpectedPaths))
-	for _, ep := range q.ExpectedPaths {
-		if rankOf(fusedPaths, ep) == 0 {
-			missing = append(missing, ep)
-		}
-	}
-	if len(missing) > 0 {
-		t.Errorf("missing %v from fused top-%d\n%s", missing, q.K, formatLegTable(q, semPaths, bmPaths, fusedPaths, rerankPaths))
+	return queryResult{
+		hits:       hits,
+		semPaths:   pathsFromScored(semScored, id2path),
+		bmPaths:    pathsFromScored(bmScored, id2path),
+		fusedPaths: fusedPaths,
 	}
 }
 
-func TestRetrievalRegressionLegs(t *testing.T) {
-	corpus := loadJSONL[regressionCorpusEntry](t, "testdata/regression/corpus.jsonl")
-	queries := loadJSONL[regressionQueryEntry](t, "testdata/regression/queries.jsonl")
-	if len(corpus) == 0 || len(queries) == 0 {
-		t.Fatalf("empty fixture: %d corpus, %d queries", len(corpus), len(queries))
-	}
-	st, ctx := newStore(t)
-	id2path := indexRegressionCorpus(t, st, corpus)
-	for _, q := range queries {
-		q := q
-		t.Run(q.Name, func(t *testing.T) {
-			runRegressionQuery(t, ctx, st, id2path, q, nil)
-		})
-	}
-}
-
-// substringReranker scores each doc by counting how many whitespace
-// tokens from the query appear as substrings of the doc. Deterministic,
-// dependency-free, and gives observable reordering so the rerank leg
-// covers meaningful retrieval behavior — not just plumbing.
+// substringReranker scores each doc by counting query tokens that
+// appear as substrings of the doc. Enough to verify the rerank wiring
+// without depending on a real reranker service.
 type substringReranker struct{}
 
 func (substringReranker) Rerank(_ context.Context, query string, docs []string) ([]rerank.Score, error) {
@@ -273,72 +298,76 @@ func (substringReranker) Rerank(_ context.Context, query string, docs []string) 
 		}
 		scores[i] = rerank.Score{Index: i, Score: float32(n)}
 	}
-	// Sort descending by score so the wrapper sees the rerank ordering
-	// when it reads Score[0] through Score[len-1]. The Store's rerank
-	// path actually consumes Index, not order, so sorting is decorative
-	// — but it matches what real rerankers return.
-	sort.SliceStable(scores, func(i, j int) bool { return scores[i].Score > scores[j].Score })
 	return scores, nil
 }
 
-func TestRetrievalRegressionRerankLeg(t *testing.T) {
-	corpus := loadJSONL[regressionCorpusEntry](t, "testdata/regression/corpus.jsonl")
-	queries := loadJSONL[regressionQueryEntry](t, "testdata/regression/queries.jsonl")
+func TestRetrievalRegression(t *testing.T) {
+	corpus := loadCorpus(t, "testdata/regression/corpus.jsonl")
+	queries := loadQueries(t, "testdata/regression/queries.jsonl")
 	if len(corpus) == 0 || len(queries) == 0 {
 		t.Fatalf("empty fixture: %d corpus, %d queries", len(corpus), len(queries))
 	}
-	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "rerank.db")
-	st, err := OpenWith(ctx, dbPath, Options{Reranker: substringReranker{}, RerankPool: 30})
-	if err != nil {
-		t.Fatalf("open: %v", err)
+
+	cases := []struct {
+		name string
+		opts Options
+	}{
+		{name: "plain", opts: Options{}},
+		{name: "rerank", opts: Options{Reranker: substringReranker{}, RerankPool: 30}},
 	}
-	t.Cleanup(func() { _ = st.Close() })
-	id2path := indexRegressionCorpus(t, st, corpus)
-	var rerankObservations int
-	for _, q := range queries {
-		q := q
-		t.Run(q.Name, func(t *testing.T) {
-			qvec := embedRegressionTags(q.Tags)
-			hits, err := st.Search(ctx, qvec, q.Text, q.K)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			dbPath := filepath.Join(t.TempDir(), "regression.db")
+			st, err := OpenWith(ctx, dbPath, tc.opts)
 			if err != nil {
-				t.Fatalf("Search: %v", err)
+				t.Fatalf("open: %v", err)
 			}
-			pool := q.K * 5
-			if pool < 30 {
-				pool = 30
+			t.Cleanup(func() { _ = st.Close() })
+			id2path := indexRegressionCorpus(t, st, corpus)
+			rerankOn := tc.opts.Reranker != nil
+
+			// queriesRan + rerankObservations track suite-wide state for
+			// the rerank-wiring check below. Subtests run sequentially
+			// (no t.Parallel), so plain ints are enough; adding
+			// parallelism would require atomics.
+			var queriesRan, rerankObservations int
+
+			for _, q := range queries {
+				t.Run(q.Name, func(t *testing.T) {
+					queriesRan++
+					res := runQuery(t, ctx, st, id2path, q)
+					for _, h := range res.hits {
+						if h.RerankScore != 0 {
+							rerankObservations++
+						}
+					}
+					var missing []string
+					for _, ep := range q.ExpectedPaths {
+						if rankOf(res.fusedPaths, ep) == 0 {
+							missing = append(missing, ep)
+						}
+					}
+					if len(missing) > 0 {
+						t.Errorf("missing %v from fused top-%d\n%s",
+							missing, q.K,
+							formatLegTable(q, res.semPaths, res.bmPaths, res.fusedPaths, rerankOn))
+					}
+				})
 			}
-			semScored, _ := st.scoreSemantic(ctx, qvec, pool)
-			bmScored, _ := st.scoreBM25(ctx, q.Text, pool)
-			semPaths := pathsFromScored(semScored, id2path)
-			bmPaths := pathsFromScored(bmScored, id2path)
-			fusedPaths := make([]string, len(hits))
-			for i, h := range hits {
-				fusedPaths[i] = h.Path
-				if h.RerankScore != 0 {
-					rerankObservations++
-				}
-			}
-			missing := make([]string, 0, len(q.ExpectedPaths))
-			for _, ep := range q.ExpectedPaths {
-				if rankOf(fusedPaths, ep) == 0 {
-					missing = append(missing, ep)
-				}
-			}
-			if len(missing) > 0 {
-				t.Errorf("rerank-leg missing %v from top-%d\n%s",
-					missing, q.K, formatLegTable(q, semPaths, bmPaths, fusedPaths, fusedPaths))
+
+			// Aggregate rerank-wiring check. Some queries legitimately
+			// score everything at 0 (no literal term overlap), but
+			// across the whole suite at least a few queries DO overlap.
+			// If nothing ever records a non-zero RerankScore, the
+			// rerank path is wired wrong.
+			//
+			// Skipped when -run filtered the subtests so the check
+			// doesn't false-fire on a narrowed invocation.
+			if rerankOn && queriesRan == len(queries) && rerankObservations == 0 {
+				t.Errorf("rerank wiring: no Hit.RerankScore set across %d queries despite Reranker configured", len(queries))
 			}
 		})
-	}
-	// Aggregate wiring check. The substring reranker returns 0 for docs
-	// containing none of the query terms; some queries legitimately
-	// score everything at 0 (no literal overlap). But across the suite
-	// at least a few queries DO overlap — if every single hit across
-	// every query reports RerankScore==0, the rerank path is wired
-	// wrong (or the Score map isn't being threaded into Hit.RerankScore)
-	// and that should fail loudly.
-	if rerankObservations == 0 {
-		t.Errorf("rerank wiring: no Hit.RerankScore set across %d queries despite Reranker configured", len(queries))
 	}
 }
