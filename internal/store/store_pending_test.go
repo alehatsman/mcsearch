@@ -185,6 +185,37 @@ func TestCountPendingSummariesEmpty(t *testing.T) {
 	}
 }
 
+func TestOldestPendingSummaryAge(t *testing.T) {
+	st, ctx := newStore(t)
+
+	// Empty queue → zero.
+	if age, err := st.OldestPendingSummaryAge(ctx); err != nil || age != 0 {
+		t.Fatalf("empty queue: age=%v err=%v, want 0 and nil", age, err)
+	}
+
+	// Enqueue with a known queued_at in the past.
+	past := time.Now().Add(-5 * time.Minute)
+	enqueueFileSummary(t, ctx, st, "old.go", "sha-old", past)
+	// And one fresh row.
+	enqueueFileSummary(t, ctx, st, "new.go", "sha-new", time.Now())
+
+	age, err := st.OldestPendingSummaryAge(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The oldest queued_at is `past`; age should be roughly 5 min.
+	// Wide tolerance so the test isn't flaky under load.
+	if age < 4*time.Minute || age > 6*time.Minute {
+		t.Errorf("age = %v, want roughly 5m", age)
+	}
+
+	// Stats() should expose the same field.
+	stats, _ := st.Stats(ctx)
+	if stats.PendingSummariesOldestAge < 4*time.Minute || stats.PendingSummariesOldestAge > 6*time.Minute {
+		t.Errorf("Stats.PendingSummariesOldestAge = %v, want roughly 5m", stats.PendingSummariesOldestAge)
+	}
+}
+
 // TestStatsExposesPendingAndLastSummarized verifies the new Stats
 // fields surface what `dex index status` and the MCP status tool need
 // to report background-summary progress to the user.

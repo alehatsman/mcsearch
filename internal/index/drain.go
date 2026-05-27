@@ -243,13 +243,36 @@ func (ix *Indexer) IdleSummaryDrainer(batchSize int) func(context.Context) (bool
 	}
 	logger := ix.Options.Logger
 	verbose := ix.Options.Verbose
+	// Exponential backoff state shared across calls. The watcher may
+	// invoke the returned closure many times within a session; without
+	// this, a chat endpoint that flaps once would still print a warning
+	// every idle tick and chew through cycles re-checking the queue.
+	const (
+		maxConsecutiveNoProgress = 3
+		initialBackoff           = 30 * time.Second
+		maxBackoff               = 30 * time.Minute
+	)
+	var (
+		consecutiveNoProgress int
+		nextAttempt           time.Time
+		currentBackoff        time.Duration
+	)
 	return func(ctx context.Context) (bool, error) {
+		if !nextAttempt.IsZero() && time.Now().Before(nextAttempt) {
+			// Still inside the backoff window — skip without logging
+			// so we don't spam the slog. The watcher will retry on the
+			// next idle tick.
+			return true, nil
+		}
 		before, _ := ix.Store.CountPendingSummaries(ctx)
 		gen, after, err := ix.DrainPendingSummariesBatch(ctx, batchSize)
 		if err != nil {
 			return true, err
 		}
 		if after == 0 {
+			consecutiveNoProgress = 0
+			nextAttempt = time.Time{}
+			currentBackoff = 0
 			cascadeGen, err := ix.CascadePackageRepoSummaries(ctx)
 			if err != nil {
 				return true, err
@@ -260,9 +283,30 @@ func (ix *Indexer) IdleSummaryDrainer(batchSize int) func(context.Context) (bool
 			return true, nil
 		}
 		if after >= before {
-			logger.Warn("idle drain: no progress, stopping cycle", "remaining", after)
+			consecutiveNoProgress++
+			if consecutiveNoProgress >= maxConsecutiveNoProgress {
+				if currentBackoff == 0 {
+					currentBackoff = initialBackoff
+				} else {
+					currentBackoff *= 2
+					if currentBackoff > maxBackoff {
+						currentBackoff = maxBackoff
+					}
+				}
+				nextAttempt = time.Now().Add(currentBackoff)
+				logger.Warn("idle drain: no progress, backing off",
+					"remaining", after, "consecutive_failures", consecutiveNoProgress,
+					"backoff", currentBackoff)
+			} else if verbose {
+				logger.Warn("idle drain: no progress",
+					"remaining", after, "consecutive_failures", consecutiveNoProgress)
+			}
 			return true, nil
 		}
+		// Progress on this batch — clear the failure counter.
+		consecutiveNoProgress = 0
+		nextAttempt = time.Time{}
+		currentBackoff = 0
 		if verbose {
 			logger.Info("idle drain: batch", "generated", gen, "remaining", after)
 		}

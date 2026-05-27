@@ -130,6 +130,27 @@ func (s *Store) CountPendingSummaries(ctx context.Context) (int, error) {
 	return n, nil
 }
 
+// OldestPendingSummaryAge returns the age of the oldest queued row.
+// Returns 0 when the queue is empty. Used by status reporting to spot
+// stalled queues — a deep queue is fine if it's draining; a deep queue
+// with old rows means the drainer isn't running.
+func (s *Store) OldestPendingSummaryAge(ctx context.Context) (time.Duration, error) {
+	var oldestNanos sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT MIN(queued_at) FROM pending_summaries`).Scan(&oldestNanos)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("OldestPendingSummaryAge: %w", err)
+	}
+	if !oldestNanos.Valid || oldestNanos.Int64 == 0 {
+		return 0, nil
+	}
+	age := time.Since(time.Unix(0, oldestNanos.Int64))
+	if age < 0 {
+		return 0, nil
+	}
+	return age, nil
+}
+
 // ChunkContent returns the content of the chunk identified by
 // (path, content_sha1). Used by the summary drainer to recover a source
 // chunk's text for chunk_summary jobs without re-parsing the file.

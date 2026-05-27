@@ -440,6 +440,11 @@ type Stats struct {
 	// queue. Non-zero on a fresh `dex index --summarize-defer` run;
 	// drained by `dex index summarize` or by `dex watch`'s idle hook.
 	PendingSummaries int
+	// PendingSummariesOldestAge is the age of the oldest queued
+	// summarization row. Zero when PendingSummaries == 0. A deep queue
+	// with old rows means the drainer has stalled; a deep queue with
+	// fresh rows just means indexing recently finished.
+	PendingSummariesOldestAge time.Duration
 	// LastSummarized is the wall-clock time of the most recent
 	// successful summary generation (per-chunk, file, package, or
 	// repo). Zero when no summaries have ever been produced.
@@ -473,6 +478,18 @@ func (s *Store) Stats(ctx context.Context) (Stats, error) {
 	// so old indexes that pre-date the table don't break Stats.
 	row = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pending_summaries`)
 	_ = row.Scan(&st.PendingSummaries)
+	if st.PendingSummaries > 0 {
+		// Same query as OldestPendingSummaryAge; inlined here so a single
+		// Stats() call gets both numbers in one DB hit instead of two.
+		var oldestNanos sql.NullInt64
+		_ = s.db.QueryRowContext(ctx,
+			`SELECT MIN(queued_at) FROM pending_summaries`).Scan(&oldestNanos)
+		if oldestNanos.Valid && oldestNanos.Int64 > 0 {
+			if age := time.Since(time.Unix(0, oldestNanos.Int64)); age > 0 {
+				st.PendingSummariesOldestAge = age
+			}
+		}
+	}
 
 	row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key='`+metaLastSummarizedAt+`'`)
 	var sv string
