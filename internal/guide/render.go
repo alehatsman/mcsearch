@@ -110,7 +110,16 @@ func buildMarkdown(ctx context.Context, st *store.Store, root string, repo, pkgs
 		b.WriteString("\n\n")
 	}
 
+	haveOverview := len(repo) > 0
 	for _, p := range pkgs {
+		// The root package_summary is redundant with the Overview
+		// (same content, same scope). Skip it so the guide has one
+		// root-level prose section instead of two. If the repo_summary
+		// is missing (truncated/never run), fall back to surfacing the
+		// root package_summary as the module section.
+		if (p.Path == "." || p.Path == "") && haveOverview {
+			continue
+		}
 		label := p.Path
 		if label == "." || label == "" {
 			label = "(root)"
