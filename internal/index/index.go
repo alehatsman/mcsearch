@@ -68,7 +68,7 @@ type Options struct {
 	// shared endpoint (e.g. Ollama) — small fast model for the
 	// hundreds of chunk summaries, larger model for the dozen
 	// package summaries and the one repo summary that compounds into
-	// LLM_GUIDE.txt.
+	// LLM_GUIDE.md.
 	SummaryModels SummaryModels
 	// SummaryConcurrency caps in-flight chat calls for per-chunk
 	// summaries within a single file. <=1 = sequential (preserves
@@ -941,11 +941,19 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, model, rel string, c c
 // summarizePackage asks the chat endpoint for a package-level overview built
 // from the prose summaries of its constituent files. Returns the summary text
 // or an error if the chat call fails. Caller logs and skips on error.
+//
+// Output shape is locked to a single dense prose paragraph (no bullets,
+// no `**Bold:**` section headers). The guide renderer appends its own
+// ### Exported API / Key entry points / Depends on / Used by sections
+// from ground-truth graph data — if the LLM also emitted bold prefixes
+// they'd collide visually with the renderer's sections and a reader
+// couldn't tell which was authoritative. Prose-only solves that.
 func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, fileSummaries []string) (string, error) {
 	const system = "You are a code summarizer. Given prose summaries of all files in a code package or directory, " +
-		"write 2-4 sentences describing what the package does. " +
-		"Name the package path. Describe its public role in the system. " +
-		"Mention key exported types and functions. Note dependencies or notable constraints. " +
+		"write a 2-4 sentence prose paragraph describing what the package does. " +
+		"PROSE ONLY — single paragraph, no bullet points, no markdown headers, no **Bold:** section labels. " +
+		"Cover: the package's role in the system, key exported types/functions inline, notable dependencies or constraints. " +
+		"Mention symbol names in `backticks`. " +
 		"No prose padding, no apologies, no restating the prompt. " +
 		"Only mention features explicitly present in the file summaries. Do not invent features " +
 		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
@@ -954,9 +962,12 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{Model: model, MaxTokens: 300, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 400, Temperature: 0.1})
 	if err != nil {
 		return "", err
+	}
+	if resp.FinishReason == "length" {
+		return "", fmt.Errorf("package summary truncated at 400 tokens (finish_reason=length); raise MaxTokens or shorten input")
 	}
 	return strings.TrimSpace(resp.Content), nil
 }

@@ -21,6 +21,11 @@ type Result struct {
 	OutputPath       string
 	ModuleCount      int
 	MaxSummarySeenAt int64
+	// Warnings lists summaries that look malformed (truncated mid-bullet,
+	// unbalanced backticks, etc.). Populated by Render so callers can
+	// surface them and so `--check` can fail when the index still
+	// contains pre-existing truncations from older runs.
+	Warnings []string
 }
 
 // Options drives a single render.
@@ -35,6 +40,13 @@ type Options struct {
 // enough to surface architectural anchors without burying the section
 // in noise; users can chase further via `dex graph callers`.
 const topCentralLimit = 5
+
+// topExportedLimit caps the "Exported API" list per module. Without
+// this, a large package like internal/store dumps 50+ flat bullets and
+// the actually-important symbols get buried. Ten is enough to convey
+// "what this package offers" — readers chase the rest via `dex search
+// symbol`.
+const topExportedLimit = 10
 
 // Render reads the existing repo_summary + package_summary chunks from
 // the store, augments each module with ground-truth graph data
@@ -51,6 +63,7 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	if err != nil {
 		return res, fmt.Errorf("load package summaries: %w", err)
 	}
+	pkgRows = filterFixtureDirs(pkgRows)
 	repoRows, err := st.SummariesByKindWithMeta(ctx, chunk.KindRepoSummary)
 	if err != nil {
 		return res, fmt.Errorf("load repo summary: %w", err)
@@ -58,6 +71,7 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 
 	res.ModuleCount = len(pkgRows)
 	res.MaxSummarySeenAt = maxSeen(pkgRows, repoRows)
+	res.Warnings = scanForTruncation(repoRows, pkgRows)
 
 	if len(pkgRows) == 0 && len(repoRows) == 0 {
 		return res, fmt.Errorf("no summaries in index — run `dex index <path> --summarize` first")
@@ -109,7 +123,29 @@ func buildMarkdown(ctx context.Context, st *store.Store, root string, repo, pkgs
 		b.WriteString("\n\n")
 	}
 
+	haveOverview := len(repo) > 0
+
+	// Table of contents. Skips the root package_summary when it would
+	// be hidden anyway (see #2 below), so the TOC matches the rendered
+	// module sections exactly.
+	tocEntries := tocFromPackages(pkgs, haveOverview)
+	if len(tocEntries) > 0 {
+		b.WriteString("## Contents\n\n")
+		for _, e := range tocEntries {
+			fmt.Fprintf(&b, "- [%s](#%s)\n", e.label, e.anchor)
+		}
+		b.WriteString("\n")
+	}
+
 	for _, p := range pkgs {
+		// The root package_summary is redundant with the Overview
+		// (same content, same scope). Skip it so the guide has one
+		// root-level prose section instead of two. If the repo_summary
+		// is missing (truncated/never run), fall back to surfacing the
+		// root package_summary as the module section.
+		if (p.Path == "." || p.Path == "") && haveOverview {
+			continue
+		}
 		label := p.Path
 		if label == "." || label == "" {
 			label = "(root)"
@@ -163,11 +199,22 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 	usedBy := trimModulePrefix(usedByPkgs, modPath)
 
+	// Renderer-emitted sections use ### so they're visually distinct
+	// from the LLM-generated prose above, which often uses **bold**
+	// prefixes that would otherwise blend in.
 	if len(exported) > 0 {
-		fmt.Fprintf(b, "**Exported API** (%d)\n\n", len(exported))
-		for _, s := range exported {
+		shown, total := selectTopExported(exported, topExportedLimit)
+		if total > topExportedLimit {
+			fmt.Fprintf(b, "### Exported API (top %d of %d by PageRank)\n\n", len(shown), total)
+		} else {
+			fmt.Fprintf(b, "### Exported API (%d)\n\n", total)
+		}
+		for _, s := range shown {
 			fmt.Fprintf(b, "- `%s` %s — %s:%d\n",
 				s.Kind, displayName(s), s.FilePath, s.StartLine)
+		}
+		if total > topExportedLimit {
+			fmt.Fprintf(b, "- _…and %d more — `dex search symbol <name>` for the rest._\n", total-topExportedLimit)
 		}
 		b.WriteString("\n")
 	}
@@ -177,7 +224,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 		if centralIsInternal {
 			heading = "Key internal hot spots"
 		}
-		fmt.Fprintf(b, "**%s** (top %d by PageRank)\n\n", heading, len(central))
+		fmt.Fprintf(b, "### %s (top %d by PageRank)\n\n", heading, len(central))
 		for _, s := range central {
 			fmt.Fprintf(b, "- `%s` — %s:%d — in-degree %d\n",
 				displayName(s), s.FilePath, s.StartLine, s.InDegree)
@@ -186,7 +233,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 
 	if proj, ext := splitImports(imports, modPath); len(proj)+len(ext) > 0 {
-		b.WriteString("**Depends on**\n\n")
+		b.WriteString("### Depends on\n\n")
 		if len(proj) > 0 {
 			fmt.Fprintf(b, "- project: %s\n", strings.Join(proj, ", "))
 		}
@@ -197,7 +244,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 
 	if len(usedBy) > 0 {
-		fmt.Fprintf(b, "**Used by**\n\n- %s\n\n", strings.Join(usedBy, ", "))
+		fmt.Fprintf(b, "### Used by\n\n- %s\n\n", strings.Join(usedBy, ", "))
 	}
 	return nil
 }
@@ -278,6 +325,176 @@ func readModulePath(root string) string {
 		}
 	}
 	return ""
+}
+
+// scanForTruncation walks every summary row and returns one warning
+// per row that looks malformed. Callers (CLI / --check) treat a
+// non-empty slice as "the index still holds truncations from an older
+// run — re-summarize before trusting the guide."
+//
+// Newer indexes can't produce truncations: the indexer treats
+// FinishReason=length as an error and rejects the partial summary.
+// This scan exists to catch summaries written before that guard
+// landed, or by an out-of-tree binary.
+func scanForTruncation(repo, pkgs []store.SummaryRow) []string {
+	var out []string
+	for _, r := range repo {
+		if reason := summaryLooksTruncated(r.Content); reason != "" {
+			out = append(out, fmt.Sprintf("repo_summary: %s", reason))
+		}
+	}
+	for _, p := range pkgs {
+		if reason := summaryLooksTruncated(p.Content); reason != "" {
+			label := p.Path
+			if label == "" {
+				label = "."
+			}
+			out = append(out, fmt.Sprintf("package_summary[%s]: %s", label, reason))
+		}
+	}
+	return out
+}
+
+// summaryLooksTruncated returns a short reason string when content
+// appears cut off mid-token. Empty string means "looks complete".
+//
+// Heuristics — order matters, most diagnostic first:
+//   - odd number of backticks → an inline code span never closed
+//   - odd number of `**` pairs → a bold run never closed
+//   - trailing `- **` (or similar) at end of input → a bullet started
+//     a bold span on the last token and the model stopped mid-emit
+func summaryLooksTruncated(content string) string {
+	trimmed := strings.TrimSpace(content)
+	if trimmed == "" {
+		return ""
+	}
+	// Trailing bullet stub: "- **" with nothing after — the LLM
+	// started a new bullet's bold span and stopped.
+	if strings.HasSuffix(trimmed, "- **") || strings.HasSuffix(trimmed, "- *") {
+		return "ends with an unclosed bullet marker"
+	}
+	// Unbalanced backticks. Count single backticks; markdown fences
+	// `` ``` `` always come in matched triples so an overall odd count
+	// is the symptom of an unterminated inline span.
+	if strings.Count(trimmed, "`")%2 != 0 {
+		return "unbalanced backticks (unterminated code span)"
+	}
+	// Unbalanced bold markers. Count `**` occurrences — should be even.
+	if strings.Count(trimmed, "**")%2 != 0 {
+		return "unbalanced **bold** markers"
+	}
+	return ""
+}
+
+// tocEntry pairs a display label with its GitHub-flavored anchor slug.
+type tocEntry struct {
+	label  string
+	anchor string
+}
+
+// tocFromPackages builds the Contents list. When haveOverview is true,
+// the root package_summary is skipped (Overview already covers root) —
+// matching the suppression rule in the module loop, so TOC entries and
+// rendered sections stay in sync.
+func tocFromPackages(pkgs []store.SummaryRow, haveOverview bool) []tocEntry {
+	out := make([]tocEntry, 0, len(pkgs))
+	for _, p := range pkgs {
+		if (p.Path == "." || p.Path == "") && haveOverview {
+			continue
+		}
+		label := p.Path
+		if label == "." || label == "" {
+			label = "(root)"
+		}
+		out = append(out, tocEntry{label: label, anchor: moduleAnchor(label)})
+	}
+	return out
+}
+
+// moduleAnchor returns the GitHub-flavored anchor slug for a
+// "## Module: <label>" heading. GitHub's slugger lowercases the
+// heading text, replaces spaces with "-", and strips characters that
+// aren't [a-z0-9_-]. Slashes vanish; parentheses vanish.
+//
+// For "## Module: internal/watch" → "module-internalwatch".
+// For "## Module: (root)"          → "module-root".
+func moduleAnchor(label string) string {
+	return slugifyHeading("Module: " + label)
+}
+
+// slugifyHeading converts a markdown heading text to a GitHub anchor
+// slug. Approximates github-slugger: lowercase; spaces → "-"; drop
+// anything outside [a-z0-9-_]; collapse runs of "-".
+func slugifyHeading(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	lastDash := false
+	for _, r := range strings.ToLower(s) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
+			b.WriteRune(r)
+			lastDash = false
+		case r == ' ', r == '-':
+			if !lastDash {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		default:
+			// drop punctuation (`/`, `:`, `(`, `)`, …)
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+// selectTopExported sorts symbols by PageRank DESC, InDegree DESC, Name
+// ASC and returns the top n (or all if len(in) <= n). The total count
+// is returned alongside so callers can render a "N of M" header.
+//
+// Ordering by centrality makes a truncated list meaningful — the
+// retained symbols are the most architecturally significant ones,
+// not just the alphabetically-earliest.
+func selectTopExported(in []store.GraphSymbol, n int) (shown []store.GraphSymbol, total int) {
+	total = len(in)
+	out := make([]store.GraphSymbol, len(in))
+	copy(out, in)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PageRank != out[j].PageRank {
+			return out[i].PageRank > out[j].PageRank
+		}
+		if out[i].InDegree != out[j].InDegree {
+			return out[i].InDegree > out[j].InDegree
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, total
+}
+
+// filterFixtureDirs drops package_summary rows whose path lives inside
+// a `testdata/` segment. Those are fixtures consumed by tests, not part
+// of the project's shipped surface — surfacing them as "modules" in
+// LLM_GUIDE inflates the table of contents with noise.
+func filterFixtureDirs(rows []store.SummaryRow) []store.SummaryRow {
+	out := rows[:0]
+	for _, r := range rows {
+		if isFixtureDir(r.Path) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// isFixtureDir reports whether p contains a `testdata/` path segment.
+// Anchored to segment boundaries so a directory literally named
+// `mytestdata` doesn't get caught.
+func isFixtureDir(p string) bool {
+	if p == "testdata" || strings.HasPrefix(p, "testdata/") {
+		return true
+	}
+	return strings.Contains(p, "/testdata/") || strings.HasSuffix(p, "/testdata")
 }
 
 func maxSeen(lists ...[]store.SummaryRow) int64 {

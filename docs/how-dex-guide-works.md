@@ -1,4 +1,4 @@
-# How LLM_GUIDE.txt is generated
+# How LLM_GUIDE.md is generated
 
 Two-phase model. The LLM work happens at **index time**, not guide
 time. Each module section in the output is a hybrid: an LLM-generated
@@ -48,7 +48,7 @@ Re-indexing with no changes → cache hits → no LLM calls.
 3. Dirty check: any summary chunk's `last_seen_at` greater than the
    manifest's recorded value, OR the guide file is missing, OR `--full`
    was passed.
-4. If clean → exit. If dirty → format markdown, write `LLM_GUIDE.txt`,
+4. If clean → exit. If dirty → format markdown, write `LLM_GUIDE.md`,
    update manifest.
 
 ## Output shape
@@ -118,7 +118,7 @@ Splitting "produce summaries" from "format guide" gives:
 
 ```
 dex index . --summarize    # fast path on unchanged files; LLM only on touched
-dex guide .                # format → LLM_GUIDE.txt + manifest
+dex guide .                # format → LLM_GUIDE.md + manifest
 ```
 
 First half does the (potentially) slow work; second half is always
@@ -131,7 +131,7 @@ hook.
 
 ```toml
 [guide]
-output = "LLM_GUIDE.txt"
+output = "LLM_GUIDE.md"
 ```
 
 Missing file → defaults. There is no `[ollama]` block — the renderer

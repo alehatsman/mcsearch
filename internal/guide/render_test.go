@@ -91,6 +91,254 @@ func TestTrimModulePrefix(t *testing.T) {
 	}
 }
 
+func TestSummaryLooksTruncated(t *testing.T) {
+	cases := []struct {
+		name     string
+		content  string
+		wantHit  bool
+		wantWord string // substring expected in the reason
+	}{
+		{
+			name:    "clean prose passes",
+			content: "Package x does y. Public entry point Run().",
+			wantHit: false,
+		},
+		{
+			name:    "empty passes",
+			content: "",
+			wantHit: false,
+		},
+		{
+			name:    "trailing - **",
+			content: "- foo\n- bar\n- **",
+			wantHit: true, wantWord: "bullet",
+		},
+		{
+			name:    "trailing - *",
+			content: "items:\n- a\n- *",
+			wantHit: true, wantWord: "bullet",
+		},
+		{
+			name:    "unterminated inline backtick",
+			content: "Package exports `Run.",
+			wantHit: true, wantWord: "backtick",
+		},
+		{
+			name:    "mid-word truncation like LLM_GUIDE:29",
+			content: "- **`internal",
+			wantHit: true, wantWord: "backtick",
+		},
+		{
+			name:    "balanced backticks pass",
+			content: "Call `Run()` then `Close()`.",
+			wantHit: false,
+		},
+		{
+			name:    "unclosed bold",
+			content: "**Important note: do this.",
+			wantHit: true, wantWord: "bold",
+		},
+		{
+			name:    "balanced bold passes",
+			content: "**Bold** and **more bold**.",
+			wantHit: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := summaryLooksTruncated(tc.content)
+			if tc.wantHit && got == "" {
+				t.Errorf("expected a reason, got empty for %q", tc.content)
+			}
+			if !tc.wantHit && got != "" {
+				t.Errorf("expected no warning, got %q for %q", got, tc.content)
+			}
+			if tc.wantHit && tc.wantWord != "" && !strings.Contains(got, tc.wantWord) {
+				t.Errorf("reason %q missing %q", got, tc.wantWord)
+			}
+		})
+	}
+}
+
+func TestScanForTruncation(t *testing.T) {
+	repo := []store.SummaryRow{{Path: ".", Content: "Overview text."}}
+	pkgs := []store.SummaryRow{
+		{Path: "cmd/dex", Content: "Clean package summary."},
+		{Path: "internal/watch", Content: "- **`internal"}, // truncated
+		{Path: "internal/store", Content: "Has unclosed `code."},
+	}
+	got := scanForTruncation(repo, pkgs)
+	if len(got) != 2 {
+		t.Fatalf("got %d warnings, want 2: %v", len(got), got)
+	}
+	if !strings.Contains(got[0], "internal/watch") {
+		t.Errorf("warning 0 missing package label: %q", got[0])
+	}
+	if !strings.Contains(got[1], "internal/store") {
+		t.Errorf("warning 1 missing package label: %q", got[1])
+	}
+}
+
+func TestSlugifyHeading(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"Module: internal/watch", "module-internalwatch"},
+		{"Module: cmd/dex", "module-cmddex"},
+		{"Module: (root)", "module-root"},
+		{"Module: internal/graph/testdata", "module-internalgraphtestdata"},
+		{"Overview", "overview"},
+		{"  Spaces  Around  ", "spaces-around"},
+		{"Already-Dashed", "already-dashed"},
+		{"Multi -- Dash", "multi-dash"},
+		{"AlphaNumeric_123", "alphanumeric_123"},
+	}
+	for _, tc := range cases {
+		if got := slugifyHeading(tc.in); got != tc.want {
+			t.Errorf("slugifyHeading(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestTocFromPackages(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "."},
+		{Path: "cmd/dex"},
+		{Path: "internal/watch"},
+	}
+	t.Run("with overview drops root", func(t *testing.T) {
+		toc := tocFromPackages(pkgs, true)
+		if len(toc) != 2 {
+			t.Fatalf("got %d entries, want 2: %+v", len(toc), toc)
+		}
+		if toc[0].label != "cmd/dex" || toc[0].anchor != "module-cmddex" {
+			t.Errorf("entry 0 = %+v", toc[0])
+		}
+		if toc[1].label != "internal/watch" || toc[1].anchor != "module-internalwatch" {
+			t.Errorf("entry 1 = %+v", toc[1])
+		}
+	})
+	t.Run("without overview keeps (root)", func(t *testing.T) {
+		toc := tocFromPackages(pkgs, false)
+		if len(toc) != 3 {
+			t.Fatalf("got %d entries, want 3", len(toc))
+		}
+		if toc[0].label != "(root)" || toc[0].anchor != "module-root" {
+			t.Errorf("root entry = %+v", toc[0])
+		}
+	})
+}
+
+func TestSelectTopExported(t *testing.T) {
+	// 12 symbols with varied PageRank/InDegree/Name. Top 5 by PageRank
+	// must be A, B, C, D, E (ties broken by InDegree then Name).
+	in := []store.GraphSymbol{
+		{Name: "Z", PageRank: 0.10, InDegree: 1},
+		{Name: "A", PageRank: 0.90, InDegree: 9},
+		{Name: "Y", PageRank: 0.05, InDegree: 0},
+		{Name: "B", PageRank: 0.80, InDegree: 8},
+		{Name: "C", PageRank: 0.70, InDegree: 7},
+		{Name: "D", PageRank: 0.60, InDegree: 6},
+		{Name: "E", PageRank: 0.50, InDegree: 5},
+		{Name: "F", PageRank: 0.40, InDegree: 4},
+		{Name: "Tie1", PageRank: 0.30, InDegree: 2},
+		{Name: "Tie2", PageRank: 0.30, InDegree: 3}, // higher InDeg wins tie
+		{Name: "G", PageRank: 0.20, InDegree: 1},
+		{Name: "H", PageRank: 0.15, InDegree: 1},
+	}
+	shown, total := selectTopExported(in, 5)
+	if total != 12 {
+		t.Errorf("total = %d, want 12", total)
+	}
+	want := []string{"A", "B", "C", "D", "E"}
+	got := make([]string, len(shown))
+	for i, s := range shown {
+		got[i] = s.Name
+	}
+	if !equalSlice(got, want) {
+		t.Errorf("top 5 = %v, want %v", got, want)
+	}
+
+	// Sub-cap case: returns everything when len(in) <= n.
+	small := in[:3]
+	shown, total = selectTopExported(small, 5)
+	if total != 3 || len(shown) != 3 {
+		t.Errorf("sub-cap: total=%d len=%d, want 3/3", total, len(shown))
+	}
+
+	// Tiebreak: equal PageRank ranks by InDegree DESC.
+	tieIn := []store.GraphSymbol{
+		{Name: "Lower", PageRank: 0.5, InDegree: 2},
+		{Name: "Higher", PageRank: 0.5, InDegree: 5},
+	}
+	shown, _ = selectTopExported(tieIn, 2)
+	if shown[0].Name != "Higher" {
+		t.Errorf("tiebreak by InDegree: first = %q, want Higher", shown[0].Name)
+	}
+
+	// Tiebreak: equal PageRank+InDegree ranks by Name ASC.
+	tieIn = []store.GraphSymbol{
+		{Name: "Beta", PageRank: 0.5, InDegree: 2},
+		{Name: "Alpha", PageRank: 0.5, InDegree: 2},
+	}
+	shown, _ = selectTopExported(tieIn, 2)
+	if shown[0].Name != "Alpha" {
+		t.Errorf("tiebreak by Name: first = %q, want Alpha", shown[0].Name)
+	}
+
+	// Verify input is not mutated.
+	original := []store.GraphSymbol{
+		{Name: "Z", PageRank: 0.1},
+		{Name: "A", PageRank: 0.9},
+	}
+	_, _ = selectTopExported(original, 1)
+	if original[0].Name != "Z" || original[1].Name != "A" {
+		t.Errorf("input mutated: %v", original)
+	}
+}
+
+func TestIsFixtureDir(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"testdata", true},
+		{"testdata/foo", true},
+		{"internal/graph/testdata", true},
+		{"internal/graph/testdata/mooncake", true},
+		{"internal/graph/testdata/mooncake/shared", true},
+		{"internal/graph", false},
+		{"internal/mytestdata", false}, // not a segment boundary
+		{"testdataish/x", false},
+		{".", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isFixtureDir(tc.path); got != tc.want {
+			t.Errorf("isFixtureDir(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestFilterFixtureDirs(t *testing.T) {
+	in := []store.SummaryRow{
+		{Path: "cmd/dex"},
+		{Path: "internal/graph"},
+		{Path: "internal/graph/testdata/simple"},
+		{Path: "internal/graph/testdata/simple/store"},
+		{Path: "internal/store"},
+		{Path: "testdata"},
+	}
+	got := filterFixtureDirs(in)
+	want := []string{"cmd/dex", "internal/graph", "internal/store"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for i, p := range want {
+		if got[i].Path != p {
+			t.Errorf("[%d] got %q, want %q", i, got[i].Path, p)
+		}
+	}
+}
+
 func TestDisplayName(t *testing.T) {
 	cases := []struct {
 		name string
@@ -236,7 +484,7 @@ func TestRender_NonGoModuleHasNoGraphSections(t *testing.T) {
 	if !strings.Contains(body, "## Module: scripts") {
 		t.Errorf("scripts module section missing")
 	}
-	if strings.Contains(body, "**Exported API**") {
+	if strings.Contains(body, "### Exported API") {
 		t.Errorf("scripts should not have Exported API section without graph data")
 	}
 }
@@ -262,7 +510,7 @@ func TestRender_GraphSectionsAppearWhenSeeded(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := mustReadFile(t, res.OutputPath)
-	if !strings.Contains(body, "**Exported API**") {
+	if !strings.Contains(body, "### Exported API") {
 		t.Errorf("Exported API section missing\n%s", body)
 	}
 	if !strings.Contains(body, "DoThing") || !strings.Contains(body, "Helper") {
@@ -271,10 +519,10 @@ func TestRender_GraphSectionsAppearWhenSeeded(t *testing.T) {
 	if strings.Contains(body, "internalThing") {
 		t.Errorf("unexported symbol should not appear in Exported API")
 	}
-	if !strings.Contains(body, "**Key entry points**") {
+	if !strings.Contains(body, "### Key entry points") {
 		t.Errorf("Key entry points section missing (exported function exists)\n%s", body)
 	}
-	if !strings.Contains(body, "**Depends on**") {
+	if !strings.Contains(body, "### Depends on") {
 		t.Errorf("Depends on section missing\n%s", body)
 	}
 	if !strings.Contains(body, "external: context, fmt") {
@@ -303,7 +551,7 @@ func TestRender_InternalFallbackHeading(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := mustReadFile(t, res.OutputPath)
-	if !strings.Contains(body, "**Key internal hot spots**") {
+	if !strings.Contains(body, "### Key internal hot spots") {
 		t.Errorf("expected 'Key internal hot spots' fallback heading, body:\n%s", body)
 	}
 }

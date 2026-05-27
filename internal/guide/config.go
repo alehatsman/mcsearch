@@ -1,4 +1,4 @@
-// Package guide renders LLM_GUIDE.txt from existing summary chunks
+// Package guide renders LLM_GUIDE.md from existing summary chunks
 // (repo_summary + package_summary) produced by the dex indexer.
 //
 // The guide is a markdown overview the user can drop into a pre-commit
@@ -18,12 +18,12 @@ import (
 // Config controls guide output. Loaded from .dex/guide.toml at the
 // project root. All fields have defaults; the file is optional.
 type Config struct {
-	Output string // markdown destination, default "LLM_GUIDE.txt"
+	Output string // markdown destination, default "LLM_GUIDE.md"
 }
 
 // DefaultConfig returns the values used when .dex/guide.toml is absent.
 func DefaultConfig() Config {
-	return Config{Output: "LLM_GUIDE.txt"}
+	return Config{Output: "LLM_GUIDE.md"}
 }
 
 // LoadConfig reads .dex/guide.toml under root. Missing file is not an

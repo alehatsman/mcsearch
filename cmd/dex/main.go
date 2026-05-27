@@ -24,7 +24,7 @@
 //	reindex <path>|--all          Drop and re-embed.
 //	watch <path>                  Keep the index fresh as files change.
 //	clone <src> <dst>             Seed dst's index from src's (worktrees).
-//	guide <path>                  Render LLM_GUIDE.txt from existing summaries.
+//	guide <path>                  Render LLM_GUIDE.md from existing summaries.
 //	mcp                           Run as an MCP server over stdio.
 //	version                       Print the build version.
 package main
@@ -195,7 +195,7 @@ build / maintenance:
   dex clone  <src> <dst>             seed dst's index from src's (e.g. for a
                                           new git worktree); follow with
                                           `+"`dex index <dst>`"+` to reconcile
-  dex guide  <path>                  render LLM_GUIDE.txt from existing
+  dex guide  <path>                  render LLM_GUIDE.md from existing
                                           repo + package summaries (zero LLM
                                           calls — summaries are already
                                           chunks). Flags: --full, --check,
