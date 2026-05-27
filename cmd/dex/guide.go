@@ -89,7 +89,9 @@ func cmdGuide(ctx context.Context, args []string) error {
 		fmt.Printf("✓ guide up to date: %s\n", res.OutputPath)
 	case *dryRun:
 		if res.Dirty {
-			fmt.Printf("would re-render %s (%d modules)\n", res.OutputPath, res.ModuleCount)
+			bytes := len(res.Body)
+			fmt.Printf("would re-render %s (%d modules, %d bytes, ~%d tokens)\n",
+				res.OutputPath, res.ModuleCount, bytes, estimateTokens(bytes))
 		} else {
 			fmt.Printf("up to date: %s\n", res.OutputPath)
 		}
@@ -99,4 +101,12 @@ func cmdGuide(ctx context.Context, args []string) error {
 		fmt.Printf("up to date: %s\n", res.OutputPath)
 	}
 	return nil
+}
+
+// estimateTokens approximates the token count for a UTF-8 byte buffer.
+// 4 bytes/token is the conventional ballpark across OpenAI/Anthropic
+// English tokenizers and is good enough for "does this guide fit in a
+// 200k-token context window?" gut checks. Cheap; no tokenizer dep.
+func estimateTokens(bytes int) int {
+	return (bytes + 3) / 4
 }
