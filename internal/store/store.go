@@ -642,9 +642,23 @@ func (s *Store) TouchPath(ctx context.Context, path string, now time.Time) (int6
 
 // PruneUnseen deletes chunks last seen before `cutoff`. Call at the end
 // of a re-index to remove stale rows for files that disappeared.
+//
+// Excludes `package_summary` and `repo_summary` kinds. Defer-mode index
+// passes (used by `dex watch` and the MCP auto-watcher) skip Pass 5/6
+// entirely, which means they never bump last_seen_at on those rows —
+// pruning would then destroy good summaries every time the watcher
+// fires, and the next `dex guide` run would error with "no summaries".
+// The drainer's cascadePackageAndRepo regenerates them when their
+// content_sha1 cache key drifts; stale rows are unlikely (package
+// content rarely changes file-set composition) and a `dex reindex`
+// clears them. Better to keep a slightly-stale 32b-generated overview
+// than to drop the only one we have.
 func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
-		`DELETE FROM chunks WHERE last_seen_at < ?`, cutoff.UnixNano())
+		`DELETE FROM chunks
+		   WHERE last_seen_at < ?
+		     AND kind NOT IN ('package_summary','repo_summary')`,
+		cutoff.UnixNano())
 	if err != nil {
 		return 0, err
 	}
