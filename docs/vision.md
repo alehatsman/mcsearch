@@ -98,7 +98,13 @@ index_refresh             # force reindex (not yet shipped)
 2. ✅ **Add `graph_deps` and `graph_callers`/`graph_callees`.** Done
    for Go via `go/types`. Tree-sitter-based extraction for Python /
    JS / Rust is deferred — non-Go callers fall back to the ripgrep
-   `references` lane in the `ask` bundle.
+   `references` lane in the `ask` bundle. Implementation sketch when
+   it lands: per-language tree-sitter queries in
+   `internal/graph/sitter_calls.go` emitting `(caller, callee_name)`
+   pairs; resolution within a file is best-effort by name, cross-file
+   via the existing `graph_nodes` qualified-name index. Mark edges
+   with `provenance: "sitter"` metadata so the MCP layer can
+   distinguish them from the type-resolved Go edges.
 3. **Ship the LSP server, read-side only.** Hover-with-summary,
    semantic goto, find-related. No completion yet. Unlocks every
    editor without a per-editor extension.
@@ -108,6 +114,18 @@ index_refresh             # force reindex (not yet shipped)
    budget, prompt construction, FIM model selection are their own
    rabbit hole, and the failure mode (slow/wrong completions) is much
    more visible than a slow agent search. Last, not first.
+
+## Quality infrastructure
+
+Open work that protects retrieval quality across future changes:
+
+- **Retrieval regression harness.** A `testdata/queries.jsonl` of
+  `{repo, query, intent, expected_top_paths}` cases plus a test that
+  runs them against a known indexed fixture and asserts the expected
+  paths appear in top-k. Should compare scores across the RRF /
+  rerank legs so a future precision regression in any leg surfaces
+  loudly. Worth landing before the next retrieval-affecting change
+  (LSP-as-consumer for graph.callers, tree-sitter calls for non-Go).
 
 ## What this is *not*
 
