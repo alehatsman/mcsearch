@@ -280,7 +280,7 @@ func TestRender_NonGoModuleHasNoGraphSections(t *testing.T) {
 	if !strings.Contains(body, "## Module: scripts") {
 		t.Errorf("scripts module section missing")
 	}
-	if strings.Contains(body, "**Exported API**") {
+	if strings.Contains(body, "### Exported API") {
 		t.Errorf("scripts should not have Exported API section without graph data")
 	}
 }
@@ -306,7 +306,7 @@ func TestRender_GraphSectionsAppearWhenSeeded(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := mustReadFile(t, res.OutputPath)
-	if !strings.Contains(body, "**Exported API**") {
+	if !strings.Contains(body, "### Exported API") {
 		t.Errorf("Exported API section missing\n%s", body)
 	}
 	if !strings.Contains(body, "DoThing") || !strings.Contains(body, "Helper") {
@@ -315,10 +315,10 @@ func TestRender_GraphSectionsAppearWhenSeeded(t *testing.T) {
 	if strings.Contains(body, "internalThing") {
 		t.Errorf("unexported symbol should not appear in Exported API")
 	}
-	if !strings.Contains(body, "**Key entry points**") {
+	if !strings.Contains(body, "### Key entry points") {
 		t.Errorf("Key entry points section missing (exported function exists)\n%s", body)
 	}
-	if !strings.Contains(body, "**Depends on**") {
+	if !strings.Contains(body, "### Depends on") {
 		t.Errorf("Depends on section missing\n%s", body)
 	}
 	if !strings.Contains(body, "external: context, fmt") {
@@ -347,7 +347,7 @@ func TestRender_InternalFallbackHeading(t *testing.T) {
 		t.Fatal(err)
 	}
 	body := mustReadFile(t, res.OutputPath)
-	if !strings.Contains(body, "**Key internal hot spots**") {
+	if !strings.Contains(body, "### Key internal hot spots") {
 		t.Errorf("expected 'Key internal hot spots' fallback heading, body:\n%s", body)
 	}
 }

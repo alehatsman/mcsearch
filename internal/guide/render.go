@@ -173,8 +173,11 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 	usedBy := trimModulePrefix(usedByPkgs, modPath)
 
+	// Renderer-emitted sections use ### so they're visually distinct
+	// from the LLM-generated prose above, which often uses **bold**
+	// prefixes that would otherwise blend in.
 	if len(exported) > 0 {
-		fmt.Fprintf(b, "**Exported API** (%d)\n\n", len(exported))
+		fmt.Fprintf(b, "### Exported API (%d)\n\n", len(exported))
 		for _, s := range exported {
 			fmt.Fprintf(b, "- `%s` %s — %s:%d\n",
 				s.Kind, displayName(s), s.FilePath, s.StartLine)
@@ -187,7 +190,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 		if centralIsInternal {
 			heading = "Key internal hot spots"
 		}
-		fmt.Fprintf(b, "**%s** (top %d by PageRank)\n\n", heading, len(central))
+		fmt.Fprintf(b, "### %s (top %d by PageRank)\n\n", heading, len(central))
 		for _, s := range central {
 			fmt.Fprintf(b, "- `%s` — %s:%d — in-degree %d\n",
 				displayName(s), s.FilePath, s.StartLine, s.InDegree)
@@ -196,7 +199,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 
 	if proj, ext := splitImports(imports, modPath); len(proj)+len(ext) > 0 {
-		b.WriteString("**Depends on**\n\n")
+		b.WriteString("### Depends on\n\n")
 		if len(proj) > 0 {
 			fmt.Fprintf(b, "- project: %s\n", strings.Join(proj, ", "))
 		}
@@ -207,7 +210,7 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	}
 
 	if len(usedBy) > 0 {
-		fmt.Fprintf(b, "**Used by**\n\n- %s\n\n", strings.Join(usedBy, ", "))
+		fmt.Fprintf(b, "### Used by\n\n- %s\n\n", strings.Join(usedBy, ", "))
 	}
 	return nil
 }
