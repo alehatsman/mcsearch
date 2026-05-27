@@ -79,6 +79,11 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 		return res, fmt.Errorf("load package summaries: %w", err)
 	}
 	pkgRows = filterFixtureDirs(pkgRows)
+	centrality, err := st.PackageCentrality(ctx)
+	if err != nil {
+		return res, fmt.Errorf("load package centrality: %w", err)
+	}
+	sortPackagesByCentrality(pkgRows, centrality)
 	repoRows, err := st.SummariesByKindWithMeta(ctx, chunk.KindRepoSummary)
 	if err != nil {
 		return res, fmt.Errorf("load repo summary: %w", err)
@@ -554,6 +559,31 @@ func selectTopExported(in []store.GraphSymbol, n int) (shown []store.GraphSymbol
 		out = out[:n]
 	}
 	return out, total
+}
+
+// sortPackagesByCentrality reorders pkgs in place by descending
+// PackageCentrality score, with path ascending as tie-break so the
+// output stays deterministic for packages outside the graph (non-Go
+// dirs all score 0 and fall back to alphabetical, matching the prior
+// default).
+//
+// Mutates the slice — caller owns it. The root entry (".") sorts by
+// its centrality just like any other; the existing buildMarkdown rule
+// (skip "." when haveOverview) still applies after sorting.
+func sortPackagesByCentrality(pkgs []store.SummaryRow, centrality map[string]float64) {
+	score := func(p string) float64 {
+		if p == "" {
+			p = "."
+		}
+		return centrality[p]
+	}
+	sort.SliceStable(pkgs, func(i, j int) bool {
+		si, sj := score(pkgs[i].Path), score(pkgs[j].Path)
+		if si != sj {
+			return si > sj
+		}
+		return pkgs[i].Path < pkgs[j].Path
+	})
 }
 
 // filterFixtureDirs drops package_summary rows whose path lives inside

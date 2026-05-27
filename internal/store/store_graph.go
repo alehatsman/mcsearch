@@ -9,6 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"path"
 	"time"
 )
 
@@ -401,6 +402,39 @@ func scanSymbols(rows *sql.Rows) ([]GraphSymbol, error) {
 			return nil, err
 		}
 		out = append(out, g)
+	}
+	return out, rows.Err()
+}
+
+// PackageCentrality returns a per-directory PageRank sum across every
+// graph node whose source file lives under that directory (any depth).
+// Directories with no graph nodes are absent from the map.
+//
+// Used by the guide renderer to order module sections by architectural
+// weight rather than alphabetically. Sum (rather than max or top-k) is
+// a fair proxy: a package can earn rank by having one heavily-imported
+// symbol or many moderately-used ones, and both deserve to surface
+// above leaf packages.
+func (s *Store) PackageCentrality(ctx context.Context) (map[string]float64, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT file_path, pagerank FROM graph_nodes
+		WHERE file_path != '' AND pagerank > 0`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]float64)
+	for rows.Next() {
+		var fp string
+		var pr float64
+		if err := rows.Scan(&fp, &pr); err != nil {
+			return nil, err
+		}
+		// path.Dir treats forward slashes only; graph_nodes file_path is
+		// always stored that way (the indexer normalizes on write).
+		// Root-level files map to "." — the renderer's package_summary
+		// for the root project shares that key.
+		out[path.Dir(fp)] += pr
 	}
 	return out, rows.Err()
 }

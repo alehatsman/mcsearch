@@ -451,6 +451,44 @@ func TestRender_DryRunDoesNotWrite(t *testing.T) {
 	}
 }
 
+func TestSortPackagesByCentrality(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "internal/zeta"},
+		{Path: "internal/alpha"},
+		{Path: "internal/heavy"},
+		{Path: "scripts"},
+		{Path: "."},
+	}
+	centrality := map[string]float64{
+		"internal/heavy": 12.5,
+		"internal/alpha": 3.0,
+		"internal/zeta":  3.0, // tie with alpha → alpha wins on path
+		// scripts and "." absent → score 0
+	}
+	sortPackagesByCentrality(pkgs, centrality)
+	want := []string{"internal/heavy", "internal/alpha", "internal/zeta", ".", "scripts"}
+	for i, p := range pkgs {
+		if p.Path != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, p.Path, want[i])
+		}
+	}
+}
+
+func TestSortPackagesByCentrality_EmptyMapStaysAlphabetical(t *testing.T) {
+	pkgs := []store.SummaryRow{
+		{Path: "internal/zeta"},
+		{Path: "internal/alpha"},
+		{Path: "."},
+	}
+	sortPackagesByCentrality(pkgs, map[string]float64{})
+	want := []string{".", "internal/alpha", "internal/zeta"}
+	for i, p := range pkgs {
+		if p.Path != want[i] {
+			t.Errorf("position %d: got %q, want %q", i, p.Path, want[i])
+		}
+	}
+}
+
 func TestFindModule(t *testing.T) {
 	pkgs := []store.SummaryRow{
 		{Path: ".", Content: "root"},
@@ -530,6 +568,40 @@ func TestRender_ModuleUnknownErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "no module") {
 		t.Errorf("error %q should mention missing module", err)
+	}
+}
+
+func TestRender_ModulesOrderedByPageRank(t *testing.T) {
+	st, ctx, root := newGuideTestStore(t)
+	mustWrite(t, filepath.Join(root, "go.mod"), "module example.com/proj\n")
+	seedSummaries(t, st, map[string]string{
+		".":             "Overview.",
+		"internal/leaf": "Leaf prose.",
+		"internal/core": "Core prose.",
+		"internal/mid":  "Mid prose.",
+	})
+	// core has highest PageRank (heavily depended on); mid is moderate;
+	// leaf has none. Expected order: core, mid, leaf.
+	seedGraphPackage(t, st, "example.com/proj/internal/core",
+		[]graphNode{{name: "Big", kind: "function", file: "internal/core/x.go", line: 1, pagerank: 9.0}}, nil)
+	seedGraphPackage(t, st, "example.com/proj/internal/mid",
+		[]graphNode{{name: "Med", kind: "function", file: "internal/mid/x.go", line: 1, pagerank: 2.0}}, nil)
+	seedGraphPackage(t, st, "example.com/proj/internal/leaf",
+		[]graphNode{{name: "Small", kind: "function", file: "internal/leaf/x.go", line: 1, pagerank: 0}}, nil)
+
+	res, err := Render(ctx, st, root, DefaultConfig(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := mustReadFile(t, res.OutputPath)
+	idxCore := strings.Index(body, "## Module: internal/core")
+	idxMid := strings.Index(body, "## Module: internal/mid")
+	idxLeaf := strings.Index(body, "## Module: internal/leaf")
+	if idxCore < 0 || idxMid < 0 || idxLeaf < 0 {
+		t.Fatalf("missing module section: core=%d mid=%d leaf=%d", idxCore, idxMid, idxLeaf)
+	}
+	if !(idxCore < idxMid && idxMid < idxLeaf) {
+		t.Errorf("modules not ordered by PageRank: core=%d mid=%d leaf=%d", idxCore, idxMid, idxLeaf)
 	}
 }
 
@@ -759,6 +831,23 @@ func seedGraphPackage(t *testing.T, st *store.Store, pkgPath string, decls []gra
 	}
 	if err := st.GraphUpsertNodes(context.Background(), rows, now); err != nil {
 		t.Fatal(err)
+	}
+	// Centrality (pagerank, in_degree) lives in a separate column set
+	// that GraphUpsertNodes does not write — production code calls
+	// GraphSetCentrality after a centrality pass. Mirror that here so
+	// the pagerank/inDeg values declared by the test land in the DB.
+	cents := make([]store.GraphCentralityRow, 0, len(decls))
+	for _, d := range decls {
+		cents = append(cents, store.GraphCentralityRow{
+			ID:       pkgPath + "::decl::" + d.name,
+			InDegree: d.inDeg,
+			PageRank: d.pagerank,
+		})
+	}
+	if len(cents) > 0 {
+		if err := st.GraphSetCentrality(context.Background(), cents); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
