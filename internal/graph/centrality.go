@@ -47,11 +47,22 @@ type CentralityResult struct {
 // ComputeCentrality walks the `calls` edges and returns per-node
 // statistics keyed by node ID.
 //
-// Only edges with Kind == EdgeCalls are considered. Both endpoints
-// must resolve in the supplied nodes slice; dangling edges (a calls
-// edge pointing at a node we don't have) are skipped. Self-loops
-// (a calls a) are ignored for degree counting but kept for PageRank
-// — they're rare and PageRank handles them benignly.
+// Only edges with Kind == EdgeCalls are considered for direct counting.
+// On top of those, virtual forwarding edges are synthesized from each
+// interface method to every concrete method that implements it (via
+// EdgeImplements + EdgeHasMethod). Without this synthesis every method
+// reachable only through interface dispatch (e.g. concrete `Handler.Run`
+// implementations called as `h.Run()`) would report in-degree 0 and
+// look dead to a reader. Forwarding routes the interface method's
+// incoming weight to its implementers — uniform split across N impls
+// is the right semantic when the runtime type is unknown to the
+// extractor.
+//
+// Both endpoints of an edge (real or virtual) must resolve in the
+// supplied nodes slice; dangling edges (a calls edge pointing at a
+// node we don't have) are skipped. Self-loops (a calls a) are ignored
+// for degree counting but kept for PageRank — they're rare and PageRank
+// handles them benignly.
 func ComputeCentrality(nodes []Node, edges []Edge) map[string]CentralityResult {
 	nodeByID := make(map[string]Node, len(nodes))
 	for _, n := range nodes {
@@ -91,6 +102,37 @@ func ComputeCentrality(nodes []Node, edges []Edge) map[string]CentralityResult {
 			outAdj[e.SrcID] = map[string]struct{}{}
 		}
 		outAdj[e.SrcID][e.DstID] = struct{}{}
+	}
+
+	// Interface-dispatch forwarding. For each interface method I_M
+	// implemented by concrete method T_M, add a virtual edge I_M → T_M
+	// so that:
+	//   - T_M gets in-degree ≥ 1 (no longer looks like dead code)
+	//   - PageRank flows from a high-rank interface method to its
+	//     implementers, divided uniformly across the N impls
+	//
+	// CrossPkgCallers is intentionally NOT incremented from virtual
+	// edges: the real caller's package is no longer reachable through
+	// the forwarding hop, so we'd be guessing. Direct callers already
+	// credit M_I correctly.
+	forwarding := buildImplementsForwarding(nodeByID, edges)
+	for ifaceMID, concMIDs := range forwarding {
+		if _, ok := nodeByID[ifaceMID]; !ok {
+			continue
+		}
+		for _, concMID := range concMIDs {
+			if _, ok := nodeByID[concMID]; !ok {
+				continue
+			}
+			if concMID == ifaceMID {
+				continue
+			}
+			distinctEdge[edgeKey{src: ifaceMID, dst: concMID}] = struct{}{}
+			if outAdj[ifaceMID] == nil {
+				outAdj[ifaceMID] = map[string]struct{}{}
+			}
+			outAdj[ifaceMID][concMID] = struct{}{}
+		}
 	}
 
 	out := make(map[string]CentralityResult, len(distinctEdge))
@@ -170,4 +212,60 @@ func pageRank(nodes []Node, outAdj map[string]map[string]struct{}) map[string]fl
 		rank = next
 	}
 	return rank
+}
+
+// buildImplementsForwarding returns interface-method ID → list of
+// concrete-method IDs that should inherit the interface method's
+// incoming weight. Built from two edge kinds:
+//
+//	EdgeImplements:  concrete-type → interface-type
+//	EdgeHasMethod:   type → method (its receiver)
+//
+// For each (T implements I) pair, the interface's methods I.M are
+// matched to the concrete's methods T.M by Node.Name. Same-named
+// methods are joined; methods present on the interface but missing on
+// the concrete (would mean T doesn't actually implement I) are skipped
+// silently — go/types already verified the implements relationship.
+//
+// Generic methods are filtered out via the same "skip non-Named"
+// path that extractImplements uses, so this stays in sync with which
+// edges actually got emitted.
+func buildImplementsForwarding(nodeByID map[string]Node, edges []Edge) map[string][]string {
+	// typeID → method-name → method-node-ID. Built once from
+	// EdgeHasMethod edges so the implements loop below stays linear in
+	// the implements-edge count.
+	methodsByType := make(map[string]map[string]string)
+	for _, e := range edges {
+		if e.Kind != EdgeHasMethod {
+			continue
+		}
+		dst, ok := nodeByID[e.DstID]
+		if !ok {
+			continue
+		}
+		if methodsByType[e.SrcID] == nil {
+			methodsByType[e.SrcID] = make(map[string]string)
+		}
+		methodsByType[e.SrcID][dst.Name] = e.DstID
+	}
+
+	out := make(map[string][]string)
+	for _, e := range edges {
+		if e.Kind != EdgeImplements {
+			continue
+		}
+		concMethods := methodsByType[e.SrcID]
+		ifaceMethods := methodsByType[e.DstID]
+		if len(concMethods) == 0 || len(ifaceMethods) == 0 {
+			continue
+		}
+		for name, ifaceMID := range ifaceMethods {
+			concMID, ok := concMethods[name]
+			if !ok {
+				continue
+			}
+			out[ifaceMID] = append(out[ifaceMID], concMID)
+		}
+	}
+	return out
 }

@@ -759,10 +759,28 @@ func (ix *Indexer) Run(ctx context.Context) error {
 			if ctx.Err() != nil {
 				break
 			}
-			// Stable cache key: SHA of sorted per-file SHAs.
-			shas := make([]string, len(entries))
-			filePaths := make([]string, len(entries))
-			for i, e := range entries {
+			// Drop test-file entries so the package summary describes the
+			// production surface, not the test suite — without this, the
+			// LLM sees N file_summary rows shaped "this file tests X" and
+			// emits "package is a test suite for X". Test-only dirs
+			// (no production files) fall back to all entries so they
+			// still get a summary.
+			summarized := entries
+			prod := entries[:0:0]
+			for _, e := range entries {
+				if !ignore.IsTestPath(e.path) {
+					prod = append(prod, e)
+				}
+			}
+			if len(prod) > 0 {
+				summarized = prod
+			}
+			// Stable cache key: SHA of sorted per-file SHAs from the
+			// summarization set. Test-only changes don't bust the cache
+			// when production files exist.
+			shas := make([]string, len(summarized))
+			filePaths := make([]string, len(summarized))
+			for i, e := range summarized {
 				shas[i] = e.fileSHA
 				filePaths[i] = e.path
 			}
@@ -971,26 +989,43 @@ func summarizeChunk(ctx context.Context, cc *chat.Client, model, rel string, c c
 // from ground-truth graph data — if the LLM also emitted bold prefixes
 // they'd collide visually with the renderer's sections and a reader
 // couldn't tell which was authoritative. Prose-only solves that.
+//
+// MaxTokens was raised from 400 → 1200 to match summarizeRepo: smaller
+// models on large packages truncated mid-paragraph, and the truncation
+// guard above turned every such run into a dropped summary.
+//
+// The prompt explicitly forbids two failure modes seen in earlier runs:
+//
+//  1. "this package is a test suite for X" — happens when the input file
+//     summaries are dominated by *_test.go descriptions. The indexer
+//     filters test files out before calling this, but the prompt restates
+//     the rule as a belt-and-suspenders guard.
+//  2. echoing one file's summary as the package summary — happens when
+//     the model gives up on aggregation and mirrors back the first or
+//     longest input. The prompt explicitly requires synthesis.
+const summarizePackageSystem = "You are a code summarizer. Given prose summaries of all files in a code package or directory, " +
+	"write a 2-4 sentence prose paragraph describing what the package does. " +
+	"PROSE ONLY — single paragraph, no bullet points, no markdown headers, no **Bold:** section labels. " +
+	"Cover: the package's role in the production system, key exported types/functions inline, notable dependencies or constraints. " +
+	"Synthesize across files. Do NOT echo a single file's description as the package summary. " +
+	"Describe the package's production role. Test files are inputs to this prompt as evidence of behavior — never describe a package as 'a test suite' or 'tests for X'; describe what is being tested. " +
+	"Mention symbol names in `backticks`. " +
+	"No prose padding, no apologies, no restating the prompt. " +
+	"Only mention features explicitly present in the file summaries. Do not invent features " +
+	"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
+	"syntax highlighting; embeddings do not imply RAG). If a feature is not stated, omit it."
+
 func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, fileSummaries []string) (string, error) {
-	const system = "You are a code summarizer. Given prose summaries of all files in a code package or directory, " +
-		"write a 2-4 sentence prose paragraph describing what the package does. " +
-		"PROSE ONLY — single paragraph, no bullet points, no markdown headers, no **Bold:** section labels. " +
-		"Cover: the package's role in the system, key exported types/functions inline, notable dependencies or constraints. " +
-		"Mention symbol names in `backticks`. " +
-		"No prose padding, no apologies, no restating the prompt. " +
-		"Only mention features explicitly present in the file summaries. Do not invent features " +
-		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
-		"syntax highlighting; embeddings do not imply RAG). If a feature is not stated, omit it."
 	user := fmt.Sprintf("PACKAGE: %s\n\nFILE SUMMARIES:\n%s", dir, strings.Join(fileSummaries, "\n\n---\n\n"))
 	resp, err := cc.Generate(ctx, []chat.Message{
-		{Role: "system", Content: system},
+		{Role: "system", Content: summarizePackageSystem},
 		{Role: "user", Content: user},
-	}, chat.Options{Model: model, MaxTokens: 400, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: 1200, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
 	if resp.FinishReason == "length" {
-		return "", fmt.Errorf("package summary truncated at 400 tokens (finish_reason=length); raise MaxTokens or shorten input")
+		return "", fmt.Errorf("package summary truncated at 1200 tokens (finish_reason=length); raise MaxTokens or shorten input")
 	}
 	return strings.TrimSpace(resp.Content), nil
 }

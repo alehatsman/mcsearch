@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alehatsman/dex/internal/chunk"
+	"github.com/alehatsman/dex/internal/ignore"
 	"github.com/alehatsman/dex/internal/store"
 	"golang.org/x/sync/errgroup"
 )
@@ -528,9 +529,23 @@ func (ix *Indexer) planPackageJobs(
 		if ctx.Err() != nil {
 			break
 		}
-		shas := make([]string, len(entries))
-		filePaths := make([]string, len(entries))
-		for i, e := range entries {
+		// Drop test-file entries so the package summary describes the
+		// production surface, not the test suite. Test-only dirs fall
+		// back to all entries so they still get a summary. Mirror of
+		// the filter in Run()'s Pass 5.
+		summarized := entries
+		prod := entries[:0:0]
+		for _, e := range entries {
+			if !ignore.IsTestPath(e.path) {
+				prod = append(prod, e)
+			}
+		}
+		if len(prod) > 0 {
+			summarized = prod
+		}
+		shas := make([]string, len(summarized))
+		filePaths := make([]string, len(summarized))
+		for i, e := range summarized {
 			shas[i] = e.sha
 			filePaths[i] = e.path
 		}

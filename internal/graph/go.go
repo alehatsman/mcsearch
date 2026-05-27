@@ -108,6 +108,15 @@ func ExtractGo(ctx context.Context, projectRoot string) (*ExtractResult, error) 
 		extractPackage(p, projectRoot, modulePath, inTree, nodeSet, edgeSet)
 	}
 
+	// Cross-package implements pass. Needed because most real projects
+	// put the interface in one package and the impls in siblings (e.g.
+	// the kernel/handler pattern). The per-package extractImplements call
+	// inside extractPackage only catches same-package satisfaction, so
+	// without this step centrality propagation through interface dispatch
+	// (centrality.go: buildImplementsForwarding) sees zero forwarding for
+	// the most common case.
+	extractCrossPackageImplements(pkgs, inTree, modulePath, edgeSet)
+
 	res.Nodes = nodeSet.flatten()
 	res.Edges = edgeSet.flatten()
 	return res, nil
@@ -330,7 +339,7 @@ func extractFunc(
 //   - Bare `Foo()` in the same package      → function node in p.PkgPath
 //   - `pkg.Foo()` for an imported package   → function node in pkg
 //   - `x.Method()` (method on a value/ptr)  → method node on the
-//                                              receiver type's package
+//     receiver type's package
 //   - `iface.Method()`                       → interface-method node
 //
 // What gets skipped (silently — these are not graph-noteworthy):
@@ -677,6 +686,90 @@ func extractInterfaceMethods(
 				FilePath:  rel,
 				StartLine: startLine,
 				EndLine:   endLine,
+			})
+		}
+	}
+}
+
+// extractCrossPackageImplements walks every loaded package's scope and
+// emits EdgeImplements edges between concrete types and interfaces that
+// live in *different* packages. The per-package extractImplements call
+// only covers the same-package case; in practice most projects define
+// an interface in one package (e.g. `internal/actions.Handler`) and the
+// implementations in siblings (`internal/actions/file.Handler`, …),
+// which the per-package pass entirely misses.
+//
+// inTree bounds emissions to project-owned packages so we don't emit
+// implements edges pointing at unindexed stdlib interfaces — those
+// nodes don't exist in graph_nodes and the dangling edges would be
+// pruned by loadGraphView.
+//
+// Empty / zero-method interfaces (`any`, `interface{}`, type aliases of
+// either) are skipped: every concrete type "implements" them and the
+// edges are pure noise.
+func extractCrossPackageImplements(pkgs []*packages.Package, inTree map[string]bool, modulePath string, edges *edgeSet) {
+	type collected struct {
+		named *types.Named
+		pkg   string
+	}
+	var concretes, ifaces []collected
+	for _, p := range pkgs {
+		if p.Types == nil || p.PkgPath == "" {
+			continue
+		}
+		if !inTree[p.PkgPath] {
+			continue
+		}
+		scope := p.Types.Scope()
+		for _, name := range scope.Names() {
+			obj, ok := scope.Lookup(name).(*types.TypeName)
+			if !ok {
+				continue
+			}
+			named, ok := obj.Type().(*types.Named)
+			if !ok {
+				continue
+			}
+			if named.TypeParams() != nil {
+				continue
+			}
+			under := named.Underlying()
+			if iface, ok := under.(*types.Interface); ok {
+				if iface.NumMethods() == 0 {
+					continue
+				}
+				ifaces = append(ifaces, collected{named: named, pkg: p.PkgPath})
+			} else {
+				concretes = append(concretes, collected{named: named, pkg: p.PkgPath})
+			}
+		}
+	}
+
+	for _, conc := range concretes {
+		concType := conc.named.Obj().Type()
+		ptrType := types.NewPointer(concType)
+		for _, iface := range ifaces {
+			// Same-package satisfaction is already covered by
+			// extractImplements; skip it here so we don't emit
+			// duplicate edges (edgeSet would dedupe by EdgeID anyway,
+			// but skipping is cheaper than constructing+rejecting).
+			if conc.pkg == iface.pkg {
+				continue
+			}
+			ifaceT, ok := iface.named.Underlying().(*types.Interface)
+			if !ok {
+				continue
+			}
+			if !types.Implements(concType, ifaceT) && !types.Implements(ptrType, ifaceT) {
+				continue
+			}
+			concID := NodeID(modulePath, conc.pkg, NodeType, conc.named.Obj().Name())
+			ifaceID := NodeID(modulePath, iface.pkg, NodeType, iface.named.Obj().Name())
+			edges.add(Edge{
+				ID:    EdgeID(concID, EdgeImplements, ifaceID, "", 0),
+				Kind:  EdgeImplements,
+				SrcID: concID,
+				DstID: ifaceID,
 			})
 		}
 	}
