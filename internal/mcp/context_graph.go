@@ -27,6 +27,7 @@ package mcp
 
 import (
 	"context"
+	"sort"
 	"strings"
 
 	"github.com/alehatsman/dex/internal/graph"
@@ -328,9 +329,8 @@ func (e *graphEnricher) symbolNeighborhood() {
 }
 
 // packageRollup adds package + top-level type/function nodes for every
-// package surfaced by the semantic lane.
-func (e *graphEnricher) packageRollup() {
-	pkgs := packagesFromPaths(e.view, e.semHits)
+// package in pkgs.
+func (e *graphEnricher) packageRollup(pkgs map[string]struct{}) {
 	for pkg := range pkgs {
 		for _, n := range e.view.nodesByPackage[pkg] {
 			switch n.Kind {
@@ -339,6 +339,46 @@ func (e *graphEnricher) packageRollup() {
 			}
 		}
 	}
+}
+
+// architectureAnchorPkgs caps how many top-PageRank packages seed the
+// architecture rollup. Picked to fill maxGraphNodes/maxGraphEdges with
+// a meaningful cross-section without burning the budget on one package.
+const architectureAnchorPkgs = 8
+
+// topPackagesByPageRank returns the K packages with the highest
+// aggregate PageRank (sum across all nodes in the package). Used by
+// architecture rollup to seed the graph with the project's central
+// packages instead of depending on whatever semHits happened to surface
+// — a docs-dominated semantic lane otherwise collapses the rollup to
+// the single Go file that leaked in. Packages with zero aggregate
+// PageRank are skipped: missing centrality data means the graph rerank
+// pass hasn't run and seeding would be arbitrary.
+func (v *graphView) topPackagesByPageRank(k int) map[string]struct{} {
+	type pkgScore struct {
+		pkg string
+		pr  float64
+	}
+	scores := make([]pkgScore, 0, len(v.nodesByPackage))
+	for pkg, nodes := range v.nodesByPackage {
+		var sum float64
+		for _, n := range nodes {
+			sum += n.PageRank
+		}
+		if sum <= 0 {
+			continue
+		}
+		scores = append(scores, pkgScore{pkg, sum})
+	}
+	sort.Slice(scores, func(i, j int) bool { return scores[i].pr > scores[j].pr })
+	if len(scores) > k {
+		scores = scores[:k]
+	}
+	out := make(map[string]struct{}, len(scores))
+	for _, s := range scores {
+		out[s.pkg] = struct{}{}
+	}
+	return out
 }
 
 // callsExpansion walks the calls-edges in or out of the matched
@@ -420,12 +460,22 @@ func (e *graphEnricher) runForIntent(intent string) {
 			e.symbolNeighborhood()
 		}
 	case IntentArchitecture:
-		e.packageRollup()
+		// Anchor on the project's structurally central packages so the
+		// rollup stays useful even when the semantic lane skews to docs
+		// and surfaces only one Go file by accident. PageRank-derived
+		// anchors first; semHit-derived packages augment so a question
+		// that does point at a specific subsystem still pulls that
+		// subsystem in.
+		pkgs := e.view.topPackagesByPageRank(architectureAnchorPkgs)
+		for pkg := range packagesFromPaths(e.view, e.semHits) {
+			pkgs[pkg] = struct{}{}
+		}
+		e.packageRollup(pkgs)
 	case IntentPackageTopology:
 		e.packageTopology()
 	default:
 		e.symbolNeighborhood()
-		e.packageRollup()
+		e.packageRollup(packagesFromPaths(e.view, e.semHits))
 	}
 }
 

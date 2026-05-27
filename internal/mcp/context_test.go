@@ -404,6 +404,106 @@ func TestEnrichGraphCaps(t *testing.T) {
 	})
 }
 
+// TestArchitectureAnchorsOnPageRank guards the fix for the degenerate
+// case where a docs-dominated semantic lane collapses the architecture
+// rollup to whichever single Go file leaked through. With PageRank
+// anchoring the rollup must surface the project's central packages
+// even when semHits point only at non-Go paths.
+func TestArchitectureAnchorsOnPageRank(t *testing.T) {
+	view := &graphView{
+		nodesByID:        map[string]graphNode{},
+		nodesByName:      map[string][]graphNode{},
+		nodesByQualified: map[string][]graphNode{},
+		nodesByPackage:   map[string][]graphNode{},
+		nodesByPath:      map[string][]graphNode{},
+		edgesBySrc:       map[string][]graphEdge{},
+		edgesByDst:       map[string][]graphEdge{},
+		edgesByKind:      map[graph.EdgeKind][]graphEdge{},
+	}
+	// Three packages, descending centrality: core (hub), mid, tangent.
+	type pkgSpec struct {
+		path string
+		file string
+		pr   float64
+	}
+	specs := []pkgSpec{
+		{"example.com/core", "core/core.go", 0.9},
+		{"example.com/mid", "mid/mid.go", 0.4},
+		{"example.com/tangent", "tangent/tangent.go", 0.05},
+	}
+	for _, s := range specs {
+		pkgNode := graphNode{
+			ID: s.path + "::pkg", Kind: graph.NodePackage,
+			Name: pkgTail(s.path), PackagePath: s.path,
+			FilePath: s.file, PageRank: s.pr,
+		}
+		view.nodesByID[pkgNode.ID] = pkgNode
+		view.nodesByPackage[s.path] = append(view.nodesByPackage[s.path], pkgNode)
+		view.nodesByPath[s.file] = append(view.nodesByPath[s.file], pkgNode)
+	}
+	// semHits point only at a doc file — no graph nodes there.
+	out := &ContextOutput{}
+	enrichGraph(out, IntentArchitecture, view, []SemHit{{Path: "README.md"}}, nil)
+	if out.Graph == nil {
+		t.Fatal("expected graph rollup anchored on PageRank when semHits are docs")
+	}
+	got := map[string]bool{}
+	for _, n := range out.Graph.Nodes {
+		got[n.ID] = true
+	}
+	for _, want := range []string{"core", "mid", "tangent"} {
+		if !got[want] {
+			t.Errorf("expected pkg %q in rollup; got nodes %v", want, out.Graph.Nodes)
+		}
+	}
+}
+
+// TestArchitectureAnchorAugmentedBySemHits verifies that the PageRank
+// anchor union still pulls in subsystem-specific packages when the user
+// names one. The architecture rollup should be hub ∪ requested.
+func TestArchitectureAnchorAugmentedBySemHits(t *testing.T) {
+	view := &graphView{
+		nodesByID:        map[string]graphNode{},
+		nodesByName:      map[string][]graphNode{},
+		nodesByQualified: map[string][]graphNode{},
+		nodesByPackage:   map[string][]graphNode{},
+		nodesByPath:      map[string][]graphNode{},
+		edgesBySrc:       map[string][]graphEdge{},
+		edgesByDst:       map[string][]graphEdge{},
+		edgesByKind:      map[graph.EdgeKind][]graphEdge{},
+	}
+	hub := graphNode{
+		ID: "hub::pkg", Kind: graph.NodePackage,
+		Name: "hub", PackagePath: "example.com/hub",
+		FilePath: "hub/hub.go", PageRank: 0.9,
+	}
+	leaf := graphNode{
+		ID: "leaf::pkg", Kind: graph.NodePackage,
+		Name: "leaf", PackagePath: "example.com/leaf",
+		FilePath: "leaf/leaf.go", PageRank: 0, // no centrality
+	}
+	for _, n := range []graphNode{hub, leaf} {
+		view.nodesByID[n.ID] = n
+		view.nodesByPackage[n.PackagePath] = append(view.nodesByPackage[n.PackagePath], n)
+		view.nodesByPath[n.FilePath] = append(view.nodesByPath[n.FilePath], n)
+	}
+	out := &ContextOutput{}
+	enrichGraph(out, IntentArchitecture, view, []SemHit{{Path: "leaf/leaf.go"}}, nil)
+	if out.Graph == nil {
+		t.Fatal("expected graph rollup")
+	}
+	got := map[string]bool{}
+	for _, n := range out.Graph.Nodes {
+		got[n.ID] = true
+	}
+	if !got["hub"] {
+		t.Error("expected hub package via PageRank anchor")
+	}
+	if !got["leaf"] {
+		t.Error("expected leaf package via semHit augmentation")
+	}
+}
+
 // ─── inlineSuggestedReads ─────────────────────────────────────────────────
 
 func TestInlineSuggestedReadsBasic(t *testing.T) {
