@@ -36,6 +36,13 @@ type Options struct {
 // in noise; users can chase further via `dex graph callers`.
 const topCentralLimit = 5
 
+// topExportedLimit caps the "Exported API" list per module. Without
+// this, a large package like internal/store dumps 50+ flat bullets and
+// the actually-important symbols get buried. Ten is enough to convey
+// "what this package offers" — readers chase the rest via `dex search
+// symbol`.
+const topExportedLimit = 10
+
 // Render reads the existing repo_summary + package_summary chunks from
 // the store, augments each module with ground-truth graph data
 // (exported symbols, top-centrality entry points, imports, used-by),
@@ -177,10 +184,18 @@ func appendGraphSections(ctx context.Context, b *strings.Builder, st *store.Stor
 	// from the LLM-generated prose above, which often uses **bold**
 	// prefixes that would otherwise blend in.
 	if len(exported) > 0 {
-		fmt.Fprintf(b, "### Exported API (%d)\n\n", len(exported))
-		for _, s := range exported {
+		shown, total := selectTopExported(exported, topExportedLimit)
+		if total > topExportedLimit {
+			fmt.Fprintf(b, "### Exported API (top %d of %d by PageRank)\n\n", len(shown), total)
+		} else {
+			fmt.Fprintf(b, "### Exported API (%d)\n\n", total)
+		}
+		for _, s := range shown {
 			fmt.Fprintf(b, "- `%s` %s — %s:%d\n",
 				s.Kind, displayName(s), s.FilePath, s.StartLine)
+		}
+		if total > topExportedLimit {
+			fmt.Fprintf(b, "- _…and %d more — `dex search symbol <name>` for the rest._\n", total-topExportedLimit)
 		}
 		b.WriteString("\n")
 	}
@@ -291,6 +306,32 @@ func readModulePath(root string) string {
 		}
 	}
 	return ""
+}
+
+// selectTopExported sorts symbols by PageRank DESC, InDegree DESC, Name
+// ASC and returns the top n (or all if len(in) <= n). The total count
+// is returned alongside so callers can render a "N of M" header.
+//
+// Ordering by centrality makes a truncated list meaningful — the
+// retained symbols are the most architecturally significant ones,
+// not just the alphabetically-earliest.
+func selectTopExported(in []store.GraphSymbol, n int) (shown []store.GraphSymbol, total int) {
+	total = len(in)
+	out := make([]store.GraphSymbol, len(in))
+	copy(out, in)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PageRank != out[j].PageRank {
+			return out[i].PageRank > out[j].PageRank
+		}
+		if out[i].InDegree != out[j].InDegree {
+			return out[i].InDegree > out[j].InDegree
+		}
+		return out[i].Name < out[j].Name
+	})
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out, total
 }
 
 // filterFixtureDirs drops package_summary rows whose path lives inside

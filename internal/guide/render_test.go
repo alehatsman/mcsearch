@@ -91,6 +91,74 @@ func TestTrimModulePrefix(t *testing.T) {
 	}
 }
 
+func TestSelectTopExported(t *testing.T) {
+	// 12 symbols with varied PageRank/InDegree/Name. Top 5 by PageRank
+	// must be A, B, C, D, E (ties broken by InDegree then Name).
+	in := []store.GraphSymbol{
+		{Name: "Z", PageRank: 0.10, InDegree: 1},
+		{Name: "A", PageRank: 0.90, InDegree: 9},
+		{Name: "Y", PageRank: 0.05, InDegree: 0},
+		{Name: "B", PageRank: 0.80, InDegree: 8},
+		{Name: "C", PageRank: 0.70, InDegree: 7},
+		{Name: "D", PageRank: 0.60, InDegree: 6},
+		{Name: "E", PageRank: 0.50, InDegree: 5},
+		{Name: "F", PageRank: 0.40, InDegree: 4},
+		{Name: "Tie1", PageRank: 0.30, InDegree: 2},
+		{Name: "Tie2", PageRank: 0.30, InDegree: 3}, // higher InDeg wins tie
+		{Name: "G", PageRank: 0.20, InDegree: 1},
+		{Name: "H", PageRank: 0.15, InDegree: 1},
+	}
+	shown, total := selectTopExported(in, 5)
+	if total != 12 {
+		t.Errorf("total = %d, want 12", total)
+	}
+	want := []string{"A", "B", "C", "D", "E"}
+	got := make([]string, len(shown))
+	for i, s := range shown {
+		got[i] = s.Name
+	}
+	if !equalSlice(got, want) {
+		t.Errorf("top 5 = %v, want %v", got, want)
+	}
+
+	// Sub-cap case: returns everything when len(in) <= n.
+	small := in[:3]
+	shown, total = selectTopExported(small, 5)
+	if total != 3 || len(shown) != 3 {
+		t.Errorf("sub-cap: total=%d len=%d, want 3/3", total, len(shown))
+	}
+
+	// Tiebreak: equal PageRank ranks by InDegree DESC.
+	tieIn := []store.GraphSymbol{
+		{Name: "Lower", PageRank: 0.5, InDegree: 2},
+		{Name: "Higher", PageRank: 0.5, InDegree: 5},
+	}
+	shown, _ = selectTopExported(tieIn, 2)
+	if shown[0].Name != "Higher" {
+		t.Errorf("tiebreak by InDegree: first = %q, want Higher", shown[0].Name)
+	}
+
+	// Tiebreak: equal PageRank+InDegree ranks by Name ASC.
+	tieIn = []store.GraphSymbol{
+		{Name: "Beta", PageRank: 0.5, InDegree: 2},
+		{Name: "Alpha", PageRank: 0.5, InDegree: 2},
+	}
+	shown, _ = selectTopExported(tieIn, 2)
+	if shown[0].Name != "Alpha" {
+		t.Errorf("tiebreak by Name: first = %q, want Alpha", shown[0].Name)
+	}
+
+	// Verify input is not mutated.
+	original := []store.GraphSymbol{
+		{Name: "Z", PageRank: 0.1},
+		{Name: "A", PageRank: 0.9},
+	}
+	_, _ = selectTopExported(original, 1)
+	if original[0].Name != "Z" || original[1].Name != "A" {
+		t.Errorf("input mutated: %v", original)
+	}
+}
+
 func TestIsFixtureDir(t *testing.T) {
 	cases := []struct {
 		path string
