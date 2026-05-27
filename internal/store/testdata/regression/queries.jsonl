@@ -1,0 +1,18 @@
+{"name": "graph-traversal-semantic", "text": "graph traversal", "tags": ["graph", "traversal"], "k": 5, "expected_paths": ["graph/bfs.go", "graph/dfs.go"]}
+{"name": "graph-cycle-mixed", "text": "detectCycle visited", "tags": ["graph", "cycle"], "k": 5, "expected_paths": ["graph/cycle.go"]}
+{"name": "graph-ranking-semantic", "text": "centrality scoring", "tags": ["graph", "ranking", "centrality"], "k": 5, "expected_paths": ["graph/pagerank.go"]}
+{"name": "jwt-validation-lexical", "text": "validateToken parts decodeClaims", "tags": ["unrelated"], "k": 5, "expected_paths": ["auth/jwt.go"]}
+{"name": "session-creation-semantic", "text": "create new user session", "tags": ["auth", "session", "creation"], "k": 5, "expected_paths": ["auth/session.go"]}
+{"name": "password-hashing-hybrid", "text": "bcrypt salt", "tags": ["auth", "password", "hashing"], "k": 5, "expected_paths": ["auth/password.go"]}
+{"name": "token-refresh-semantic", "text": "rotate token", "tags": ["auth", "tokens", "refresh", "rotation"], "k": 5, "expected_paths": ["auth/refresh.go"]}
+{"name": "lru-lookup-hybrid", "text": "LRU MoveToFront", "tags": ["cache", "lru", "lookup"], "k": 5, "expected_paths": ["cache/lru.go"]}
+{"name": "ttl-expiration-semantic", "text": "cache entry expiration", "tags": ["cache", "expiration", "ttl"], "k": 5, "expected_paths": ["cache/ttl.go"]}
+{"name": "sharded-cache-lexical", "text": "shard RLock hash", "tags": ["unrelated"], "k": 5, "expected_paths": ["cache/sharded.go"]}
+{"name": "sqlite-open-lexical", "text": "sql.Open sqlite3 WAL", "tags": ["unrelated"], "k": 5, "expected_paths": ["store/sqlite.go"]}
+{"name": "fts-bm25-semantic", "text": "full-text lexical scoring", "tags": ["storage", "fts", "bm25", "lexical"], "k": 5, "expected_paths": ["store/fts.go"]}
+{"name": "embed-batch-hybrid", "text": "batchEmbed batching", "tags": ["embedding", "batching"], "k": 5, "expected_paths": ["embed/batch.go"]}
+{"name": "rerank-crossenc-semantic", "text": "cross-encoder pair scoring", "tags": ["reranking", "crossencoder", "scoring"], "k": 5, "expected_paths": ["rerank/crossenc.go"]}
+{"name": "debounce-events-semantic", "text": "filesystem event debounce", "tags": ["filesystem", "debounce", "events"], "k": 5, "expected_paths": ["watch/debounce.go"]}
+{"name": "gitignore-loading-lexical", "text": "loadIgnore gitignore parseGitignore", "tags": ["unrelated"], "k": 5, "expected_paths": ["watch/ignore.go"]}
+{"name": "mcp-ask-router-semantic", "text": "ask router retrieval", "tags": ["mcp", "ask", "router", "retrieval"], "k": 5, "expected_paths": ["mcp/ask.go"]}
+{"name": "treesitter-chunk-hybrid", "text": "tree-sitter parser declarations", "tags": ["chunking", "treesitter", "parsing"], "k": 5, "expected_paths": ["chunk/treesitter.go"]}

@@ -119,13 +119,17 @@ index_refresh             # force reindex (not yet shipped)
 
 Open work that protects retrieval quality across future changes:
 
-- **Retrieval regression harness.** A `testdata/queries.jsonl` of
-  `{repo, query, intent, expected_top_paths}` cases plus a test that
-  runs them against a known indexed fixture and asserts the expected
-  paths appear in top-k. Should compare scores across the RRF /
-  rerank legs so a future precision regression in any leg surfaces
-  loudly. Worth landing before the next retrieval-affecting change
-  (LSP-as-consumer for graph.callers, tree-sitter calls for non-Go).
+- ✅ **Retrieval regression harness.** Shipped in
+  `internal/store/regression_test.go` with the fixture under
+  `internal/store/testdata/regression/`. Synthetic 25-chunk corpus +
+  18 queries spanning pure-semantic, pure-lexical, and hybrid cases,
+  driven by a deterministic two-hash mock embedder so the harness is
+  hermetic and runs in `go test` in under a second. Asserts expected
+  paths land in fused top-k per query and prints a per-leg rank table
+  (`semantic / bm25 / fused / rerank`) on failure so the regressing
+  leg is pinpointable. A second test wires a substring-counting stub
+  reranker and asserts the rerank path stays alive across the suite.
+  See the test file's package comment for how to add a query.
 
 ## What this is *not*
 
