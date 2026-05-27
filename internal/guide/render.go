@@ -51,6 +51,7 @@ func Render(ctx context.Context, st *store.Store, root string, cfg Config, opts 
 	if err != nil {
 		return res, fmt.Errorf("load package summaries: %w", err)
 	}
+	pkgRows = filterFixtureDirs(pkgRows)
 	repoRows, err := st.SummariesByKindWithMeta(ctx, chunk.KindRepoSummary)
 	if err != nil {
 		return res, fmt.Errorf("load repo summary: %w", err)
@@ -278,6 +279,31 @@ func readModulePath(root string) string {
 		}
 	}
 	return ""
+}
+
+// filterFixtureDirs drops package_summary rows whose path lives inside
+// a `testdata/` segment. Those are fixtures consumed by tests, not part
+// of the project's shipped surface — surfacing them as "modules" in
+// LLM_GUIDE inflates the table of contents with noise.
+func filterFixtureDirs(rows []store.SummaryRow) []store.SummaryRow {
+	out := rows[:0]
+	for _, r := range rows {
+		if isFixtureDir(r.Path) {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// isFixtureDir reports whether p contains a `testdata/` path segment.
+// Anchored to segment boundaries so a directory literally named
+// `mytestdata` doesn't get caught.
+func isFixtureDir(p string) bool {
+	if p == "testdata" || strings.HasPrefix(p, "testdata/") {
+		return true
+	}
+	return strings.Contains(p, "/testdata/") || strings.HasSuffix(p, "/testdata")
 }
 
 func maxSeen(lists ...[]store.SummaryRow) int64 {

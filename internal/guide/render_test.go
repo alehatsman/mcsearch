@@ -91,6 +91,50 @@ func TestTrimModulePrefix(t *testing.T) {
 	}
 }
 
+func TestIsFixtureDir(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"testdata", true},
+		{"testdata/foo", true},
+		{"internal/graph/testdata", true},
+		{"internal/graph/testdata/mooncake", true},
+		{"internal/graph/testdata/mooncake/shared", true},
+		{"internal/graph", false},
+		{"internal/mytestdata", false}, // not a segment boundary
+		{"testdataish/x", false},
+		{".", false},
+		{"", false},
+	}
+	for _, tc := range cases {
+		if got := isFixtureDir(tc.path); got != tc.want {
+			t.Errorf("isFixtureDir(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestFilterFixtureDirs(t *testing.T) {
+	in := []store.SummaryRow{
+		{Path: "cmd/dex"},
+		{Path: "internal/graph"},
+		{Path: "internal/graph/testdata/simple"},
+		{Path: "internal/graph/testdata/simple/store"},
+		{Path: "internal/store"},
+		{Path: "testdata"},
+	}
+	got := filterFixtureDirs(in)
+	want := []string{"cmd/dex", "internal/graph", "internal/store"}
+	if len(got) != len(want) {
+		t.Fatalf("got %d rows, want %d: %+v", len(got), len(want), got)
+	}
+	for i, p := range want {
+		if got[i].Path != p {
+			t.Errorf("[%d] got %q, want %q", i, got[i].Path, p)
+		}
+	}
+}
+
 func TestDisplayName(t *testing.T) {
 	cases := []struct {
 		name string
