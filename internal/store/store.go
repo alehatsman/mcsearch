@@ -25,6 +25,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"github.com/alehatsman/dex/internal/rerank"
 	sqlite_vec "github.com/asg017/sqlite-vec-go-bindings/cgo"
@@ -52,6 +53,22 @@ const (
 // the index (`dex reindex <path>`) before continuing.
 var ErrEmbedModelMismatch = errors.New("embedding model mismatch")
 
+// FTSMode controls how buildFTSQuery joins tokens in the MATCH
+// expression: AND for precision, OR for recall, Auto picks per-query.
+type FTSMode int
+
+const (
+	// FTSModeAuto: AND when the query has 1–2 tokens (symbol-shaped
+	// lookups), OR when it has 3+ tokens (natural-language questions
+	// where strict AND too often returns zero hits).
+	FTSModeAuto FTSMode = iota
+	// FTSModeAND: every token must appear. Best precision, worst recall.
+	FTSModeAND
+	// FTSModeOR: any token can match. Best recall, worst precision —
+	// bad hits get sunk by their BM25 rank in the fused score.
+	FTSModeOR
+)
+
 // Options influence the runtime behaviour of an opened Store.
 // All fields are optional; the zero value matches the default
 // (hybrid BM25+semantic search enabled).
@@ -61,6 +78,10 @@ type Options struct {
 	// or for indexes built before the chunks_fts migration on a
 	// truly old SQLite without FTS5 (unlikely).
 	DisableBM25 bool
+
+	// FTSMode picks the join operator for FTS tokens. Zero =
+	// FTSModeAuto (recommended). See FTSMode for semantics.
+	FTSMode FTSMode
 
 	// Reranker, when non-nil, reorders the fused candidate pool via a
 	// cross-encoder before truncating to k. Nil = today's behaviour
@@ -1298,7 +1319,7 @@ func (s *Store) scoreSemanticForIDs(ctx context.Context, queryVec []float32, ids
 // `orphan` chunks (top-level const/var/import we'd lose otherwise)
 // keep their full BM25 weight.
 func (s *Store) scoreBM25(ctx context.Context, queryText string, limit int) ([]scored, error) {
-	matchExpr := buildFTSQuery(queryText)
+	matchExpr := buildFTSQuery(queryText, s.opts.FTSMode)
 	if matchExpr == "" {
 		return nil, nil
 	}
@@ -1333,35 +1354,108 @@ func (s *Store) scoreBM25(ctx context.Context, queryText string, limit int) ([]s
 }
 
 // buildFTSQuery turns a natural-language query into an FTS5 MATCH
-// expression. We split on whitespace, lower-case each token, drop
-// anything that isn't safe to embed as a quoted FTS5 string, and OR
-// them together. The OR (vs FTS5's default AND) trades precision for
-// recall — bad lexical matches are sunk by their BM25 rank anyway,
-// while AND would too often return zero hits on natural-language
-// queries like "function that validates a token".
-func buildFTSQuery(q string) string {
-	fields := strings.Fields(q)
-	toks := make([]string, 0, len(fields))
-	for _, f := range fields {
-		// Strip surrounding punctuation so "validateToken." behaves
-		// like "validateToken". Keep internal alphanumerics + `_`.
+// expression.
+//
+// Tokenization mirrors the schema's `unicode61` tokenizer: anything
+// that's a Unicode letter, digit, or `_` is part of an identifier.
+// This keeps non-ASCII names (`ParseRFC3339Núñez`, `ユーザー認証`) from
+// being silently dropped — the ASCII-only filter that used to live
+// here lost those tokens entirely, so BM25 contributed nothing on
+// non-ASCII queries.
+//
+// Quoted substrings survive as FTS5 phrases: `"package boundary"` in
+// the user query becomes `"package boundary"` in the MATCH expression
+// (multi-token, ordered). Useful for forcing precision on a known
+// phrase even when the overall mode is OR.
+//
+// Join operator follows mode:
+//   - Auto: AND for 1–2 terms (symbol-shaped lookup), OR for 3+
+//     (natural-language question where AND would too often return zero
+//     hits).
+//   - AND / OR: explicit override.
+func buildFTSQuery(q string, mode FTSMode) string {
+	isIdentRune := func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_'
+	}
+	// tokenize splits a span on non-identifier runes, dropping single-rune
+	// tokens (they're noisy in BM25 and FTS5 phrases must be non-empty).
+	tokenize := func(span string) []string {
+		var toks []string
 		var b strings.Builder
-		for _, r := range f {
-			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
-				(r >= '0' && r <= '9') || r == '_' {
-				b.WriteRune(r)
+		flush := func() {
+			t := b.String()
+			b.Reset()
+			runes := 0
+			for range t {
+				runes++
+				if runes >= 2 {
+					break
+				}
+			}
+			if runes >= 2 {
+				toks = append(toks, t)
 			}
 		}
-		t := b.String()
-		if len(t) < 2 {
+		for _, r := range span {
+			if isIdentRune(r) {
+				b.WriteRune(r)
+			} else {
+				flush()
+			}
+		}
+		flush()
+		return toks
+	}
+
+	var terms []string // each is a complete FTS5 term: `"word"` or `"w1 w2"`
+	runes := []rune(q)
+	i := 0
+	for i < len(runes) {
+		if unicode.IsSpace(runes[i]) {
+			i++
 			continue
 		}
-		toks = append(toks, `"`+t+`"`)
+		if runes[i] == '"' {
+			// Find closing quote; tokenize contents and emit one phrase.
+			j := i + 1
+			for j < len(runes) && runes[j] != '"' {
+				j++
+			}
+			phraseToks := tokenize(string(runes[i+1 : j]))
+			if len(phraseToks) > 0 {
+				terms = append(terms, `"`+strings.Join(phraseToks, " ")+`"`)
+			}
+			i = j
+			if i < len(runes) {
+				i++ // step past the closing quote (or end of input)
+			}
+			continue
+		}
+		// Read until next whitespace or quote.
+		start := i
+		for i < len(runes) && !unicode.IsSpace(runes[i]) && runes[i] != '"' {
+			i++
+		}
+		for _, t := range tokenize(string(runes[start:i])) {
+			terms = append(terms, `"`+t+`"`)
+		}
 	}
-	if len(toks) == 0 {
+
+	if len(terms) == 0 {
 		return ""
 	}
-	return strings.Join(toks, " OR ")
+	joiner := " OR "
+	switch mode {
+	case FTSModeAND:
+		joiner = " AND "
+	case FTSModeOR:
+		joiner = " OR "
+	default: // Auto
+		if len(terms) < 3 {
+			joiner = " AND "
+		}
+	}
+	return strings.Join(terms, joiner)
 }
 
 // scoreContext carries the per-id score maps produced by the hybrid /

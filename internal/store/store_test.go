@@ -472,9 +472,9 @@ func TestHybridSearchBM25Surfaces(t *testing.T) {
 		t.Fatalf("semantic-only should NOT put auth.go first (got top=%q)", semHits[0].Path)
 	}
 
-	// Hybrid — same query vector, but with the natural-language text
-	// that contains "validateToken". RRF should lift auth.go to #1.
-	hybridHits, err := st.Search(ctx, queryVec, "validateToken function", 5)
+	// Hybrid — same query vector, but with the literal identifier
+	// "validateToken" in the text leg. RRF should lift auth.go to #1.
+	hybridHits, err := st.Search(ctx, queryVec, "validateToken", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
