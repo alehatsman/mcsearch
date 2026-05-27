@@ -319,7 +319,7 @@ func (s *Server) contextRouter(ctx context.Context, _ *sdk.CallToolRequest, in C
 		out.Endpoint = s.EmbedClient.Endpoint()
 	}
 	if intent == IntentArchitecture || intent == IntentPackageTopology {
-		summaryHits := s.runSummaryLane(ctx, st, in.Question, k)
+		summaryHits := s.runSummaryLane(ctx, st, in.Question, k, graphView)
 		semHits = mergeSummaryHits(summaryHits, semHits, k)
 	}
 	out.SemanticHits = semHits
@@ -593,8 +593,11 @@ func (s *Server) runSymbolLane(ctx context.Context, st *store.Store, cand intent
 // runSummaryLane runs a summary-only semantic search (file_summary +
 // package_summary chunks). Used by architecture/package_topology intents to
 // surface prose overviews that may not win the general top-k race against
-// higher-scoring code chunks.
-func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question string, k int) []SemHit {
+// higher-scoring code chunks. Demotes summaries whose path is neither a
+// recognized architecture doc nor backed by graph nodes — keeps
+// junk text files (e.g. ASCII-art .txt) from outranking real
+// architecture docs via lexical project-name overlap.
+func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question string, k int, view *graphView) []SemHit {
 	vecs, err := s.EmbedClient.Embed(ctx, []string{question})
 	if err != nil {
 		return nil
@@ -603,6 +606,7 @@ func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question s
 	if err != nil || len(hits) == 0 {
 		return nil
 	}
+	hits = demoteNonArchitecturalSummaries(hits, view)
 	out := make([]SemHit, 0, len(hits))
 	for _, h := range hits {
 		// Summary chunks store synthesized prose in Content. Use it
@@ -620,6 +624,66 @@ func (s *Server) runSummaryLane(ctx context.Context, st *store.Store, question s
 		})
 	}
 	return out
+}
+
+// summaryJunkPenalty is the cosine penalty applied to file_summary
+// chunks that look non-architectural for architecture/topology intents.
+// Picked to flip a marginal junk-file lead (e.g. a project-name lexical
+// hit at 0.60) below real architecture docs scoring in the 0.45-0.55
+// band, without erasing the chunk entirely — if nothing else competes
+// it still surfaces.
+const summaryJunkPenalty = 0.20
+
+// architectureDocBasenames are filename stems (lowercased, without
+// extension) that mark a file as a deliberate structural document.
+// A file with one of these names ranks on its own merit even when it
+// has no graph presence; otherwise file_summary hits gate on graph
+// presence to filter random text/script files.
+var architectureDocBasenames = map[string]struct{}{
+	"readme": {}, "architecture": {}, "arch": {}, "modules": {},
+	"design": {}, "agent": {}, "agents": {}, "claude": {},
+	"contributing": {}, "overview": {}, "structure": {}, "layout": {},
+}
+
+// isArchitectureDocPath reports whether the path's basename matches a
+// recognized architecture/overview doc name. Case-insensitive,
+// extension-stripped.
+func isArchitectureDocPath(path string) bool {
+	base := strings.ToLower(filepath.Base(path))
+	if dot := strings.LastIndex(base, "."); dot > 0 {
+		base = base[:dot]
+	}
+	_, ok := architectureDocBasenames[base]
+	return ok
+}
+
+// hasGraphPresence reports whether the path contributed any nodes to
+// the graph view. For architecture intent this is a proxy for "is this
+// file structurally meaningful" — text files, scripts, ASCII art and
+// other non-code paths drop out.
+func hasGraphPresence(view *graphView, path string) bool {
+	if view == nil {
+		return false
+	}
+	return len(view.nodesByPath[path]) > 0
+}
+
+// demoteNonArchitecturalSummaries down-weights summary hits whose path
+// is neither a recognized architecture doc nor backed by graph nodes,
+// then re-sorts. Without this an auto-generated file_summary for a
+// junk text file can outrank the real README via lexical project-name
+// overlap (e.g. `mooncake_codes.txt` topping "what is the architecture
+// of mooncake?"). Mutates and returns the input slice for caller
+// convenience.
+func demoteNonArchitecturalSummaries(hits []store.Hit, view *graphView) []store.Hit {
+	for i := range hits {
+		if isArchitectureDocPath(hits[i].Path) || hasGraphPresence(view, hits[i].Path) {
+			continue
+		}
+		hits[i].Score -= summaryJunkPenalty
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	return hits
 }
 
 // mergeSummaryHits prepends summary hits before code hits, filling up to k

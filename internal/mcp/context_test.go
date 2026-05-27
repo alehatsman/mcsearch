@@ -1546,3 +1546,77 @@ func TestContextRouterKBudget(t *testing.T) {
 		t.Errorf("k=2 should cap semantic_hits; got %d", len(out.SemanticHits))
 	}
 }
+
+func TestIsArchitectureDocPath(t *testing.T) {
+	cases := map[string]bool{
+		"README.md":            true,
+		"readme":               true,
+		"ARCHITECTURE.md":      true,
+		"docs/MODULES.md":      true,
+		"AGENT.md":             true,
+		"CLAUDE.md":            true,
+		"design.txt":           true,
+		"install.sh":           false,
+		"tasks.yml":            false,
+		"mooncake_codes.txt":   false,
+		"internal/store/x.go":  false,
+		"readme_for_devs.md":   false, // exact match only — keeps the set small
+	}
+	for p, want := range cases {
+		if got := isArchitectureDocPath(p); got != want {
+			t.Errorf("isArchitectureDocPath(%q) = %v, want %v", p, got, want)
+		}
+	}
+}
+
+// TestDemoteNonArchitecturalSummaries reproduces the mooncake regression:
+// a junk text file's auto-generated file_summary outranks the real
+// README via lexical project-name overlap. After demotion, the
+// architecture doc (README) and a graph-backed code file must rank
+// above a non-arch, non-graph junk path even when the junk path's raw
+// cosine is higher.
+func TestDemoteNonArchitecturalSummaries(t *testing.T) {
+	view := &graphView{
+		nodesByPath: map[string][]graphNode{
+			"internal/core/core.go": {{ID: "n1"}},
+		},
+	}
+	hits := []store.Hit{
+		{Path: "mooncake_codes.txt", Score: 0.60, Kind: "file_summary"},
+		{Path: "README.md", Score: 0.50, Kind: "file_summary"},
+		{Path: "internal/core/core.go", Score: 0.48, Kind: "file_summary"},
+		{Path: "install.sh", Score: 0.49, Kind: "file_summary"},
+	}
+	got := demoteNonArchitecturalSummaries(hits, view)
+	if got[0].Path != "README.md" {
+		t.Errorf("README should lead after demotion; got %q", got[0].Path)
+	}
+	// Junk paths should rank below all kept paths.
+	junkRank := map[string]int{}
+	for i, h := range got {
+		junkRank[h.Path] = i
+	}
+	for _, junk := range []string{"mooncake_codes.txt", "install.sh"} {
+		for _, kept := range []string{"README.md", "internal/core/core.go"} {
+			if junkRank[junk] < junkRank[kept] {
+				t.Errorf("%q should rank below %q; got %d vs %d",
+					junk, kept, junkRank[junk], junkRank[kept])
+			}
+		}
+	}
+}
+
+// TestDemoteNonArchitecturalSummariesNilView confirms the demotion
+// still fires when graphView is unavailable — falls back to filename
+// patterns alone. Without this the helper would silently no-op on
+// projects that haven't been graph-indexed yet.
+func TestDemoteNonArchitecturalSummariesNilView(t *testing.T) {
+	hits := []store.Hit{
+		{Path: "noise.txt", Score: 0.60, Kind: "file_summary"},
+		{Path: "README.md", Score: 0.50, Kind: "file_summary"},
+	}
+	got := demoteNonArchitecturalSummaries(hits, nil)
+	if got[0].Path != "README.md" {
+		t.Errorf("README should lead after demotion with nil view; got %q", got[0].Path)
+	}
+}
