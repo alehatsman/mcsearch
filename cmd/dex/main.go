@@ -1773,6 +1773,8 @@ func cmdWatch(ctx context.Context, args []string) error {
 	verbose := fs.Bool("v", false, "verbose")
 	force := fs.Bool("force", false, "bypass protected-path and git-tree guards")
 	debounce := fs.Duration("debounce", 500*time.Millisecond, "quiet window before re-indexing")
+	waitLock := fs.Bool("wait", false, "if another dex indexer is running on this project, wait for it to finish instead of skipping")
+	breakLock := fs.Bool("break-lock", false, "discard an existing project lockfile (use only when the prior holder is gone)")
 	if err := fs.Parse(reorderFlags(fs, args)); err != nil {
 		return err
 	}
@@ -1794,6 +1796,14 @@ func cmdWatch(ctx context.Context, args []string) error {
 	if err := p.EnsureCacheDir(); err != nil {
 		return err
 	}
+	lk, err := acquireProjectLock(ctx, p, "watch", "chunk", *waitLock, *breakLock)
+	if err != nil {
+		return err
+	}
+	if lk == nil {
+		return nil // another indexer is running; message already printed
+	}
+	defer lk.Release()
 	st, err := openStore(ctx, p.DBPath)
 	if err != nil {
 		return err
