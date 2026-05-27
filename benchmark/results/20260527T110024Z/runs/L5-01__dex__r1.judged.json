@@ -1,4 +1,4 @@
 {
   "score": 1,
-  "reason": "The answer correctly identifies the definition file, both test files in store/, and the key call sites in mcp/context.go, mcp/server.go, and cmd/dex/main.go, but omits internal/mcp/context_test.go which the ground truth explicitly lists, and doesn't address internal/mcp/enrich.go / enrich_test.go."
+  "reason": "The answer correctly identifies 6 of the 7 required files but omits `internal/index/index_test.go`, which directly calls `(*Store).Search` and must also change."
 }

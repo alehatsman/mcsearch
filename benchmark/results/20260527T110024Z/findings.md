@@ -108,14 +108,71 @@ documented invariant is silently violated.
    across questions; native fixture has no shared large doc. Real cold-cache
    numbers would widen the per-question cost gap.
 
+## Anomaly investigation (post-hoc)
+
+After the first corrected run, I went hunting for anomalies in `runs.csv`.
+Findings:
+
+- **No rc errors, no judge parse failures, no broken outputs.** Pipeline is clean.
+- **Cost outliers all in native mode**, all on hard questions: L4-05 native
+  $0.30 (3527 fresh input tokens grepping for flock semantics), L5-01 native
+  $0.20, L3-05 native $0.20. Expected — doc-stripped native pays in real
+  exploration tokens what dex pays in cache-resident summary tokens.
+- **Two more ground-truth bugs found** by inspecting transcripts of the
+  "both modes scored 1" questions:
+  - **L5-02 (rrfK 60→30 blast-radius).** I claimed tests "may flip on
+    `RRFScore > 0` and ordering assertions". Wrong: every RRF assertion in
+    `internal/store/store_test.go` checks `> 0`, `== 0`, or rank-determined
+    ordering — none of which are affected by changing k. Lowering k makes
+    scores larger but still positive, and ranks are unchanged. Both modes
+    were correct; ground truth was the bug.
+  - **L5-01 (rename Store.Search).** I claimed `enrich_test.go` "uses
+    signature strings — only the comments mention Search". `enrich_test.go`
+    actually has zero `.Search(` calls of any kind; that line in my ground
+    truth was confused. Also missed `internal/index/index_test.go:156,340`
+    which native correctly identified. Ground truth rewritten with a
+    "Required vs NOT-required" structure.
+
+After re-judging these two with corrected ground truth:
+
+| Metric | After L4-05/L1-02 fix | After L5-01/L5-02 fix |
+|---|---:|---:|
+| dex score | 1.92 | **1.96** |
+| native score | 1.72 | **1.80** |
+| Δ | +0.20 | **+0.16** |
+| dex correct | 23/25 | **24/25** |
+| native correct | 18/25 | **20/25** |
+
+Native improved more than dex in this round because L5-01 was the one
+question where native actually did better than dex: native grepped the
+whole tree and found `internal/index/index_test.go:156,340`, which dex's
+`ask` missed. That's real signal — refactor-scope is dex's weakest band,
+and the gap is "did the agent grep wide enough".
+
+**Three ground-truth bugs total across 25 questions** (L4-05, L5-01,
+L5-02). All three were claims that I made by reading docs/comments rather
+than grepping the code itself. The benchmark caught all three because:
+(a) the judge's verbose `reason` field flags contradictions, (b) when
+modes disagree I read the transcript and verify which is right. Without
+both habits, the bugs would have stuck.
+
 ## Bottom line
 
 When native cannot lean on pre-written codebase docs, **dex wins on L4
-(+0.4) and L5 (+0.4)** — the two bands that exercise architectural
-reasoning and refactor scope. L1–L3 are ties because grep handles them
-fine once you know what to grep for.
+(+0.4)** and is ahead on L5 (+0.2). L1–L3 are essentially ties because
+grep handles them fine once you know what to grep for.
 
-The most interesting outcome wasn't the score delta. It was that dex's
-answer to L4-05 caught a real implementation gap (cmdWatch missing the
-flock) that the human (me) had assumed worked from reading the package
-doc-comment alone.
+The most useful outcome wasn't the score delta. It was that this exercise
+caught:
+1. A real bug in dex itself — `cmdWatch` was missing `acquireProjectLock`,
+   silently violating the lock package's documented invariant. Fixed in
+   commit `e679037` on branch `fix/watch-acquire-project-lock`, now merged.
+2. Three bugs in my hand-written ground truth (12% of questions) — all
+   from describing what the code "should" do based on comments instead of
+   what it actually does.
+
+The right way to read this benchmark is *not* "dex is 0.16 points better
+than grep on a sonnet agent". It's "dex's pre-built summaries plus graph
+let it answer the architectural-reasoning questions with one or two tool
+calls, while native pays a 2–3× cost in real exploration tokens to land
+on similar (but on L5 sometimes more complete) answers".

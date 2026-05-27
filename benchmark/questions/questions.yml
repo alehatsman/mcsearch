@@ -176,22 +176,36 @@ questions:
   band: L5
   question: "If I rename `Store.Search` to `Store.Query`, which files need to change? List them."
   ground_truth: |
-    - `internal/store/store.go` (definition + comments referencing `Search`)
-    - `internal/store/store_test.go` (`TestUpsertAndSearch`, RRF tests)
-    - `internal/store/bench_test.go` (`BenchmarkSearch_*`, `benchSearch`)
-    - `internal/mcp/server.go` (`(*Server).Search` wraps it; also any internal calls)
-    - `internal/mcp/context.go` and `internal/mcp/context_test.go` (router uses `Store.Search`)
-    - `internal/mcp/enrich.go` / `enrich_test.go` (uses signature strings — only the comments mention `Search`, but verify)
-    - Any other call sites: grep `store.Search\|st.Search\|s.Search` across the repo.
-    Tests must be updated too; the `dex ask` flow calls `Search` transitively.
+    Required (real call sites of `(*Store).Search`):
+    - `internal/store/store.go` — the definition itself
+    - `internal/store/store_test.go` — direct `.Search(` / `st.Search(` call sites
+    - `internal/store/bench_test.go` — `BenchmarkSearch_*` and `benchSearch`
+    - `internal/mcp/server.go` — `(*Server).Search` is a wrapper that calls `st.Search(...)`
+    - `internal/mcp/context.go` — calls `Store.Search` in the semantic lane
+    - `internal/index/index_test.go` — calls `(*Store).Search` directly
+    - `cmd/dex/main.go` — `cmdSearchSemantic` and `cmdGenerate` call `(*Store).Search`
+
+    NOT required:
+    - `internal/mcp/enrich_test.go` — has no `.Search(` calls; only the word "Search" in signature strings used as test fixtures.
+    - `internal/mcp/context_test.go` — references are mostly synthetic graph-fixture strings like `"(*Store).Search"` used as router inputs and graph-node names. Whether to also update these for naming consistency is judgment-call, not strictly required to compile/pass.
+
+    Acceptance: an answer scores 2 if it names the 7 "Required" files (or any superset that includes them) and does not falsely claim a file like `enrich_test.go` requires changes when it does not. Differences over whether `context_test.go` strings need updating are acceptable.
   must_mention: ["internal/store", "internal/mcp"]
 
 - id: L5-02
   band: L5
   question: "What breaks if I change the `rrfK` constant from 60 to 30?"
   ground_truth: |
-    Functionally: rank fusion gets sharper (lower `k` weights top ranks more heavily). Tests that assert specific ordering or `RRFScore` thresholds in `internal/store/store_test.go` (around the `validateToken` test and the BM25/RRF tests at lines ~383-488) may flip — particularly the assertions about `RRFScore > 0` and the order of needle-vs-distractor rows. No other package reads `rrfK`. Comment at `store.go:922` should be updated to match.
-  must_mention: ["store_test.go", "RRFScore"]
+    Nothing breaks in a correctness sense. `rrfK` is a pure ranking tuning parameter.
+
+    - Mathematical effect: lowering k from 60 to 30 makes RRF scores about ~2× larger and **sharpens** the gap between top and bottom ranks (`1/(30+r)` falls off faster than `1/(60+r)`). Fusion becomes more "winner-takes-all" — documents that rank #1 in either retriever dominate the fused score more.
+    - Tests do NOT break. The existing RRF assertions in `internal/store/store_test.go` only check `RRFScore > 0` (lines 430, 590), `RRFScore == 0` for the DisableBM25 case (line 487), and ordering that is determined by *rank* not score-magnitude (so order is preserved). No assertion checks a specific score value, so no test flips.
+    - No other package reads `rrfK` — it is a private constant in `internal/store/store.go:924`.
+    - The doc-comment at `internal/store/store.go:922` cites Cormack et al. (2009) and the canonical k=60 — the comment is now factually misleading and should be updated to reflect the new value (or note both values are within the [10, 100] robust range).
+    - Only real risk is *retrieval quality regression* — would need an eval to know whether 30 is better or worse for this workload.
+
+    Acceptance: an answer scores 2 if it correctly identifies (a) no tests break, (b) the stale comment at store.go:922, and (c) describes the sharper-ranking effect. An answer that claims tests will break is wrong.
+  must_mention: ["rrfK", "RRFScore"]
 
 - id: L5-03
   band: L5
