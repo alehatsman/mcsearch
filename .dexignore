@@ -1,0 +1,10 @@
+# dex-specific exclusions (gitignore syntax).
+# Layered ON TOP of .gitignore: things here are kept in git but kept
+# out of the dex index. Use this for paths that are real source in git
+# but bloat the index or distort summarizer/retrieval signal.
+
+# Benchmark run outputs — large auto-generated JSON dumps that
+# dominate file_summary / package_summary signal without representing
+# any production code. Keep benchmark/{configs,judge,questions,scripts}
+# indexed; only results/ is excluded.
+benchmark/results/

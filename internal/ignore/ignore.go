@@ -16,7 +16,7 @@
 //     secret-shaped filenames, license-family files.
 //     b. .gitignore at the project root (root file only; nested
 //     .gitignore files are intentionally not read).
-//     c. .dex-ignore at the project root (same syntax).
+//     c. .dexignore at the project root (same syntax).
 //
 //  3. LooksBinary — NUL-byte heuristic for binaries that slipped
 //     through the allow-list (e.g. a `.yml` that's actually a packed
@@ -45,7 +45,7 @@ import (
 )
 
 // DefaultPatterns are always applied, on top of whatever .gitignore or
-// .dex-ignore say. Kept conservative to avoid surprising omissions.
+// .dexignore say. Kept conservative to avoid surprising omissions.
 var DefaultPatterns = []string{
 	".env",
 	".env.*",
@@ -175,17 +175,17 @@ var IndexableExtensions = map[string]bool{
 // semantics) is delegated to github.com/sabhiram/go-gitignore so we
 // don't reinvent — and subtly miss — the corner cases of a
 // 20-year-old spec. We only contribute the DefaultPatterns,
-// .dex-ignore composition, and the wider always-skip rules.
+// .dexignore composition, and the wider always-skip rules.
 type Matcher struct {
 	g *gitignore.GitIgnore
 }
 
-// New loads DefaultPatterns + project-root .gitignore + .dex-ignore
+// New loads DefaultPatterns + project-root .gitignore + .dexignore
 // (in that order — later wins per gitignore semantics).
 func New(root string) (*Matcher, error) {
 	var lines []string
 	lines = append(lines, DefaultPatterns...)
-	for _, name := range []string{".gitignore", ".dex-ignore"} {
+	for _, name := range []string{".gitignore", ".dexignore"} {
 		extra, err := readLines(filepath.Join(root, name))
 		if err != nil {
 			return nil, err

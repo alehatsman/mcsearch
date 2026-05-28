@@ -81,7 +81,7 @@ questions:
   band: L2
   question: "What is `internal/ignore` for? Beyond .gitignore, what does it block?"
   ground_truth: |
-    Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dex-ignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.
+    Filters which files are eligible for indexing. Combines `.gitignore` with a built-in `.dexignore` (vendored dirs, lockfiles) and heuristic checks that reject binary blobs and files that look like secrets / credentials.
   must_mention: ["gitignore", "secret"]
 
 # ---------- L3: cross-package data flow (5) ----------

@@ -188,7 +188,7 @@ func Beta() string { return "beta" }
 }
 
 // TestNewlyIgnoredEviction makes sure that adding a path to
-// .dex-ignore (or .gitignore) between runs evicts the chunks that
+// .dexignore (or .gitignore) between runs evicts the chunks that
 // were previously indexed under that path. Without explicit eviction
 // the walker would simply skip the subtree on the next run and the
 // stale chunks would live forever in the index.
@@ -221,7 +221,7 @@ func TestNewlyIgnoredEviction(t *testing.T) {
 	}
 
 	// Add an ignore rule and reload the matcher.
-	writeFile(t, filepath.Join(projDir, ".dex-ignore"), "drafts/\n")
+	writeFile(t, filepath.Join(projDir, ".dexignore"), "drafts/\n")
 	ig2, _ := ignore.New(p.Root)
 	ix2 := New(p, st, em, ig2, Options{})
 	if err := ix2.Run(ctx); err != nil {

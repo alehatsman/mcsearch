@@ -181,7 +181,7 @@ build / maintenance:
                                           Flags: --all, --doc, --format=text|json
   dex compact <path>                 concatenate indexable files under <path>
                                           to stdout with `+"`===== <relpath> =====`"+`
-                                          headers. Honors .gitignore/.dex-ignore
+                                          headers. Honors .gitignore/.dexignore
                                           and skips binaries + secret-shaped files.
                                           Flags: --out FILE, --max-bytes N, --strip
   dex nuke   <path>                  delete the on-disk index for a project

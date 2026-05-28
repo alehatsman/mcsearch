@@ -208,7 +208,7 @@ no shell). For a host-bound `/cache`, add `--user "$(id -u):$(id -g)"`
 
 ## Ignore rules
 
-`.gitignore` is respected. A built-in `.dex-ignore` skips
+`.gitignore` is respected. A built-in `.dexignore` skips
 `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `secrets.yml`,
 `*.tfvars`, `.terraform/`, `node_modules/`, `vendor/`, `.venv/`,
 `__pycache__/`, `target/`, `dist/`, `build/`. Files matching common
