@@ -1281,31 +1281,29 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 		if err != nil {
 			return err
 		}
-		nodes, edges, gerr := st.GraphStats(ctx)
-		fmt.Printf("%s\n", p.Root)
-		fmt.Printf("  %d chunks  %d files  %s\n",
-			stats.Chunks, stats.Files, formatProjectAge(stats.LastIndex))
-		if gerr == nil && (nodes > 0 || edges > 0) {
-			fmt.Printf("      graph: %d nodes  %d edges\n", nodes, edges)
-		}
-		if stats.PendingSummaries > 0 || !stats.LastSummarized.IsZero() {
-			fmt.Printf("      summaries: %s\n",
-				formatSummaryStatus(stats.PendingSummaries, stats.LastSummarized))
-		}
-		fmt.Printf("      dim: %d\n", stats.Dim)
-		// Drainage hint only when there's something to drain AND the
-		// chat backend can actually be reached. The multi-project
-		// view skips this — it's only useful when the operator is
-		// looking at one project and considering next steps.
+		nodes, edges, _ := st.GraphStats(ctx)
+		fmt.Printf("  %s\n", p.Root)
+		printProjectStatLines("    ", projectStats{
+			lastIndex:        stats.LastIndex,
+			files:            stats.Files,
+			chunks:           stats.Chunks,
+			nodes:            nodes,
+			edges:            edges,
+			pendingSummaries: stats.PendingSummaries,
+			lastSummarized:   stats.LastSummarized,
+			dim:              stats.Dim,
+		})
+		// Action hints only on the per-project view — the
+		// multi-project listing keeps the per-block content uniform.
 		if stats.PendingSummaries > 0 {
 			if os.Getenv("DEX_SUMMARY_URL") != "" || os.Getenv("DEX_CHAT_URL") != "" {
-				fmt.Printf("      → `dex watch` will drain in the background, or run: dex index summarize %s\n", p.Root)
+				fmt.Printf("    → `dex watch` will drain in the background, or run: dex index summarize %s\n", p.Root)
 			} else {
-				fmt.Printf("      → set DEX_SUMMARY_URL or DEX_CHAT_URL to enable summary draining\n")
+				fmt.Printf("    → set DEX_SUMMARY_URL or DEX_CHAT_URL to enable summary draining\n")
 			}
 		}
 		if !stats.LastIndex.IsZero() && time.Since(stats.LastIndex) > 24*time.Hour {
-			fmt.Printf("      → stale — run: dex index %s\n", p.Root)
+			fmt.Printf("    → stale — run: dex index %s\n", p.Root)
 		}
 		return nil
 	}
@@ -1411,52 +1409,32 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 		return rows[i].last.After(rows[j].last)
 	})
 
-	// Column widths derived from data AND header labels — `ROOT` is
-	// only 4 chars but the data drives the actual width; chunks/files
-	// columns get a minimum width to fit their headers.
-	headers := struct{ root, chunks, files, age string }{"ROOT", "CHUNKS", "FILES", "AGE"}
-	maxRoot := len(headers.root)
-	maxChunks := len(headers.chunks)
-	maxFiles := len(headers.files)
-	for _, r := range rows {
-		if l := len(r.root); l > maxRoot {
-			maxRoot = l
-		}
-		if l := len(fmt.Sprintf("%d", r.chunks)); l > maxChunks {
-			maxChunks = l
-		}
-		if l := len(fmt.Sprintf("%d", r.files)); l > maxFiles {
-			maxFiles = l
-		}
-	}
-	if maxRoot > 60 {
-		maxRoot = 60
-	}
-
 	fmt.Printf("projects (%d indexed)\n", len(rows))
-	fmt.Printf("  %-*s  %*s  %*s  %s\n",
-		maxRoot, headers.root,
-		maxChunks, headers.chunks,
-		maxFiles, headers.files,
-		headers.age)
 
-	for _, r := range rows {
+	// Stacked layout: each project is a self-contained block of
+	// labelled key:value rows. The labels are padded to a fixed width
+	// so values line up vertically inside each block. We don't try to
+	// align the value column ACROSS blocks — different projects have
+	// different stat counts and aligning across them gives up
+	// scannability inside a single block for nothing useful.
+	for i, r := range rows {
+		if i > 0 {
+			fmt.Println()
+		}
 		if r.corrupt {
-			fmt.Printf("  %-*s  CORRUPT\n", maxRoot, r.root)
+			fmt.Printf("  %s\n    CORRUPT\n", r.root)
 			continue
 		}
-		when := formatProjectAge(r.last)
-		fmt.Printf("  %-*s  %*d  %*d  %s\n",
-			maxRoot, r.root,
-			maxChunks, r.chunks,
-			maxFiles, r.files,
-			when)
-		if r.nodes > 0 || r.edges > 0 {
-			fmt.Printf("      graph: %d nodes  %d edges\n", r.nodes, r.edges)
-		}
-		if r.pendingSummaries > 0 || !r.lastSummarized.IsZero() {
-			fmt.Printf("      summaries: %s\n", formatSummaryStatus(r.pendingSummaries, r.lastSummarized))
-		}
+		fmt.Printf("  %s\n", r.root)
+		printProjectStatLines("    ", projectStats{
+			lastIndex:        r.last,
+			files:            r.files,
+			chunks:           r.chunks,
+			nodes:            r.nodes,
+			edges:            r.edges,
+			pendingSummaries: r.pendingSummaries,
+			lastSummarized:   r.lastSummarized,
+		})
 	}
 	if empties > 0 {
 		noun := "index"
