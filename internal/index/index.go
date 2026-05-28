@@ -866,6 +866,11 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
 					return err
 				}
+				for _, r := range rows {
+					if _, err := ix.Store.DeleteOtherSummariesForPath(ctx, r.Path, r.Kind, r.ContentSHA); err != nil {
+						ix.Options.Logger.Warn("gc stale package_summary failed", "path", r.Path, "err", err)
+					}
+				}
 			}
 		}
 	}
@@ -903,6 +908,9 @@ func (ix *Indexer) Run(ctx context.Context) error {
 						}}
 						if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
 							return err
+						}
+						if _, err := ix.Store.DeleteOtherSummariesForPath(ctx, ".", chunk.KindRepoSummary, repoSHA); err != nil {
+							ix.Options.Logger.Warn("gc stale repo_summary failed", "err", err)
 						}
 					}
 				}

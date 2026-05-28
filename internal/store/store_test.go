@@ -203,6 +203,54 @@ func TestPruneUnseenPreservesSummaries(t *testing.T) {
 	}
 }
 
+// TestDeleteOtherSummariesForPath verifies the GC path that runs
+// alongside summary upserts: writing a new content_sha1 for
+// (path, kind) and calling DeleteOtherSummariesForPath should leave
+// exactly one row at that (path, kind), and must not touch sibling
+// paths or sibling kinds.
+func TestDeleteOtherSummariesForPath(t *testing.T) {
+	st, ctx := newStore(t)
+	now := time.Now()
+	_ = st.UpsertMany(ctx, []PendingChunk{
+		{Path: "internal/foo", Kind: "package_summary", ContentSHA: "A", Content: "old", Vec: []float32{1, 0}},
+		{Path: "internal/foo", Kind: "package_summary", ContentSHA: "B", Content: "new", Vec: []float32{0, 1}},
+		{Path: "internal/bar", Kind: "package_summary", ContentSHA: "X", Content: "sibling pkg", Vec: []float32{1, 1}},
+		{Path: "internal/foo", Kind: "file_summary", ContentSHA: "F", Content: "sibling kind", Vec: []float32{1, 1}},
+	}, now)
+
+	n, err := st.DeleteOtherSummariesForPath(ctx, "internal/foo", "package_summary", "B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("deleted %d rows, want 1", n)
+	}
+
+	got := make(map[string]string) // (path|kind) -> sha
+	rows, err := st.db.QueryContext(ctx, `SELECT path, kind, content_sha1 FROM chunks ORDER BY path, kind, content_sha1`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var p, k, sha string
+		_ = rows.Scan(&p, &k, &sha)
+		got[p+"|"+k] = sha
+	}
+	if got["internal/foo|package_summary"] != "B" {
+		t.Errorf("survivor for internal/foo|package_summary = %q, want B", got["internal/foo|package_summary"])
+	}
+	if got["internal/bar|package_summary"] != "X" {
+		t.Errorf("sibling path got nuked: %v", got)
+	}
+	if got["internal/foo|file_summary"] != "F" {
+		t.Errorf("sibling kind got nuked: %v", got)
+	}
+	if len(got) != 3 {
+		t.Errorf("row count = %d, want 3 (one per (path,kind)); got=%v", len(got), got)
+	}
+}
+
 func TestTouchPath(t *testing.T) {
 	st, ctx := newStore(t)
 	t0 := time.Now()

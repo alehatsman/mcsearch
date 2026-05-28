@@ -39,27 +39,16 @@ models regardless of which process launched dex, no env vars set.
 
 ---
 
-## 2. Garbage-collect stale `package_summary` rows on cache miss
+## 2. ✅ Garbage-collect stale `package_summary` rows on cache miss
 
-**Why.** After the [PruneUnseen fix](../internal/store/store.go:643),
-`package_summary` and `repo_summary` rows are protected from age-based
-deletion — which is correct, but means **stale rows accumulate** when a
-new content_sha1 is written for the same path. The new row goes in via
-`UpsertMany`'s `ON CONFLICT(path, content_sha1)`; the old row (with the
-old SHA) just sits there forever. Over many file edits, the chunks
-table grows with dead summaries that still satisfy `kind LIKE
-'%_summary'` filters.
-
-**Entry points.**
-- `internal/index/index.go:783` — package summary upsert path
-- `internal/index/drain.go:524` — drainer's package summary upsert
-- Same paths for repo summary
-- Add a tight `store.DeleteOtherSummariesForPath(ctx, path, kind, keepSHA)` method that runs alongside `UpsertMany`. Transactional.
-
-**Done when.** Inserting a fresh package_summary for `internal/foo`
-with sha=B deletes any other row where `path='internal/foo' AND
-kind='package_summary' AND content_sha1!='B'`. A unit test asserts
-exactly one row per (path, kind) after sequential writes.
+**Shipped** in commit `04a872c`. `Store.DeleteOtherSummariesForPath`
+(`internal/store/store.go`) runs right after each summary `UpsertMany`
+at four sites — Pass 5 + Pass 6 in `internal/index/index.go`, and
+`runPackageJobs` + `cascadeRepoSummary` in `internal/index/drain.go`.
+GC failure is `Warn`-logged, not fatal: a stale row is recoverable, a
+missing fresh row is not. `TestDeleteOtherSummariesForPath` asserts
+exactly one row per `(path, kind)` after sequential writes and that
+sibling paths / sibling kinds are untouched.
 
 ---
 
