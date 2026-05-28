@@ -640,18 +640,20 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 }
 
 // repoSummaryMaxPackages caps how many package summaries feed
-// summarizeRepo. Past ~40 inputs the 7B-class models drift off-prompt
-// and start enumerating packages, blowing past any reasonable output
-// cap. Top-N by centrality keeps the model focused on architecturally
-// significant packages while degrading cleanly on small projects
-// (which just get all of them).
-const repoSummaryMaxPackages = 40
+// summarizeRepo. Empirical: a 14-package input to qwen2.5-coder:7b
+// produces sensible synthesis; 40 inputs causes the model to abandon
+// synthesis and start describing one package as if it were the whole
+// repo. 15 sits in the safe zone — small enough for the 7B model to
+// reason about, large enough that the top-by-centrality cut still
+// captures architecturally significant packages. Tune up only after
+// switching to a larger summary model.
+const repoSummaryMaxPackages = 15
 
 // repoSummaryPromptVersion is included in the repo_summary cache key
 // so a prompt change naturally invalidates every cached repo_summary
 // on the next cascade. Bump when summarizeRepo's prompt changes shape
 // in a way that should re-run on already-summarized projects.
-const repoSummaryPromptVersion = "v2"
+const repoSummaryPromptVersion = "v3"
 
 // topRepoSummaryInput loads package summaries, sorts them by
 // PackageCentrality DESC, and returns the top-N (capped at
