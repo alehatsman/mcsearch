@@ -41,6 +41,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1246,13 +1247,17 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 	rest := fs.Args()
 	checkCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	printEndpoints(checkCtx)
-	fmt.Printf("dex %s\n", mcp.Version)
 
 	base, err := indexDir()
 	if err != nil {
 		return err
 	}
+	// Header line up top groups version + index dir so the rest of
+	// the output reads as content under a single banner instead of
+	// orphaned bits between sections.
+	fmt.Printf("dex %s · %s\n\n", mcp.Version, base)
+	printEndpoints(checkCtx)
+	fmt.Println()
 
 	if len(rest) == 1 {
 		// Per-project status
@@ -1277,29 +1282,30 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 			return err
 		}
 		nodes, edges, gerr := st.GraphStats(ctx)
-		fmt.Printf("\n%s\n", p.Root)
-		fmt.Printf("  %d chunks  %d files  dim=%d\n", stats.Chunks, stats.Files, stats.Dim)
+		fmt.Printf("%s\n", p.Root)
+		fmt.Printf("  %d chunks  %d files  %s\n",
+			stats.Chunks, stats.Files, formatProjectAge(stats.LastIndex))
 		if gerr == nil && (nodes > 0 || edges > 0) {
-			fmt.Printf("  %d graph nodes  %d graph edges\n", nodes, edges)
+			fmt.Printf("      graph: %d nodes  %d edges\n", nodes, edges)
 		}
-		if stats.LastIndex.IsZero() {
-			fmt.Println("  last indexed: unknown (run dex index to refresh)")
-		} else if time.Since(stats.LastIndex) > 24*time.Hour {
-			fmt.Printf("  last indexed: %s  ⚠ stale — run: dex index %s\n",
-				relativeTime(stats.LastIndex), p.Root)
-		} else {
-			fmt.Printf("  last indexed: %s\n", relativeTime(stats.LastIndex))
+		if stats.PendingSummaries > 0 || !stats.LastSummarized.IsZero() {
+			fmt.Printf("      summaries: %s\n",
+				formatSummaryStatus(stats.PendingSummaries, stats.LastSummarized))
 		}
+		fmt.Printf("      dim: %d\n", stats.Dim)
+		// Drainage hint only when there's something to drain AND the
+		// chat backend can actually be reached. The multi-project
+		// view skips this — it's only useful when the operator is
+		// looking at one project and considering next steps.
 		if stats.PendingSummaries > 0 {
-			fmt.Printf("  pending summaries: %d", stats.PendingSummaries)
 			if os.Getenv("DEX_SUMMARY_URL") != "" || os.Getenv("DEX_CHAT_URL") != "" {
-				fmt.Printf(" — `dex watch` will drain in the background, or run: dex index summarize %s\n", p.Root)
+				fmt.Printf("      → `dex watch` will drain in the background, or run: dex index summarize %s\n", p.Root)
 			} else {
-				fmt.Printf(" (set DEX_SUMMARY_URL or DEX_CHAT_URL to enable summary draining)\n")
+				fmt.Printf("      → set DEX_SUMMARY_URL or DEX_CHAT_URL to enable summary draining\n")
 			}
 		}
-		if !stats.LastSummarized.IsZero() {
-			fmt.Printf("  last summarized: %s\n", relativeTime(stats.LastSummarized))
+		if !stats.LastIndex.IsZero() && time.Since(stats.LastIndex) > 24*time.Hour {
+			fmt.Printf("      → stale — run: dex index %s\n", p.Root)
 		}
 		return nil
 	}
@@ -1315,14 +1321,17 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 	}
 
 	type row struct {
-		root    string
-		chunks  int
-		files   int
-		nodes   int64
-		edges   int64
-		last    time.Time
-		corrupt bool
-		empty   bool
+		root             string
+		cacheHash        string // first 5 chars of cache dir name; used for untagged display
+		chunks           int
+		files            int
+		nodes            int64
+		edges            int64
+		last             time.Time
+		pendingSummaries int
+		lastSummarized   time.Time
+		corrupt          bool
+		empty            bool
 	}
 	results := make([]row, len(entries))
 	sem := make(chan struct{}, 8)
@@ -1353,16 +1362,23 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 				results[idx] = row{empty: true}
 				return
 			}
+			cacheHash := name
+			if len(cacheHash) > 5 {
+				cacheHash = cacheHash[:5]
+			}
 			if root == "" {
-				root = "? (run dex index <path> to tag)"
+				root = fmt.Sprintf("untagged (%s…)", cacheHash)
 			}
 			results[idx] = row{
-				root:   root,
-				chunks: stats.Chunks,
-				files:  stats.Files,
-				nodes:  nodes,
-				edges:  edges,
-				last:   stats.LastIndex,
+				root:             root,
+				cacheHash:        cacheHash,
+				chunks:           stats.Chunks,
+				files:            stats.Files,
+				nodes:            nodes,
+				edges:            edges,
+				last:             stats.LastIndex,
+				pendingSummaries: stats.PendingSummaries,
+				lastSummarized:   stats.LastSummarized,
 			}
 		}(i, e.Name(), dbPath)
 	}
@@ -1380,41 +1396,66 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 	}
 
 	if len(rows) == 0 && empties == 0 {
-		fmt.Printf("\nindex dir: %s\nno projects indexed yet\n", base)
+		fmt.Println("projects (0 indexed)")
+		fmt.Println("  no projects indexed yet — run: dex index <path>")
 		return nil
 	}
 
-	// Compute width of the path column for alignment.
-	maxRoot := 0
+	// Sort by recency descending. Zero timestamps sink to the bottom
+	// so genuinely-stale and unidentifiable indexes don't fight the
+	// fresh ones for screen space.
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].last.IsZero() != rows[j].last.IsZero() {
+			return !rows[i].last.IsZero()
+		}
+		return rows[i].last.After(rows[j].last)
+	})
+
+	// Column widths derived from data AND header labels — `ROOT` is
+	// only 4 chars but the data drives the actual width; chunks/files
+	// columns get a minimum width to fit their headers.
+	headers := struct{ root, chunks, files, age string }{"ROOT", "CHUNKS", "FILES", "AGE"}
+	maxRoot := len(headers.root)
+	maxChunks := len(headers.chunks)
+	maxFiles := len(headers.files)
 	for _, r := range rows {
-		if len(r.root) > maxRoot {
-			maxRoot = len(r.root)
+		if l := len(r.root); l > maxRoot {
+			maxRoot = l
+		}
+		if l := len(fmt.Sprintf("%d", r.chunks)); l > maxChunks {
+			maxChunks = l
+		}
+		if l := len(fmt.Sprintf("%d", r.files)); l > maxFiles {
+			maxFiles = l
 		}
 	}
 	if maxRoot > 60 {
 		maxRoot = 60
 	}
 
-	fmt.Println()
+	fmt.Printf("projects (%d indexed)\n", len(rows))
+	fmt.Printf("  %-*s  %*s  %*s  %s\n",
+		maxRoot, headers.root,
+		maxChunks, headers.chunks,
+		maxFiles, headers.files,
+		headers.age)
+
 	for _, r := range rows {
 		if r.corrupt {
 			fmt.Printf("  %-*s  CORRUPT\n", maxRoot, r.root)
 			continue
 		}
-		var when string
-		switch {
-		case r.last.IsZero():
-			when = "no timestamp"
-		case time.Since(r.last) > 24*time.Hour:
-			when = "⚠ " + relativeTime(r.last)
-		default:
-			when = relativeTime(r.last)
-		}
-		fmt.Printf("  %-*s  %5d chunks  %4d files  %s\n",
-			maxRoot, r.root, r.chunks, r.files, when)
+		when := formatProjectAge(r.last)
+		fmt.Printf("  %-*s  %*d  %*d  %s\n",
+			maxRoot, r.root,
+			maxChunks, r.chunks,
+			maxFiles, r.files,
+			when)
 		if r.nodes > 0 || r.edges > 0 {
-			fmt.Printf("  %-*s  %5d nodes   %4d edges (graph)\n",
-				maxRoot, "", r.nodes, r.edges)
+			fmt.Printf("      graph: %d nodes  %d edges\n", r.nodes, r.edges)
+		}
+		if r.pendingSummaries > 0 || !r.lastSummarized.IsZero() {
+			fmt.Printf("      summaries: %s\n", formatSummaryStatus(r.pendingSummaries, r.lastSummarized))
 		}
 	}
 	if empties > 0 {
@@ -1422,7 +1463,7 @@ func cmdIndexStatus(ctx context.Context, args []string) error {
 		if empties != 1 {
 			noun = "indexes"
 		}
-		fmt.Printf("  (%d empty %s skipped)\n", empties, noun)
+		fmt.Printf("\n  (%d empty %s skipped)\n", empties, noun)
 	}
 	return nil
 }

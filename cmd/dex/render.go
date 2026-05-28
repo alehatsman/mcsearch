@@ -71,7 +71,12 @@ func collectEndpoints() []endpointProbe {
 }
 
 // printEndpoints fans out concurrent health checks for every probe with
-// a configured URL, then renders an aligned table.
+// a configured URL, then renders an aligned table under a section
+// header.
+//
+// Column order is (NAME, STATUS, MODEL, URL) — status sits next to
+// the name so a quick glance scans down a single column to spot any
+// failures, instead of having to skip past two wide columns first.
 func printEndpoints(ctx context.Context) {
 	probes := collectEndpoints()
 
@@ -92,18 +97,42 @@ func printEndpoints(ctx context.Context) {
 	}
 	wg.Wait()
 
-	nameW, urlW, modelW := 0, 0, 0
+	// Count reachable for the section heading so users can spot a
+	// degraded backend without reading the full table.
+	reachable := 0
+	for _, p := range probes {
+		if p.status == "ok" {
+			reachable++
+		}
+	}
+
+	// Column widths derived from the data PLUS the literal header
+	// labels so the heading row aligns under the data even when the
+	// widest data cell is narrower than the label.
+	headers := struct{ name, status, model, url string }{"NAME", "STATUS", "MODEL", "URL"}
+	nameW := len(headers.name)
+	statusW := len(headers.status)
+	modelW := len(headers.model)
+	urlW := len(headers.url)
 	for _, p := range probes {
 		nameW = max(nameW, len(p.name))
-		urlW = max(urlW, len(displayCell(p.url)))
+		statusW = max(statusW, len(p.status))
 		modelW = max(modelW, len(displayCell(p.model)))
+		urlW = max(urlW, len(displayCell(p.url)))
 	}
+
+	fmt.Printf("endpoints (%d reachable)\n", reachable)
+	fmt.Printf("  %-*s  %-*s  %-*s  %s\n",
+		nameW, headers.name,
+		statusW, headers.status,
+		modelW, headers.model,
+		headers.url)
 	for _, p := range probes {
-		fmt.Printf("%-*s  %-*s  %-*s  %s\n",
+		fmt.Printf("  %-*s  %-*s  %-*s  %s\n",
 			nameW, p.name,
-			urlW, displayCell(p.url),
+			statusW, p.status,
 			modelW, displayCell(p.model),
-			p.status)
+			displayCell(p.url))
 	}
 }
 
@@ -112,6 +141,40 @@ func displayCell(s string) string {
 		return "—"
 	}
 	return s
+}
+
+// formatProjectAge renders the AGE column for the project list.
+// Zero timestamps return "—" so the column is still aligned. Stale
+// entries (>24h since last index) carry an explicit " stale" suffix
+// instead of relying on the ⚠ symbol — easier to scan, no glyph
+// dependency.
+func formatProjectAge(t time.Time) string {
+	if t.IsZero() {
+		return "—"
+	}
+	rel := relativeTime(t)
+	if time.Since(t) > 24*time.Hour {
+		return rel + "  stale"
+	}
+	return rel
+}
+
+// formatSummaryStatus condenses the two summary-related Stats fields
+// into one line. Examples:
+//
+//	formatSummaryStatus(0, last)          → "last 4h ago"
+//	formatSummaryStatus(2, time.Time{})   → "2 queued"
+//	formatSummaryStatus(2, last)          → "2 queued · last 4h ago"
+//	formatSummaryStatus(0, time.Time{})   → ""  (caller skips the row)
+func formatSummaryStatus(pending int, lastSummarized time.Time) string {
+	var parts []string
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d queued", pending))
+	}
+	if !lastSummarized.IsZero() {
+		parts = append(parts, "last "+relativeTime(lastSummarized))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // queryJSONHit is the wire shape for `dex search semantic --format=json`.
