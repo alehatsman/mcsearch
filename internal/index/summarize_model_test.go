@@ -81,7 +81,7 @@ func TestSummarizePropagatesModel(t *testing.T) {
 			name:  "package uses Package model",
 			model: "heavy:32b",
 			call: func() error {
-				_, err := summarizePackage(ctx, cc, "heavy:32b", "x", []string{"summary 1", "summary 2"})
+				_, err := summarizePackage(ctx, cc, "heavy:32b", "x", []string{"summary 1", "summary 2"}, pkgGrounding{})
 				return err
 			},
 		},
@@ -89,7 +89,7 @@ func TestSummarizePropagatesModel(t *testing.T) {
 			name:  "repo uses Repo model",
 			model: "heaviest:70b",
 			call: func() error {
-				_, err := summarizeRepo(ctx, cc, "heaviest:70b", []string{"pkg a", "pkg b"})
+				_, err := summarizeRepo(ctx, cc, "heaviest:70b", []string{"pkg a", "pkg b"}, repoGrounding{})
 				return err
 			},
 		},
