@@ -639,6 +639,44 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 	return len(pkgEmbed), nil
 }
 
+// repoSummaryMaxPackages caps how many package summaries feed
+// summarizeRepo. Past ~40 inputs the 7B-class models drift off-prompt
+// and start enumerating packages, blowing past any reasonable output
+// cap. Top-N by centrality keeps the model focused on architecturally
+// significant packages while degrading cleanly on small projects
+// (which just get all of them).
+const repoSummaryMaxPackages = 40
+
+// topRepoSummaryInput loads package summaries, sorts them by
+// PackageCentrality DESC, and returns the top-N (capped at
+// repoSummaryMaxPackages). Falls back to unsorted input if the
+// centrality query fails — the summary is best-effort enrichment, not
+// worth blocking on. Returns nil when no package summaries exist yet.
+func (ix *Indexer) topRepoSummaryInput(ctx context.Context) ([]string, error) {
+	pkgRows, err := ix.Store.SummariesByKindWithMeta(ctx, chunk.KindPackageSummary)
+	if err != nil || len(pkgRows) == 0 {
+		return nil, err
+	}
+	centrality, cerr := ix.Store.PackageCentrality(ctx)
+	if cerr == nil && centrality != nil {
+		sort.SliceStable(pkgRows, func(i, j int) bool {
+			ci, cj := centrality[pkgRows[i].Path], centrality[pkgRows[j].Path]
+			if ci != cj {
+				return ci > cj
+			}
+			return pkgRows[i].Path < pkgRows[j].Path
+		})
+	}
+	if len(pkgRows) > repoSummaryMaxPackages {
+		pkgRows = pkgRows[:repoSummaryMaxPackages]
+	}
+	out := make([]string, len(pkgRows))
+	for i, r := range pkgRows {
+		out[i] = r.Content
+	}
+	return out, nil
+}
+
 // cascadeRepoSummary regenerates the repo_summary chunk from the
 // current package_summary state, or touches an existing one on cache
 // hit. Returns (0, nil) when the repo summary couldn't be produced
@@ -648,7 +686,7 @@ func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, 
 	if ctx.Err() != nil {
 		return 0, nil
 	}
-	pkgSummaries, err := ix.Store.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+	pkgSummaries, err := ix.topRepoSummaryInput(ctx)
 	if err != nil || len(pkgSummaries) == 0 {
 		return 0, nil
 	}

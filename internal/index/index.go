@@ -878,7 +878,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// chunks that the drainer will produce.
 	if pkgFiles != nil && ctx.Err() == nil && !ix.Options.DeferSummaries {
 		ix.Options.Logger.Info("index: repo summary")
-		pkgSummaries, err := ix.Store.AllSummariesByKind(ctx, chunk.KindPackageSummary)
+		pkgSummaries, err := ix.topRepoSummaryInput(ctx)
 		if err == nil && len(pkgSummaries) > 0 {
 			repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
 			if existingBatch["."][repoSHA] {
