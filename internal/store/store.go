@@ -782,6 +782,23 @@ func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error
 	return res.RowsAffected()
 }
 
+// DeleteOtherSummariesForPath removes every chunk at (path, kind) whose
+// content_sha1 differs from keepSHA. Call it right after upserting a
+// fresh package_summary or repo_summary row to evict the prior
+// generation's row — PruneUnseen leaves *_summary kinds alone (see its
+// doc), so without this they accumulate as the cache key drifts across
+// edits.
+func (s *Store) DeleteOtherSummariesForPath(ctx context.Context, path, kind, keepSHA string) (int64, error) {
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM chunks
+		   WHERE path=? AND kind=? AND content_sha1<>?`,
+		path, kind, keepSHA)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 // DeletePath drops all chunks for a single relative path.
 func (s *Store) DeletePath(ctx context.Context, path string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE path=?`, path); err != nil {

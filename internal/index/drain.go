@@ -636,6 +636,11 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 	if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
 		return 0, err
 	}
+	for _, r := range rows {
+		if _, err := ix.Store.DeleteOtherSummariesForPath(ctx, r.Path, r.Kind, r.ContentSHA); err != nil {
+			ix.Options.Logger.Warn("gc stale package_summary failed", "path", r.Path, "err", err)
+		}
+	}
 	return len(pkgEmbed), nil
 }
 
@@ -734,6 +739,9 @@ func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, 
 	}}
 	if err := ix.Store.UpsertMany(ctx, rows, startTime); err != nil {
 		return 0, err
+	}
+	if _, err := ix.Store.DeleteOtherSummariesForPath(ctx, ".", chunk.KindRepoSummary, repoSHA); err != nil {
+		ix.Options.Logger.Warn("gc stale repo_summary failed", "err", err)
 	}
 	return 1, nil
 }
