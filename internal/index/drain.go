@@ -647,6 +647,12 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 // (which just get all of them).
 const repoSummaryMaxPackages = 40
 
+// repoSummaryPromptVersion is included in the repo_summary cache key
+// so a prompt change naturally invalidates every cached repo_summary
+// on the next cascade. Bump when summarizeRepo's prompt changes shape
+// in a way that should re-run on already-summarized projects.
+const repoSummaryPromptVersion = "v2"
+
 // topRepoSummaryInput loads package summaries, sorts them by
 // PackageCentrality DESC, and returns the top-N (capped at
 // repoSummaryMaxPackages). Falls back to unsorted input if the
@@ -690,7 +696,7 @@ func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, 
 	if err != nil || len(pkgSummaries) == 0 {
 		return 0, nil
 	}
-	repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
+	repoSHA := chunkSHA(repoSummaryPromptVersion + "\x00" + strings.Join(pkgSummaries, "\x00"))
 	if existingBatch["."][repoSHA] {
 		if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", 0, 0, startTime); err != nil {
 			return 0, err

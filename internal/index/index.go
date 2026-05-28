@@ -880,7 +880,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 		ix.Options.Logger.Info("index: repo summary")
 		pkgSummaries, err := ix.topRepoSummaryInput(ctx)
 		if err == nil && len(pkgSummaries) > 0 {
-			repoSHA := chunkSHA(strings.Join(pkgSummaries, "\x00"))
+			repoSHA := chunkSHA(repoSummaryPromptVersion + "\x00" + strings.Join(pkgSummaries, "\x00"))
 			if existingBatch["."][repoSHA] {
 				if err := ix.Store.TouchSeen(ctx, ".", repoSHA, "", 0, 0, startTime); err != nil {
 					return err
