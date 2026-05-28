@@ -264,6 +264,17 @@ func (g *Indexer) Run(ctx context.Context) (*Stats, error) {
 	result.Nodes = append(result.Nodes, yamlRes.Nodes...)
 	result.Edges = append(result.Edges, yamlRes.Edges...)
 	result.Warnings = append(result.Warnings, yamlRes.Warnings...)
+
+	// Multi-language tree-sitter graph. No-op when no per-language
+	// extractors are registered (default state until per-language
+	// files land in follow-up PRs).
+	sitterRes, err := ExtractSitter(ctx, g.project.Root)
+	if err != nil {
+		return nil, fmt.Errorf("extract sitter: %w", err)
+	}
+	result.Nodes = append(result.Nodes, sitterRes.Nodes...)
+	result.Edges = append(result.Edges, sitterRes.Edges...)
+	result.Warnings = append(result.Warnings, sitterRes.Warnings...)
 	if g.opts.Verbose {
 		g.log.Info("graph extracted",
 			"packages", result.Packages,

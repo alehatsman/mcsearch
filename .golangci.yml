@@ -155,6 +155,10 @@ linters:
         linters: [gosec]
         text: "G122"
 
+      - path: internal/graph/sitter\.go
+        linters: [gosec]
+        text: "G122"
+
       # cyclop: index.Run and main.go dispatch are intentionally complex; each
       # branch handles a distinct subcommand or index state — extraction would
       # add indirection without reducing real complexity.
