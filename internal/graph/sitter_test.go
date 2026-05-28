@@ -117,16 +117,26 @@ func TestExtractSitterEmptyRegistry(t *testing.T) {
 }
 
 // TestExtractSitterDefaultEntry covers the wrapper that uses
-// DefaultRegistry — the actual entry point Indexer.Run calls. Empty
-// DefaultRegistry == empty result.
+// DefaultRegistry — the actual entry point Indexer.Run calls. Asserts
+// the path stays alive (any registered extractor that claims .py
+// dispatches); doesn't couple the framework test to the specific
+// shape the live Python extractor emits.
 func TestExtractSitterDefaultEntry(t *testing.T) {
 	root := writeTree(t, map[string]string{"a.py": "x = 1\n"})
 	res, err := ExtractSitter(context.Background(), root)
 	if err != nil {
 		t.Fatalf("ExtractSitter: %v", err)
 	}
-	if len(res.Nodes) != 0 || len(res.Edges) != 0 {
-		t.Errorf("DefaultRegistry empty by default; got nodes=%d edges=%d", len(res.Nodes), len(res.Edges))
+	var sawFile bool
+	for _, n := range res.Nodes {
+		if n.Kind == NodeFile && n.FilePath == "a.py" {
+			sawFile = true
+			break
+		}
+	}
+	if !sawFile {
+		t.Errorf("expected DefaultRegistry to dispatch a.py and emit a file node; got nodes=%v",
+			nodeQNs(res.Nodes))
 	}
 }
 

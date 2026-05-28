@@ -38,6 +38,12 @@ const (
 	NodeStruct    NodeKind = "struct"
 	NodeField     NodeKind = "field"
 	NodeImport    NodeKind = "import"
+	// NodeClass is the dynamic-language equivalent of Go's struct +
+	// interface kinds combined. Used by the tree-sitter extractors
+	// (Python today, JS/TS/Ruby next) where the language doesn't make
+	// Go's struct-vs-interface distinction. Schema is TEXT so this is
+	// a no-op migration.
+	NodeClass NodeKind = "class"
 )
 
 // EdgeKind enumerates the structural relationships emitted by the
