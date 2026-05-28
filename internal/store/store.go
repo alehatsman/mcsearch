@@ -986,20 +986,35 @@ type SummaryRow struct {
 
 // SummariesByKindWithMeta returns path + content + last_seen_at for every
 // chunk of the given kind, ordered by path. Drives the guide renderer.
+//
+// Schema allows multiple rows per (path, kind) because the UNIQUE
+// constraint is (path, content_sha1) — successive prompt iterations
+// for the same path produce different SHAs and therefore distinct
+// rows. To keep the renderer picking the freshest one for each path,
+// we sort by path ASC then last_seen_at DESC and dedupe in the loop:
+// the first row seen for each path is the most recent, later rows for
+// the same path are skipped.
 func (s *Store) SummariesByKindWithMeta(ctx context.Context, kind string) ([]SummaryRow, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT path, content, last_seen_at FROM chunks WHERE kind = ? ORDER BY path`, kind)
+		`SELECT path, content, last_seen_at FROM chunks WHERE kind = ? ORDER BY path, last_seen_at DESC`, kind)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	var out []SummaryRow
+	var seenPath string
+	first := true
 	for rows.Next() {
 		var r SummaryRow
 		if err := rows.Scan(&r.Path, &r.Content, &r.LastSeenAt); err != nil {
 			return nil, err
 		}
+		if !first && r.Path == seenPath {
+			continue
+		}
 		out = append(out, r)
+		seenPath = r.Path
+		first = false
 	}
 	return out, rows.Err()
 }
