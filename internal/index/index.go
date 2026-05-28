@@ -1034,11 +1034,14 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 // whole repository, built from the per-package summaries. Stored once per
 // project and re-generated only when any package summary changes.
 //
-// Output cap was raised from 400→1200 tokens after smaller-model runs
-// truncated the overview mid-word (e.g. qwen2.5-coder:7b producing a
-// per-package list that didn't fit). The prompt also forbids bullet
-// lists explicitly so the model picks prose, which tends to be denser.
+// Output cap history: 400 → 1200 (small models truncated mid-word) →
+// 2400 (152-package mooncake repo hit finish_reason=length at 1200).
+// The cap scales with package count because the input fans in linearly:
+// a 150-package repo asks the model to reason about ~50× the input of
+// a 3-package toy. The prompt also forbids bullet lists explicitly so
+// the model picks prose, which tends to be denser.
 func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string) (string, error) {
+	const repoMaxTokens = 2400
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
 		"write a 3-5 sentence prose paragraph describing what the repository does overall. " +
 		"PROSE ONLY — do not use bullet points, do not list packages one per line. " +
@@ -1052,12 +1055,12 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummar
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
-	}, chat.Options{Model: model, MaxTokens: 1200, Temperature: 0.1})
+	}, chat.Options{Model: model, MaxTokens: repoMaxTokens, Temperature: 0.1})
 	if err != nil {
 		return "", err
 	}
 	if resp.FinishReason == "length" {
-		return "", fmt.Errorf("repo summary truncated at %d tokens (finish_reason=length); raise MaxTokens", 1200)
+		return "", fmt.Errorf("repo summary truncated at %d tokens (finish_reason=length); raise MaxTokens", repoMaxTokens)
 	}
 	return strings.TrimSpace(resp.Content), nil
 }
