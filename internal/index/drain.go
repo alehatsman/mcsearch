@@ -678,6 +678,13 @@ func (ix *Indexer) topRepoSummaryInput(ctx context.Context) ([]string, error) {
 	if len(pkgRows) > repoSummaryMaxPackages {
 		pkgRows = pkgRows[:repoSummaryMaxPackages]
 	}
+	if ix.Options.Verbose {
+		paths := make([]string, len(pkgRows))
+		for i, r := range pkgRows {
+			paths[i] = r.Path
+		}
+		ix.Options.Logger.Info("repo summary input", "count", len(pkgRows), "paths", strings.Join(paths, ","))
+	}
 	out := make([]string, len(pkgRows))
 	for i, r := range pkgRows {
 		out[i] = r.Content
