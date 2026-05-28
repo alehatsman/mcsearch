@@ -1035,18 +1035,24 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 // project and re-generated only when any package summary changes.
 //
 // Output cap history: 400 → 1200 (small models truncated mid-word) →
-// 2400 (152-package mooncake repo hit finish_reason=length at 1200).
-// The cap scales with package count because the input fans in linearly:
-// a 150-package repo asks the model to reason about ~50× the input of
-// a 3-package toy. The prompt also forbids bullet lists explicitly so
-// the model picks prose, which tends to be denser.
+// 2400 → 4096. The 7B-class models that ship as DEX_SUMMARY_MODEL drift
+// off-prompt on 100+ package inputs and start enumerating packages
+// one-by-one; 4096 buys enough room that even the worst-case bloated
+// output lands a complete paragraph instead of erroring out the whole
+// cascade. The prompt below carries hard caps that the prompt before
+// did not — paragraph length, no enumeration, no header — to push the
+// model back toward dense prose.
+//
+// Long-term fix is to feed only the top-N centrality packages instead
+// of all of them; deferred until a project actually wants it.
 func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string) (string, error) {
-	const repoMaxTokens = 2400
+	const repoMaxTokens = 4096
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
-		"write a 3-5 sentence prose paragraph describing what the repository does overall. " +
-		"PROSE ONLY — do not use bullet points, do not list packages one per line. " +
-		"Name the top-level packages inline and describe their roles. Describe the main data flow or pipeline. " +
-		"Note any architectural constraints or key invariants. " +
+		"write ONE prose paragraph of 3-5 sentences describing what the repository does overall. " +
+		"HARD LIMITS: exactly one paragraph; never exceed 5 sentences; no bullet points; no markdown headers; " +
+		"no enumeration of packages (do NOT write 'package X does Y; package Z does W; …' for every package). " +
+		"Synthesize across packages — name only the architecturally significant ones inline, " +
+		"describe the main data flow or pipeline, note any architectural constraints or invariants. " +
 		"No prose padding, no apologies, no restating the prompt. " +
 		"Only mention features explicitly present in the package summaries. Do not invent features " +
 		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
