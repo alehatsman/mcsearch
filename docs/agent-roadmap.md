@@ -52,17 +52,26 @@ sibling paths / sibling kinds are untouched.
 
 ---
 
-## 3. Ground summarizer prompts with graph data
+## 3. ✅ Ground summarizer prompts with graph data
 
-**Why.** The guide renderer's hallucination problem (v1's
-`BenchmarkSearch_1k_16` invention) was patched downstream by attaching
-ground-truth `Exported API` and `Depends on` sections from
-`graph_nodes`. But the **upstream prompt is still hallucination-prone** —
-the LLM in `summarizePackage` only sees file summaries, not the graph
-facts. The prose paragraph at the top of each module section still
-invents.
+**Shipped** in commit `98b354e`. New helpers in
+`internal/index/grounding.go` feed `summarizePackage` an EXPORTED
+SYMBOLS + PROJECT IMPORTS section (from `ExportedSymbolsByDir` +
+module-prefix-trimmed `ImportsForDir`) and `summarizeRepo` a PACKAGES
+(dir → top symbols) section (from `TopCentralByDir`). System prompts
+gained a GROUNDING RULE: backtick-wrapped identifiers in the output
+must come from those lists. Sections render only when grounding is
+non-empty so the first-index / non-Go / empty-graph fallback keeps the
+original prompt shape. `packageSummaryPromptVersion` and bumped
+`repoSummaryPromptVersion` (v3→v4) fold into the respective cache keys
+so prompt iterations re-run on the next index pass.
+`grounding_test.go` exercises the prompt builders directly. A
+full-pipeline sweep test that diffs generated `LLM_GUIDE.md`
+identifiers against `graph_nodes` is still useful follow-up work — the
+prompt-builder tests cover the structural guarantee but not the model's
+adherence to it.
 
-**Entry points.**
+**Original entry points** (kept for reference):
 - `internal/index/index.go:944` — `summarizePackage`. Today it gets
   `dir` + concatenated file summaries.
 - Add an `extraContext` arg: pre-resolved list of exported symbols

@@ -749,6 +749,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// after the file/chunk jobs drain.
 	if len(pkgFiles) > 0 && !ix.Options.DeferSummaries {
 		ix.Options.Logger.Info("index: package summaries", "dirs", len(pkgFiles))
+		modPath := readModulePath(ix.Proj.Root)
 		type pkgJob struct {
 			dir       string
 			filePaths []string
@@ -785,7 +786,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 				filePaths[i] = e.path
 			}
 			sort.Strings(shas)
-			pkgSHA := chunkSHA(strings.Join(shas, ":"))
+			pkgSHA := chunkSHA(packageSummaryPromptVersion + "\x00" + strings.Join(shas, ":"))
 			if existingBatch[dir][pkgSHA] {
 				if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", 0, 0, startTime); err != nil {
 					return err
@@ -811,7 +812,8 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					if err != nil || len(fileSummaries) == 0 {
 						return nil
 					}
-					summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
+					grounding := ix.fetchPackageGrounding(egctx, j.dir, modPath)
+					summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries, grounding)
 					if err != nil {
 						ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
 						return nil
@@ -883,7 +885,7 @@ func (ix *Indexer) Run(ctx context.Context) error {
 	// chunks that the drainer will produce.
 	if pkgFiles != nil && ctx.Err() == nil && !ix.Options.DeferSummaries {
 		ix.Options.Logger.Info("index: repo summary")
-		pkgSummaries, err := ix.topRepoSummaryInput(ctx)
+		pkgSummaries, pkgDirs, err := ix.topRepoSummaryInput(ctx)
 		if err == nil && len(pkgSummaries) > 0 {
 			repoSHA := chunkSHA(repoSummaryPromptVersion + "\x00" + strings.Join(pkgSummaries, "\x00"))
 			if existingBatch["."][repoSHA] {
@@ -891,7 +893,8 @@ func (ix *Indexer) Run(ctx context.Context) error {
 					return err
 				}
 			} else {
-				summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries)
+				grounding := ix.fetchRepoGrounding(ctx, pkgDirs)
+				summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries, grounding)
 				if err != nil {
 					ix.Options.Logger.Warn("repo summarize failed", "err", err)
 				} else if strings.TrimSpace(summary) != "" {
@@ -1018,13 +1021,15 @@ const summarizePackageSystem = "You are a code summarizer. Given prose summaries
 	"Synthesize across files. Do NOT echo a single file's description as the package summary. " +
 	"Describe the package's production role. Test files are inputs to this prompt as evidence of behavior — never describe a package as 'a test suite' or 'tests for X'; describe what is being tested. " +
 	"Mention symbol names in `backticks`. " +
+	"GROUNDING RULE: when an EXPORTED SYMBOLS section is provided, every `backtick`-wrapped identifier in your output must appear verbatim in that list. Do not invent symbol names. " +
+	"When a PROJECT IMPORTS section is provided, do not name sibling packages absent from it. " +
 	"No prose padding, no apologies, no restating the prompt. " +
 	"Only mention features explicitly present in the file summaries. Do not invent features " +
 	"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
 	"syntax highlighting; embeddings do not imply RAG). If a feature is not stated, omit it."
 
-func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, fileSummaries []string) (string, error) {
-	user := fmt.Sprintf("PACKAGE: %s\n\nFILE SUMMARIES:\n%s", dir, strings.Join(fileSummaries, "\n\n---\n\n"))
+func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, fileSummaries []string, extra pkgGrounding) (string, error) {
+	user := buildPackageUserPrompt(dir, fileSummaries, extra)
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: summarizePackageSystem},
 		{Role: "user", Content: user},
@@ -1036,6 +1041,24 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 		return "", fmt.Errorf("package summary truncated at 1200 tokens (finish_reason=length); raise MaxTokens or shorten input")
 	}
 	return strings.TrimSpace(resp.Content), nil
+}
+
+// buildPackageUserPrompt assembles the user message: PACKAGE header, an
+// optional EXPORTED SYMBOLS section, an optional PROJECT IMPORTS
+// section, then the joined file summaries. Sections only render when
+// the corresponding grounding list is non-empty — keeps the ungrounded
+// fallback path identical to the pre-grounding prompt.
+func buildPackageUserPrompt(dir string, fileSummaries []string, extra pkgGrounding) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "PACKAGE: %s\n\n", dir)
+	if len(extra.Symbols) > 0 {
+		fmt.Fprintf(&b, "EXPORTED SYMBOLS:\n%s\n\n", strings.Join(extra.Symbols, ", "))
+	}
+	if len(extra.ProjectImports) > 0 {
+		fmt.Fprintf(&b, "PROJECT IMPORTS:\n%s\n\n", strings.Join(extra.ProjectImports, ", "))
+	}
+	fmt.Fprintf(&b, "FILE SUMMARIES:\n%s", strings.Join(fileSummaries, "\n\n---\n\n"))
+	return b.String()
 }
 
 // summarizeRepo asks the chat endpoint for a top-level overview of the
@@ -1053,7 +1076,7 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 //
 // Long-term fix is to feed only the top-N centrality packages instead
 // of all of them; deferred until a project actually wants it.
-func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string) (string, error) {
+func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string, extra repoGrounding) (string, error) {
 	const repoMaxTokens = 4096
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
 		"write ONE prose paragraph of 3-5 sentences describing what the REPOSITORY does overall. " +
@@ -1066,11 +1089,14 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummar
 		"Do NOT enumerate packages one by one. Synthesize across the inputs — name only 3-5 " +
 		"architecturally significant packages inline as `backticks`, describe the main data flow or " +
 		"pipeline, note any key architectural constraints or invariants. " +
+		"GROUNDING RULE: when a PACKAGES section is provided, the only package directories you may name " +
+		"in `backticks` are listed there, and the only symbol names you may name in `backticks` are the " +
+		"symbols listed under each package. Do not invent identifiers. " +
 		"No prose padding, no apologies, no restating the prompt. " +
 		"Only mention features explicitly present in the package summaries. Do not invent features " +
 		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
 		"syntax highlighting). If a feature is not stated in the inputs, omit it."
-	user := fmt.Sprintf("PACKAGE SUMMARIES:\n%s", strings.Join(pkgSummaries, "\n\n---\n\n"))
+	user := buildRepoUserPrompt(pkgSummaries, extra)
 	resp, err := cc.Generate(ctx, []chat.Message{
 		{Role: "system", Content: system},
 		{Role: "user", Content: user},
@@ -1082,6 +1108,28 @@ func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummar
 		return "", fmt.Errorf("repo summary truncated at %d tokens (finish_reason=length); raise MaxTokens", repoMaxTokens)
 	}
 	return strings.TrimSpace(resp.Content), nil
+}
+
+// buildRepoUserPrompt renders the user message: an optional PACKAGES
+// section that pairs each dir with its top-PageRank symbols, followed
+// by the joined package summaries. The PACKAGES section is omitted
+// when extra is empty — keeps the ungrounded fallback prompt
+// byte-identical to the pre-grounding shape.
+func buildRepoUserPrompt(pkgSummaries []string, extra repoGrounding) string {
+	var b strings.Builder
+	if !extra.empty() {
+		b.WriteString("PACKAGES (dir → top exported symbols):\n")
+		for _, p := range extra.Packages {
+			if len(p.TopSymbols) == 0 {
+				fmt.Fprintf(&b, "- %s\n", p.Dir)
+				continue
+			}
+			fmt.Fprintf(&b, "- %s → %s\n", p.Dir, strings.Join(p.TopSymbols, ", "))
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "PACKAGE SUMMARIES:\n%s", strings.Join(pkgSummaries, "\n\n---\n\n"))
+	return b.String()
 }
 
 // summarizeFile asks the chat endpoint for a tight, retrieval-friendly

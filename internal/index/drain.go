@@ -550,7 +550,7 @@ func (ix *Indexer) planPackageJobs(
 			filePaths[i] = e.path
 		}
 		sort.Strings(shas)
-		pkgSHA := chunkSHA(strings.Join(shas, ":"))
+		pkgSHA := chunkSHA(packageSummaryPromptVersion + "\x00" + strings.Join(shas, ":"))
 		if existingBatch[dir][pkgSHA] {
 			if err := ix.Store.TouchSeen(ctx, dir, pkgSHA, "", 0, 0, startTime); err != nil {
 				return nil, err
@@ -573,6 +573,7 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 	if conc < 1 {
 		conc = 1
 	}
+	modPath := readModulePath(ix.Proj.Root)
 	results := make([]*pending, len(jobs))
 	eg, egctx := errgroup.WithContext(ctx)
 	eg.SetLimit(conc)
@@ -583,7 +584,8 @@ func (ix *Indexer) runPackageJobs(ctx context.Context, startTime time.Time, jobs
 			if err != nil || len(fileSummaries) == 0 {
 				return nil
 			}
-			summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries)
+			grounding := ix.fetchPackageGrounding(egctx, j.dir, modPath)
+			summary, err := summarizePackage(egctx, ix.Options.Chat, ix.Options.SummaryModels.Package, j.dir, fileSummaries, grounding)
 			if err != nil {
 				ix.Options.Logger.Warn("package summarize failed", "dir", j.dir, "err", err)
 				return nil
@@ -658,17 +660,32 @@ const repoSummaryMaxPackages = 15
 // so a prompt change naturally invalidates every cached repo_summary
 // on the next cascade. Bump when summarizeRepo's prompt changes shape
 // in a way that should re-run on already-summarized projects.
-const repoSummaryPromptVersion = "v3"
+//
+// v4 — added the graph-grounded PACKAGES section + grounding rule.
+const repoSummaryPromptVersion = "v4"
+
+// packageSummaryPromptVersion mirrors repoSummaryPromptVersion for the
+// per-package summaries. Folded into pkgSHA at both Pass 5 and the
+// drainer so a prompt iteration re-runs `summarizePackage` on the
+// next index regardless of whether file SHAs changed. Bump when
+// summarizePackage's prompt or grounding shape changes.
+//
+// v1 — initial version, accompanies the graph-grounded prompt rollout
+// (EXPORTED SYMBOLS + PROJECT IMPORTS sections).
+const packageSummaryPromptVersion = "v1"
 
 // topRepoSummaryInput loads package summaries, sorts them by
 // PackageCentrality DESC, and returns the top-N (capped at
 // repoSummaryMaxPackages). Falls back to unsorted input if the
 // centrality query fails — the summary is best-effort enrichment, not
-// worth blocking on. Returns nil when no package summaries exist yet.
-func (ix *Indexer) topRepoSummaryInput(ctx context.Context) ([]string, error) {
+// worth blocking on. Returns nil slices when no package summaries
+// exist yet. The two returned slices are parallel: dirs[i] owns
+// contents[i], so callers fetch graph grounding aligned with the
+// summary order the model sees.
+func (ix *Indexer) topRepoSummaryInput(ctx context.Context) (contents, dirs []string, err error) {
 	pkgRows, err := ix.Store.SummariesByKindWithMeta(ctx, chunk.KindPackageSummary)
 	if err != nil || len(pkgRows) == 0 {
-		return nil, err
+		return nil, nil, err
 	}
 	centrality, cerr := ix.Store.PackageCentrality(ctx)
 	if cerr == nil && centrality != nil {
@@ -690,11 +707,13 @@ func (ix *Indexer) topRepoSummaryInput(ctx context.Context) ([]string, error) {
 		}
 		ix.Options.Logger.Info("repo summary input", "count", len(pkgRows), "paths", strings.Join(paths, ","))
 	}
-	out := make([]string, len(pkgRows))
+	contents = make([]string, len(pkgRows))
+	dirs = make([]string, len(pkgRows))
 	for i, r := range pkgRows {
-		out[i] = r.Content
+		contents[i] = r.Content
+		dirs[i] = r.Path
 	}
-	return out, nil
+	return contents, dirs, nil
 }
 
 // cascadeRepoSummary regenerates the repo_summary chunk from the
@@ -706,7 +725,7 @@ func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, 
 	if ctx.Err() != nil {
 		return 0, nil
 	}
-	pkgSummaries, err := ix.topRepoSummaryInput(ctx)
+	pkgSummaries, pkgDirs, err := ix.topRepoSummaryInput(ctx)
 	if err != nil || len(pkgSummaries) == 0 {
 		return 0, nil
 	}
@@ -717,7 +736,8 @@ func (ix *Indexer) cascadeRepoSummary(ctx context.Context, startTime time.Time, 
 		}
 		return 0, nil
 	}
-	summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries)
+	grounding := ix.fetchRepoGrounding(ctx, pkgDirs)
+	summary, err := summarizeRepo(ctx, ix.Options.Chat, ix.Options.SummaryModels.Repo, pkgSummaries, grounding)
 	if err != nil {
 		ix.Options.Logger.Warn("repo summarize failed", "err", err)
 		return 0, nil
