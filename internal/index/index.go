@@ -1048,11 +1048,16 @@ func summarizePackage(ctx context.Context, cc *chat.Client, model, dir string, f
 func summarizeRepo(ctx context.Context, cc *chat.Client, model string, pkgSummaries []string) (string, error) {
 	const repoMaxTokens = 4096
 	const system = "You are a code summarizer. Given prose summaries of every package in a repository, " +
-		"write ONE prose paragraph of 3-5 sentences describing what the repository does overall. " +
-		"HARD LIMITS: exactly one paragraph; never exceed 5 sentences; no bullet points; no markdown headers; " +
-		"no enumeration of packages (do NOT write 'package X does Y; package Z does W; …' for every package). " +
-		"Synthesize across packages — name only the architecturally significant ones inline, " +
-		"describe the main data flow or pipeline, note any architectural constraints or invariants. " +
+		"write ONE prose paragraph of 3-5 sentences describing what the REPOSITORY does overall. " +
+		"FIRST SENTENCE: must describe the repository's overall purpose. Begin with 'This repository' " +
+		"or 'The <name> repository'. NEVER begin by describing a single package's purpose. " +
+		"HARD LIMITS: exactly ONE paragraph (no blank lines, no separate sections); never exceed 5 sentences; " +
+		"NO markdown syntax of any kind — no headers (no '#', '##', '###'), no bullets (no '-' or '*' lists), " +
+		"no numbered lists (no '1.', '2.'), no code blocks (no triple backticks), no bold/italic. " +
+		"Plain prose only. " +
+		"Do NOT enumerate packages one by one. Synthesize across the inputs — name only 3-5 " +
+		"architecturally significant packages inline as `backticks`, describe the main data flow or " +
+		"pipeline, note any key architectural constraints or invariants. " +
 		"No prose padding, no apologies, no restating the prompt. " +
 		"Only mention features explicitly present in the package summaries. Do not invent features " +
 		"by associating library names with their common uses (e.g. Tree-sitter does not imply " +
