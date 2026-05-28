@@ -94,6 +94,8 @@ func main() {
 		err = cmdReindex(ctx, args)
 	case "mcp":
 		err = cmdMCP(ctx, args)
+	case "serve":
+		err = cmdServe(ctx, args)
 	case "watch":
 		err = cmdWatch(ctx, args)
 	case "clone":
@@ -202,6 +204,10 @@ build / maintenance:
                                           --dry-run. Pre-commit usage:
                                           `+"`dex index <path> && dex guide <path>`"+`
   dex mcp                            run as an MCP server over stdio
+  dex serve [flags] --project <p>    run as an HTTP daemon (multi-project).
+                                          Flags: --addr=:8080 (default loopback
+                                          when no token), --project (repeatable).
+                                          DEX_SERVE_TOKEN gates non-loopback.
   dex version                        print the build version
 
 env:
