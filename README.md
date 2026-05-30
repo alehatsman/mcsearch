@@ -211,8 +211,12 @@ no shell). For a host-bound `/cache`, add `--user "$(id -u):$(id -g)"`
 `.gitignore` is respected. A built-in `.dexignore` skips
 `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`, `secrets.yml`,
 `*.tfvars`, `.terraform/`, `node_modules/`, `vendor/`, `.venv/`,
-`__pycache__/`, `target/`, `dist/`, `build/`. Files matching common
-secret patterns in their first 4 KB are skipped at index time.
+`__pycache__/`, `target/`, `dist/`, `build/`. It also skips generated /
+aggregated artifacts that would otherwise pass the extension allow-list:
+`*.d.ts`, `llms.txt` / `llms-full.txt`, JS lockfiles (`package-lock.json`,
+`pnpm-lock.yaml`, `npm-shrinkwrap.json`), and `coverage/`, `.nyc_output/`,
+`htmlcov/`, `__snapshots__/`. Files matching common secret patterns in
+their first 4 KB are skipped at index time.
 
 ## License
 

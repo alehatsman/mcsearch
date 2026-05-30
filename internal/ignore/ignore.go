@@ -84,6 +84,20 @@ var DefaultPatterns = []string{
 	"*.lock",
 	"*.min.js",
 	"*.min.css",
+	// Generated / aggregated artifacts. These pass the extension
+	// allow-list (.ts / .txt / .json / .yaml) but hold machine-emitted
+	// content — duplicated prose or churned dependency graphs — that
+	// pollutes RAG with chunks unrelated to the source.
+	"*.d.ts",            // generated TypeScript type declarations
+	"llms.txt",          // llms.txt convention: generated doc aggregation
+	"llms-full.txt",     // expanded llms.txt variant
+	"package-lock.json", // npm lockfile (.json, slips past *.lock)
+	"npm-shrinkwrap.json",
+	"pnpm-lock.yaml", // pnpm lockfile (.yaml, slips past *.lock)
+	"coverage/",      // test-coverage output
+	".nyc_output/",
+	"htmlcov/",
+	"__snapshots__/", // jest/vitest snapshot fixtures
 	// License / legal-text files. They index successfully but their
 	// uniform legalese gives the embedder something to latch onto for
 	// almost any query, polluting RAG context with chunks that have
