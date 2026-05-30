@@ -158,12 +158,15 @@ func TestPruneUnseen(t *testing.T) {
 	}
 }
 
-// TestPruneUnseenPreservesSummaries verifies that package_summary and
-// repo_summary rows survive PruneUnseen even when they're older than
-// the cutoff. Without this protection, defer-mode index passes (used
-// by `dex watch` and the MCP auto-watcher) would destroy good
-// summaries every fire — they skip Pass 5/6 so they never bump
-// last_seen_at on these rows.
+// TestPruneUnseenPreservesSummaries verifies that a live directory's
+// package_summary and the repo_summary survive PruneUnseen even when
+// they're older than the cutoff. Without this protection, defer-mode
+// index passes (used by `dex watch` and the MCP auto-watcher) would
+// destroy good summaries every fire — they skip Pass 5/6 so they never
+// bump last_seen_at on these rows. "Live" means the dir still has a
+// surviving descendant content chunk (cmd/dex/main.go below); a summary
+// for a dir with no surviving content is an orphan and is dropped — see
+// TestPruneUnseenDropsOrphanedPackageSummary.
 func TestPruneUnseenPreservesSummaries(t *testing.T) {
 	st, ctx := newStore(t)
 	t0 := time.Now()
@@ -173,33 +176,98 @@ func TestPruneUnseenPreservesSummaries(t *testing.T) {
 		{Path: ".", Kind: "repo_summary", ContentSHA: "r1", Content: "repo summary", Vec: []float32{1, 1}},
 	}, t0)
 
-	// Don't touch anything; advance the clock and prune. The function
-	// chunk should die, the two summary rows should survive.
+	// A file under cmd/dex re-seen at the cutoff keeps that dir live, so
+	// its package_summary must survive. stale.go is left untouched and
+	// must be pruned.
 	t1 := t0.Add(time.Millisecond)
+	_ = st.UpsertMany(ctx, []PendingChunk{
+		{Path: "cmd/dex/main.go", Kind: "function_declaration", ContentSHA: "h2", Content: "live fn", Vec: []float32{0, 1}},
+	}, t1)
+
 	n, err := st.PruneUnseen(ctx, t1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if n != 1 {
-		t.Errorf("pruned %d rows, want 1 (only function_declaration)", n)
+		t.Errorf("pruned %d rows, want 1 (only stale.go)", n)
 	}
 
 	survivors := make(map[string]bool)
-	rows, err := st.db.QueryContext(ctx, `SELECT kind FROM chunks`)
+	rows, err := st.db.QueryContext(ctx, `SELECT kind || ':' || path FROM chunks`)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var kind string
-		_ = rows.Scan(&kind)
-		survivors[kind] = true
+		var row string
+		_ = rows.Scan(&row)
+		survivors[row] = true
 	}
-	if !survivors["package_summary"] || !survivors["repo_summary"] {
-		t.Errorf("summaries pruned: survivors=%v", survivors)
+	if !survivors["package_summary:cmd/dex"] || !survivors["repo_summary:."] {
+		t.Errorf("live-dir summaries pruned: survivors=%v", survivors)
 	}
-	if survivors["function_declaration"] {
-		t.Errorf("function_declaration should have been pruned")
+	if survivors["function_declaration:stale.go"] {
+		t.Errorf("stale.go should have been pruned")
+	}
+}
+
+// TestPruneUnseenDropsOrphanedPackageSummary verifies the converse: once
+// every file under a directory is gone, its package_summary is dropped
+// (it can't be reached by the kind-excluded staleness delete and the
+// drainer never regenerates it). A sibling live dir's summary and the
+// repo_summary are untouched.
+func TestPruneUnseenDropsOrphanedPackageSummary(t *testing.T) {
+	st, ctx := newStore(t)
+	t0 := time.Now()
+	_ = st.UpsertMany(ctx, []PendingChunk{
+		{Path: "gone/x.go", Kind: "function_declaration", ContentSHA: "g1", Content: "doomed fn", Vec: []float32{1, 0}},
+		{Path: "gone", Kind: "package_summary", ContentSHA: "gp", Content: "gone pkg", Vec: []float32{0, 1}},
+		{Path: "live/y.go", Kind: "function_declaration", ContentSHA: "l1", Content: "live fn", Vec: []float32{1, 1}},
+		{Path: "live", Kind: "package_summary", ContentSHA: "lp", Content: "live pkg", Vec: []float32{1, 0}},
+		{Path: ".", Kind: "repo_summary", ContentSHA: "r1", Content: "repo summary", Vec: []float32{0, 1}},
+	}, t0)
+
+	// live/ is re-seen (its dir still exists); gone/ is not — its file
+	// vanished. Prune at the cutoff.
+	t1 := t0.Add(time.Millisecond)
+	_ = st.UpsertMany(ctx, []PendingChunk{
+		{Path: "live/y.go", Kind: "function_declaration", ContentSHA: "l1", Content: "live fn", Vec: []float32{1, 1}},
+	}, t1)
+
+	n, err := st.PruneUnseen(ctx, t1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// gone/x.go (stale content) + gone (orphaned package_summary).
+	if n != 2 {
+		t.Errorf("pruned %d rows, want 2 (gone/x.go + gone package_summary)", n)
+	}
+
+	survivors := make(map[string]bool)
+	rows, err := st.db.QueryContext(ctx, `SELECT kind || ':' || path FROM chunks`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var row string
+		_ = rows.Scan(&row)
+		survivors[row] = true
+	}
+	if survivors["package_summary:gone"] {
+		t.Errorf("orphaned package_summary 'gone' should have been dropped: survivors=%v", survivors)
+	}
+	if !survivors["package_summary:live"] {
+		t.Errorf("live-dir package_summary 'live' should survive: survivors=%v", survivors)
+	}
+	if !survivors["repo_summary:."] {
+		t.Errorf("repo_summary should always survive: survivors=%v", survivors)
+	}
+	if survivors["function_declaration:gone/x.go"] {
+		t.Errorf("gone/x.go should have been pruned")
+	}
+	if !survivors["function_declaration:live/y.go"] {
+		t.Errorf("live/y.go should survive")
 	}
 }
 

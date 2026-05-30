@@ -757,19 +757,34 @@ func (s *Store) TouchPath(ctx context.Context, path string, now time.Time) (int6
 	return res.RowsAffected()
 }
 
-// PruneUnseen deletes chunks last seen before `cutoff`. Call at the end
-// of a re-index to remove stale rows for files that disappeared.
+// PruneUnseen deletes chunks last seen before `cutoff`, then drops any
+// package_summary left orphaned by that delete. Call at the end of a
+// re-index to remove stale rows for files that disappeared.
 //
-// Excludes `package_summary` and `repo_summary` kinds. Defer-mode index
-// passes (used by `dex watch` and the MCP auto-watcher) skip Pass 5/6
-// entirely, which means they never bump last_seen_at on those rows —
-// pruning would then destroy good summaries every time the watcher
-// fires, and the next `dex guide` run would error with "no summaries".
-// The drainer's cascadePackageAndRepo regenerates them when their
-// content_sha1 cache key drifts; stale rows are unlikely (package
-// content rarely changes file-set composition) and a `dex reindex`
-// clears them. Better to keep a slightly-stale 32b-generated overview
-// than to drop the only one we have.
+// The staleness delete excludes `package_summary` and `repo_summary` by
+// kind. Defer-mode index passes (used by `dex watch` and the MCP
+// auto-watcher) skip Pass 5/6 entirely, which means they never bump
+// last_seen_at on those rows — a staleness test would then destroy good
+// summaries every time the watcher fires, and the next `dex guide` run
+// would error with "no summaries".
+//
+// But that kind-exclusion also stranded summaries for *deleted*
+// directories: once a dir's files are gone, its package_summary can
+// never be reached by the staleness delete and the drainer never
+// regenerates it (there's nothing left to summarize), so it lingered in
+// search until a full `dex reindex`. So after the content delete we
+// drop any package_summary with no surviving descendant content chunk.
+// A live directory still has content chunks (the walk's mtime/SHA
+// fast-path bumps their last_seen_at every fire), so its summary is
+// preserved exactly as before — only genuinely orphaned ones go. The
+// descendant probe uses a [path/, path0) range ('0' is the byte after
+// '/') so idx_chunks_path serves it instead of a full scan.
+//
+// repo_summary (path ".") is left alone: it's a single regenerated row,
+// and its prefix range wouldn't match the un-prefixed content paths
+// anyway. The root package_summary (path "." too, from filepath.Dir of a
+// root file) is excluded for the same reason — its descendants are the
+// repo's root files, which don't start with "./".
 func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM chunks
@@ -779,7 +794,23 @@ func (s *Store) PruneUnseen(ctx context.Context, cutoff time.Time) (int64, error
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	n, _ := res.RowsAffected()
+
+	res2, err := s.db.ExecContext(ctx,
+		`DELETE FROM chunks
+		   WHERE kind = 'package_summary'
+		     AND chunks.path NOT IN ('.', '')
+		     AND NOT EXISTS (
+		           SELECT 1 FROM chunks c
+		            WHERE c.kind NOT IN ('package_summary','repo_summary')
+		              AND c.path >= chunks.path || '/'
+		              AND c.path <  chunks.path || '0'
+		         )`)
+	if err != nil {
+		return n, err
+	}
+	n2, _ := res2.RowsAffected()
+	return n + n2, nil
 }
 
 // DeleteOtherSummariesForPath removes every chunk at (path, kind) whose
