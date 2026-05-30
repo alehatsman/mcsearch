@@ -30,6 +30,19 @@ func TestDefaultsIgnoreVendorDirs(t *testing.T) {
 		{"id_ed25519.pub", false, true},
 		{"secrets.yml", false, true},
 		{"foo.min.js", false, true},
+		// generated / aggregated artifacts that slip past the
+		// extension allow-list (.ts / .txt / .json / .yaml).
+		{"types/index.d.ts", false, true},
+		{"foo.d.ts", false, true},
+		{"llms.txt", false, true},
+		{"llms-full.txt", false, true},
+		{"package-lock.json", false, true},
+		{"npm-shrinkwrap.json", false, true},
+		{"pnpm-lock.yaml", false, true},
+		{"coverage/lcov.info", false, true},
+		{".nyc_output/out.json", false, true},
+		{"htmlcov/index.html", false, true},
+		{"src/__snapshots__/App.test.tsx.snap", false, true},
 		// license-family files: ignored at the gitignore layer so
 		// their uniform legalese can't pollute RAG.
 		{"LICENSE", false, true},
@@ -51,6 +64,11 @@ func TestDefaultsIgnoreVendorDirs(t *testing.T) {
 		{"README.md", false, false},
 		{"CHANGELOG.md", false, false},
 		{".github/workflows/ci.yml", false, false},
+		// hand-written TS/JSON/txt must stay indexable — *.d.ts and the
+		// lockfile/llms patterns must not over-match.
+		{"src/main.ts", false, false},
+		{"config.json", false, false},
+		{"notes.txt", false, false},
 	}
 	for _, c := range cases {
 		got := m.Match(c.path, c.isDir)
