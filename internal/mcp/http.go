@@ -206,6 +206,7 @@ func (s *Server) buildHTTPHandler(opts RunHTTPOptions) http.Handler {
 	authed.HandleFunc("POST /v1/projects/{id}/ask", s.handleAsk(opts.Projects))
 	authed.HandleFunc("POST /v1/projects/{id}/search/semantic", s.handleSearch(opts.Projects))
 	authed.HandleFunc("POST /v1/projects/{id}/search/symbol", s.handleFindSymbol(opts.Projects))
+	authed.HandleFunc("GET /v1/projects/{id}/summaries", s.handleSummaries(opts.Projects))
 	authed.HandleFunc("POST /v1/projects/{id}/graph/neighbors", s.handleRelated(opts.Projects))
 	authed.HandleFunc("POST /v1/projects/{id}/graph/deps", s.handleGraphDeps(opts.Projects))
 	authed.HandleFunc("POST /v1/projects/{id}/graph/callers", s.handleGraphCallers(opts.Projects))

@@ -1067,6 +1067,47 @@ func (s *Store) SummariesByKindWithMeta(ctx context.Context, kind string) ([]Sum
 	return out, rows.Err()
 }
 
+// SummaryChunk is one enumerated summary row: the path it describes, its kind
+// (file_summary | package_summary | repo_summary), and the prose.
+type SummaryChunk struct {
+	Path    string
+	Kind    string
+	Content string
+}
+
+// AllSummaryChunks returns every file/package/repo summary chunk — the freshest
+// row per (path, kind), ordered by path then kind. Unlike SearchSummaries this
+// is a direct enumeration, no embedding/rerank, so callers get the complete,
+// stable set regardless of index size. Dedupe mirrors SummariesByKindWithMeta:
+// rows are ordered last_seen_at DESC within each (path, kind) group and only
+// the first (freshest) is kept.
+func (s *Store) AllSummaryChunks(ctx context.Context) ([]SummaryChunk, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT path, kind, content FROM chunks
+		   WHERE kind IN ('file_summary', 'package_summary', 'repo_summary')
+		   ORDER BY path, kind, last_seen_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []SummaryChunk
+	var lastPath, lastKind string
+	first := true
+	for rows.Next() {
+		var c SummaryChunk
+		if err := rows.Scan(&c.Path, &c.Kind, &c.Content); err != nil {
+			return nil, err
+		}
+		if !first && c.Path == lastPath && c.Kind == lastKind {
+			continue
+		}
+		out = append(out, c)
+		lastPath, lastKind = c.Path, c.Kind
+		first = false
+	}
+	return out, rows.Err()
+}
+
 // SearchSummaries runs a semantic search restricted to summary-kind chunks
 // (file_summary, package_summary, repo_summary). Fetches a larger candidate
 // pool than k to compensate for summaries being sparse relative to code
